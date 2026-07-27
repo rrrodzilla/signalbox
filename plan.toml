@@ -99,10 +99,10 @@ args = ["-s", "exec.error", "--", "jq", "-c", "."]
 subscribes = ["exec.error"]
 
 # Live watch: stream every interesting topic to the browser (bin/watch.sh
-# proxies this port so the dashboard needs no CORS). Ports are fixed per
-# topology: pipeline 8100, plan 8101, implement 8102, review 8103, init 8104.
+# proxies this port so the dashboard needs no CORS). Ports are allocated
+# per-repo at install time (__SIGNALBOX_PORT_*__, see install.sh); dev.sh renders 8100-8104.
 [[sinks]]
 name = "watchtower"
 path = "~/.local/share/emergent/primitives/bin/sse-sink"
-args = ["--port", "8101"]
+args = ["--port", "__SIGNALBOX_PORT_PLAN__"]
 subscribes = ["plan.requested", "plan.validated", "plan.approved", "plan.written", "plan.escalated", "exec.error", "system.started.*", "system.stopped.*", "system.error.*"]

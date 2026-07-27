@@ -3,13 +3,19 @@
 #
 #   bin/watch.sh [harness-dir]     (default: ./.claude/emergent)
 #
-# Serves http://localhost:${WATCH_PORT:-8099} with:
+# Serves the dashboard with:
 #   /                     the dashboard page
 #   /status               JSON snapshot of the disk artifacts (the same
 #                         terminals the phase runner and operator trust)
+#                         plus the discovered stream list
 #   /stream/<port>/events proxy to that topology's watchtower sse-sink,
 #                         so the browser needs no CORS and one origin
-#                         covers every engine (8100-8104)
+#                         covers every engine
+#
+# Nothing here assumes port numbers: the watchtower ports are discovered
+# by parsing the harness's rendered TOMLs (install.sh allocates a per-repo
+# block), and the page port is WATCH_PORT if set, else 8099, else an
+# ephemeral port — the URL actually bound is always printed.
 #
 # The artifact poll works even for engines started before the watchtower
 # sinks existed; the SSE streams light up whenever an engine with a
@@ -17,19 +23,25 @@
 set -euo pipefail
 
 HARNESS="${1:-$(pwd)/.claude/emergent}"
-PORT="${WATCH_PORT:-8099}"
 [ -d "$HARNESS" ] || { echo "no harness at $HARNESS (pass the .claude/emergent dir)" >&2; exit 64; }
 HARNESS="$(cd "$HARNESS" && pwd)"
 
-echo "signalbox watch: http://localhost:$PORT"
+# WATCH_PORT set -> bind exactly that or fail; unset -> 8099, then ephemeral.
+if [ -n "${WATCH_PORT:-}" ]; then MODE="strict"; PORT="$WATCH_PORT"; else MODE="auto"; PORT=8099; fi
+
 echo "harness: $HARNESS"
-exec python3 - "$HARNESS" "$PORT" <<'PYEOF'
-import json, os, sys, time
+exec python3 - "$HARNESS" "$PORT" "$MODE" <<'PYEOF'
+import errno, json, os, sys, time, tomllib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HARNESS = sys.argv[1]
 PORT = int(sys.argv[2])
+MODE = sys.argv[3]
+
+# The URL line must reach a redirected stdout immediately (the same
+# buffered-narration lesson as signalbox issue #1).
+sys.stdout.reconfigure(line_buffering=True)
 
 ARTIFACTS = [
     "plan.json",
@@ -43,7 +55,33 @@ ARTIFACTS = [
     "state/pipeline-review.stamp",
 ]
 
-STREAM_PORTS = {8100, 8101, 8102, 8103, 8104}
+# Filename -> stream label; emergent.toml is the review loop for legacy reasons.
+TOML_LABELS = [("pipeline.toml", "pipeline"), ("plan.toml", "plan"),
+               ("implement.toml", "implement"), ("emergent.toml", "review"),
+               ("init.toml", "init")]
+
+def discover_streams():
+    """Watchtower ports come from the harness's rendered TOMLs — never assumed.
+    Re-parsed per call so a harness reinstall shows up without a restart."""
+    streams = []
+    for fn, label in TOML_LABELS:
+        p = os.path.join(HARNESS, fn)
+        if not os.path.isfile(p):
+            continue
+        try:
+            with open(p, "rb") as fh:
+                cfg = tomllib.load(fh)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        for sink in cfg.get("sinks", []):
+            if sink.get("name") != "watchtower":
+                continue
+            args = sink.get("args", [])
+            try:
+                streams.append({"name": label, "port": int(args[args.index("--port") + 1])})
+            except (ValueError, IndexError):
+                pass
+    return streams
 
 def artifact_info(rel):
     p = os.path.join(HARNESS, rel)
@@ -70,6 +108,7 @@ def status():
                 st = os.stat(p)
                 logs.append({"file": n, "mtime": st.st_mtime, "size": st.st_size})
     return {"now": time.time(), "harness": HARNESS,
+            "streams": discover_streams(),
             "artifacts": {a: artifact_info(a) for a in ARTIFACTS},
             "logs": logs}
 
@@ -99,7 +138,7 @@ class Handler(BaseHTTPRequestHandler):
             except (IndexError, ValueError):
                 self._body(400, "text/plain", b"bad stream path")
                 return
-            if port not in STREAM_PORTS:
+            if port not in {s["port"] for s in discover_streams()}:
                 self._body(404, "text/plain", b"unknown stream port")
                 return
             self.proxy_sse(port)
@@ -181,11 +220,11 @@ td.age, td.size { color:var(--dim); white-space:nowrap; text-align:right; }
 .ev .topic { font-weight:600; }
 .ev pre { white-space:pre-wrap; word-break:break-word; color:var(--fg); margin-top:2px; }
 .ev details pre { max-height:240px; overflow-y:auto; }
-.ev.s8100 { border-color:var(--blue); } .ev.s8100 .topic { color:var(--blue); }
-.ev.s8101 { border-color:var(--purple); } .ev.s8101 .topic { color:var(--purple); }
-.ev.s8102 { border-color:var(--amber); } .ev.s8102 .topic { color:var(--amber); }
-.ev.s8103 { border-color:var(--green); } .ev.s8103 .topic { color:var(--green); }
-.ev.s8104 { border-color:var(--dim); }
+.ev.c0 { border-color:var(--blue); } .ev.c0 .topic { color:var(--blue); }
+.ev.c1 { border-color:var(--purple); } .ev.c1 .topic { color:var(--purple); }
+.ev.c2 { border-color:var(--amber); } .ev.c2 .topic { color:var(--amber); }
+.ev.c3 { border-color:var(--green); } .ev.c3 .topic { color:var(--green); }
+.ev.c4 { border-color:var(--dim); }
 .ev.err { border-color:var(--red); } .ev.err .topic { color:var(--red); }
 </style>
 </head>
@@ -211,22 +250,25 @@ td.age, td.size { color:var(--dim); white-space:nowrap; text-align:right; }
   </div>
 </div>
 <script>
-const STREAMS = [
-  {port:8100, name:"pipeline"},
-  {port:8101, name:"plan"},
-  {port:8102, name:"implement"},
-  {port:8103, name:"review"},
-  {port:8104, name:"init"},
-];
+// Streams are discovered server-side from the harness TOMLs and delivered
+// via /status — the page assumes no port numbers.
+const STREAMS = [];
 const PHASES = ["plan","implement","review","promote"];
 let promoteState = "pending";
 const $ = id => document.getElementById(id);
 
-STREAMS.forEach(s => {
-  const b = document.createElement("span");
-  b.className = "badge"; b.id = "badge-" + s.port; b.textContent = s.name;
-  $("badges").appendChild(b);
-});
+function ensureStreams(list) {
+  for (const s of list || []) {
+    if (STREAMS.some(x => x.port === s.port)) continue;
+    s.cls = "c" + (STREAMS.length % 5);
+    STREAMS.push(s);
+    const b = document.createElement("span");
+    b.className = "badge"; b.id = "badge-" + s.port;
+    b.textContent = s.name + " :" + s.port;
+    $("badges").appendChild(b);
+    attach(s);
+  }
+}
 PHASES.forEach(p => {
   const d = document.createElement("div");
   d.className = "phase pending"; d.id = "phase-" + p;
@@ -275,6 +317,7 @@ function derive(s) {
 async function poll() {
   try {
     const s = await (await fetch("/status")).json();
+    ensureStreams(s.streams);
     const a = s.artifacts, pj = a["plan.json"];
     if (pj.exists && pj.json)
       $("feature").textContent = pj.json.feature + " · issue #" + pj.json.issue;
@@ -317,7 +360,7 @@ function addEvent(stream, topic, dataText) {
   if (t === "pipeline.complete") promoteState = pl && pl.parked ? "parked" : "done";
   if (t === "pipeline.halted") { if (pl && pl.phase === "promote") promoteState = "failed"; }
   const div = document.createElement("div");
-  div.className = "ev s" + stream.port + (t.includes("error") || t.includes("escalated") || t.includes("halted") ? " err" : "");
+  div.className = "ev " + stream.cls + (t.includes("error") || t.includes("escalated") || t.includes("halted") ? " err" : "");
   // sse-sink envelope: {id, type, source, timestamp, payload}
   const body = obj && obj.payload !== undefined ? JSON.stringify(obj.payload, null, 1)
              : obj ? JSON.stringify(obj, null, 1) : dataText;
@@ -367,13 +410,24 @@ async function attach(stream) {
 }
 
 poll();
-STREAMS.forEach(attach);
 </script>
 </body>
 </html>
 """
 
-srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+try:
+    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+except OSError as e:
+    if e.errno != errno.EADDRINUSE:
+        raise
+    if MODE == "strict":
+        print(f"WATCH_PORT={PORT} is already in use", file=sys.stderr)
+        sys.exit(65)
+    # Default port busy (another repo's dashboard?) — take an ephemeral one.
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 srv.daemon_threads = True
+ports = ", ".join(f"{s['name']}:{s['port']}" for s in discover_streams()) or "none found"
+print(f"signalbox watch: http://localhost:{srv.server_address[1]}")
+print(f"streams: {ports}")
 srv.serve_forever()
 PYEOF

@@ -15,6 +15,14 @@ shift || true
 [ -f "$ROOT/$CFG" ] || { echo "error: no $CFG in $ROOT" >&2; exit 64; }
 
 mkdir -p "$ROOT/rendered"
-sed "s|__SIGNALBOX_ROOT__|$ROOT|g" "$ROOT/$CFG" >"$ROOT/rendered/$CFG"
+# Prototype runs get the default port block (install.sh allocates per-repo).
+sed -e "s|__SIGNALBOX_ROOT__|$ROOT|g" \
+    -e "s|__SIGNALBOX_PORT_PIPELINE__|8100|g" \
+    -e "s|__SIGNALBOX_PORT_PLAN__|8101|g" \
+    -e "s|__SIGNALBOX_PORT_IMPLEMENT__|8102|g" \
+    -e "s|__SIGNALBOX_PORT_REVIEW__|8103|g" \
+    -e "s|__SIGNALBOX_PORT_INIT__|8104|g" \
+    -e "s|__SIGNALBOX_PORT_APPROVAL__|8105|g" \
+    "$ROOT/$CFG" >"$ROOT/rendered/$CFG"
 
 exec emergent --config "$ROOT/rendered/$CFG" "$@"

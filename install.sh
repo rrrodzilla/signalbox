@@ -153,9 +153,32 @@ cp "$SRC"/prompts/*.md "$DEST/prompts/"
 # Target mode reviews the feature diff, not a whole demo crate.
 mv "$DEST/prompts/review-target.md" "$DEST/prompts/review.md"
 
-# Render the topologies: bake the install path, namespace the engines.
+# Per-repo watchtower ports: two repos running signalbox at once must not
+# fight over the SSE ports — a colliding sse-sink dies at startup with an
+# uncaught AddrInUse and that run silently loses its event stream. Each
+# repo gets a stable base from a tiny registry; offsets are pipeline+0,
+# plan+1, implement+2, review+3, init+4. bin/watch.sh discovers the
+# rendered ports from the harness TOMLs, so nothing else hardcodes them.
+PORT_REG="$HOME/.local/share/signalbox/ports.json"
+mkdir -p "$(dirname "$PORT_REG")"
+[ -s "$PORT_REG" ] || echo '{}' >"$PORT_REG"
+PORT_BASE="$(jq -r --arg repo "$REPO" '.[$repo] // empty' "$PORT_REG")"
+if [ -z "$PORT_BASE" ]; then
+    PORT_BASE="$(jq -r '[.[]] | (max // 8090) + 10' "$PORT_REG")"
+    jq --arg repo "$REPO" --argjson base "$PORT_BASE" '.[$repo] = $base' "$PORT_REG" >"$PORT_REG.tmp" \
+        && mv "$PORT_REG.tmp" "$PORT_REG"
+fi
+
+# Render the topologies: bake the install path, namespace the engines,
+# assign the allocated watchtower ports.
 for t in emergent.toml implement.toml init.toml plan.toml pipeline.toml; do
     sed -e "s|__SIGNALBOX_ROOT__|$DEST|g" \
+        -e "s|__SIGNALBOX_PORT_PIPELINE__|$PORT_BASE|g" \
+        -e "s|__SIGNALBOX_PORT_PLAN__|$((PORT_BASE + 1))|g" \
+        -e "s|__SIGNALBOX_PORT_IMPLEMENT__|$((PORT_BASE + 2))|g" \
+        -e "s|__SIGNALBOX_PORT_REVIEW__|$((PORT_BASE + 3))|g" \
+        -e "s|__SIGNALBOX_PORT_INIT__|$((PORT_BASE + 4))|g" \
+        -e "s|__SIGNALBOX_PORT_APPROVAL__|$((PORT_BASE + 5))|g" \
         -e "s|signalbox-review-loop|$REPO-review-loop|g" \
         -e "s|signalbox-implement-stream|$REPO-implement-stream|g" \
         -e "s|signalbox-init|$REPO-init|g" \
@@ -181,8 +204,9 @@ SEED_WORKDIR="$INT_WT"
 # GATE_CMD is the detected-or-supplied gate, runs in GATE_DIR, and is safe to hand-edit.
 ENV
 printf 'GATE_CMD=%q\n' "$GATE_CMD" >>"$DEST/bin/_env.sh"
+printf 'APPROVAL_PORT=%q\n' "$((PORT_BASE + 5))" >>"$DEST/bin/_env.sh"
 cat >>"$DEST/bin/_env.sh" <<'ENV'
-export ROOT REPO_ROOT WT_BASE FEATURE BASE_BRANCH INT_BRANCH INT_WT GATE_DIR ENGINE_PREFIX SEED_WORKDIR GATE_CMD
+export ROOT REPO_ROOT WT_BASE FEATURE BASE_BRANCH INT_BRANCH INT_WT GATE_DIR ENGINE_PREFIX SEED_WORKDIR GATE_CMD APPROVAL_PORT
 ENV
 
 chmod +x "$DEST"/bin/*.sh
@@ -204,6 +228,7 @@ grep -qxF '.claude' "$GIT_COMMON/info/exclude" 2>/dev/null \
 echo "installed: $DEST"
 echo "engines:   $REPO-pipeline (+ $REPO-init, $REPO-plan, $REPO-implement-stream, $REPO-review-loop)"
 echo "gate:      $GATE_CMD"
+echo "watch:     SSE ports $PORT_BASE-$((PORT_BASE + 4)), approval webhook $((PORT_BASE + 5)) ($PORT_REG); dashboard: $DEST/bin/watch.sh"
 echo "next:      emergent --config $DEST/init.toml                    (fill the vault, once per repo)"
 echo "           SIGNALBOX_ISSUE=<n> emergent --config $DEST/pipeline.toml (issue -> plan -> implement -> review,"
 echo "                                                                 Fable operating the phase seams)"

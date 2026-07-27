@@ -19,11 +19,11 @@ pid_alive() {
 }
 
 # Exact process start identity: "<boot epoch>:<start time in clock ticks>",
-# both read from /proc. Recorded in launch.json at spawn so bin/watch.sh can
-# tell this engine apart from a later, unrelated process that merely inherited
-# its PID — a PID alone is not an identity. Pairing the tick count with btime
-# keeps it exact across reboots, which reset both. Prints nothing and returns 1
-# when /proc cannot answer.
+# both read from /proc. Recorded in launch.json at spawn so metadata consumers
+# can tell this engine apart from a later, unrelated process that merely
+# inherited its PID — a PID alone is not an identity. Pairing the tick count
+# with btime keeps it exact across reboots, which reset both. Prints nothing
+# and returns 1 when /proc cannot answer.
 proc_identity() {
     local PID_VALUE="$1" STAT_LINE BTIME
     local -a FIELDS
@@ -257,12 +257,7 @@ trap 'exit 143' TERM
 
 BASE="$(SIGNALBOX_LEASE_PID="$$" "$ROOT/bin/ports.sh" lease "$RUN_SLUG")"
 LEASED=1
-PORT_PIPELINE="$BASE"
-PORT_PLAN="$((BASE + 1))"
-PORT_IMPLEMENT="$((BASE + 2))"
-PORT_REVIEW="$((BASE + 3))"
-PORT_INIT="$((BASE + 4))"
-PORT_APPROVAL="$((BASE + 5))"
+PORT_APPROVAL="$BASE"
 
 for TEMPLATE_NAME in pipeline plan implement emergent init; do
     if [ ! -f "$ROOT/templates/$TEMPLATE_NAME.toml" ]; then
@@ -271,11 +266,6 @@ for TEMPLATE_NAME in pipeline plan implement emergent init; do
     fi
     sed \
         -e "s|__SIGNALBOX_RUN_SUFFIX__|-$RUN_SLUG|g" \
-        -e "s|__SIGNALBOX_PORT_PIPELINE__|$PORT_PIPELINE|g" \
-        -e "s|__SIGNALBOX_PORT_PLAN__|$PORT_PLAN|g" \
-        -e "s|__SIGNALBOX_PORT_IMPLEMENT__|$PORT_IMPLEMENT|g" \
-        -e "s|__SIGNALBOX_PORT_REVIEW__|$PORT_REVIEW|g" \
-        -e "s|__SIGNALBOX_PORT_INIT__|$PORT_INIT|g" \
         -e "s|__SIGNALBOX_PORT_APPROVAL__|$PORT_APPROVAL|g" \
         "$ROOT/templates/$TEMPLATE_NAME.toml" >"$RUN_DIR/$TEMPLATE_NAME.toml"
 done
@@ -306,11 +296,6 @@ jq -n \
     --arg implement_engine "$IMPLEMENT_ENGINE" \
     --arg review_engine "$REVIEW_ENGINE" \
     --arg init_engine "$INIT_ENGINE" \
-    --argjson pipeline_port "$PORT_PIPELINE" \
-    --argjson plan_port "$PORT_PLAN" \
-    --argjson implement_port "$PORT_IMPLEMENT" \
-    --argjson review_port "$PORT_REVIEW" \
-    --argjson init_port "$PORT_INIT" \
     --argjson approval_port "$PORT_APPROVAL" \
     --arg log "$LOG" \
     --arg started "$STARTED" \
@@ -327,11 +312,6 @@ jq -n \
             init: $init_engine
         },
         ports: {
-            pipeline: $pipeline_port,
-            plan: $plan_port,
-            implement: $implement_port,
-            review: $review_port,
-            init: $init_port,
             approval: $approval_port
         },
         log: $log,
@@ -354,11 +334,10 @@ mv "$LAUNCH_TEMP" "$LAUNCH"
 printf 'run:       %s\n' "$RUN_SLUG"
 printf 'issue:     %s\n' "$ISSUE"
 printf 'engine:    %s\n' "$ENGINE_NAME"
-printf 'ports:     %s-%s (watchtower %s-%s; approval %s)\n' \
-    "$BASE" "$PORT_APPROVAL" "$BASE" "$PORT_INIT" "$PORT_APPROVAL"
+printf 'ports:     approval webhook %s\n' "$PORT_APPROVAL"
 printf 'log:       %s\n' "$LOG"
 printf 'run dir:   %s\n' "$RUN_DIR"
-printf 'watch:     %s/bin/watch.sh %s\n' "$ROOT" "$RUN_DIR"
+printf 'watch:     http://127.0.0.1:%s/\n' "${SIGNALBOX_SINK_PORT:-8099}"
 
 if wait "$CHILD_PID"; then
     CHILD_STATUS=0

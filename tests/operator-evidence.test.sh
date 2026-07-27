@@ -6,6 +6,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# An object id is as long as the repository's hash — 40 hex characters under
+# SHA-1, 64 under SHA-256 — so every assertion about a pinned read accepts
+# either length rather than failing correct output from a SHA-256 repository.
+OID_RE='[0-9a-fA-F]{40}|[0-9a-fA-F]{64}'
 FIXTURES=()
 TESTS_RUN=0
 TESTS_PASSED=0
@@ -285,7 +289,7 @@ read_only_git_rules() {
     local FEATURE_RULES=0
     local PINNED_READ_RULES=0
     local PINNED_PATH=""
-    local PINNED_RULE_RE='^Bash\(git show ([0-9a-fA-F]{40}):([A-Za-z0-9._/-]+)\)$'
+    local PINNED_RULE_RE="^Bash\(git show ($OID_RE):([A-Za-z0-9._/-]+)\)\$"
 
     while IFS= read -r RULE; do
         case "$RULE" in
@@ -605,7 +609,7 @@ if jq -e \
             and (has("tip_files_truncated") | not)
             and (has("tip_files_limit") | not)' \
         <<<"$BRANCH_EVIDENCE" >/dev/null \
-    && ! grep -E '^Bash\(git show [0-9a-fA-F]{40}:' \
+    && ! grep -E "^Bash\(git show ($OID_RE):" \
         "$ARGV_CAPTURE" >/dev/null \
     && valid_proceed_payload; then
     OK=0
@@ -754,10 +758,15 @@ report_case "tip-pinned reads are granted exactly and read tip content" \
 
 # 15. Paths that cannot be one safe rule token remain visible as content
 # evidence, but neither their published entries nor allowedTools grant a read.
+# The quoted path also pins the listing format: git C-quotes a path carrying a
+# double quote in line-delimited output, and that spelling names no tree entry,
+# so an evidence list built from it would publish a path the branch does not
+# contain and report the real file as absent.
 setup_harness
 seed_plan "fixture-feature"
 SPACE_PATH="with space.txt"
 COMMAND_PATH='$(id).txt'
+QUOTE_PATH='say"quote.txt'
 git_fixture "$REPO_ROOT_PATH" init -q -b main
 printf '%s\n' base >"$REPO_ROOT_PATH/base.txt"
 git_fixture "$REPO_ROOT_PATH" add base.txt
@@ -765,7 +774,8 @@ git_fixture "$REPO_ROOT_PATH" commit -q -m base
 git_fixture "$REPO_ROOT_PATH" checkout -q -b feat/fixture-feature
 printf '%s\n' spaced >"$REPO_ROOT_PATH/$SPACE_PATH"
 printf '%s\n' literal >"$REPO_ROOT_PATH/$COMMAND_PATH"
-git_fixture "$REPO_ROOT_PATH" add "$SPACE_PATH" "$COMMAND_PATH"
+printf '%s\n' quoted >"$REPO_ROOT_PATH/$QUOTE_PATH"
+git_fixture "$REPO_ROOT_PATH" add "$SPACE_PATH" "$COMMAND_PATH" "$QUOTE_PATH"
 git_fixture "$REPO_ROOT_PATH" commit -q -m "add non-token paths"
 run_operator "implement" "$PROCEED_OUTPUT"
 BRANCH_EVIDENCE="$(branch_evidence_line)"
@@ -773,11 +783,17 @@ OK=1
 if jq -e \
         --arg space "$SPACE_PATH" \
         --arg command "$COMMAND_PATH" \
-        '([.tip_files[].path] | index($space) != null)
+        --arg quote "$QUOTE_PATH" \
+        '(.files | index($quote) != null)
+            and ([.tip_files[].path] | index($space) != null)
             and ([.tip_files[].path] | index($command) != null)
+            and ([.tip_files[].path] | index($quote) != null)
             and all(
                 .tip_files[];
-                if .path == $space or .path == $command then
+                if .path == $space
+                    or .path == $command
+                    or .path == $quote
+                then
                     .present == true and (has("pinned_read") | not)
                 else true
                 end
@@ -785,6 +801,7 @@ if jq -e \
         <<<"$BRANCH_EVIDENCE" >/dev/null \
     && ! rules_mention "$SPACE_PATH" \
     && ! rules_mention "$COMMAND_PATH" \
+    && ! rules_mention "$QUOTE_PATH" \
     && valid_proceed_payload; then
     OK=0
 fi
@@ -838,7 +855,7 @@ git_fixture "$REPO_ROOT_PATH" commit -q -m "add many files"
 run_operator "implement" "$PROCEED_OUTPUT"
 BRANCH_EVIDENCE="$(branch_evidence_line)"
 PINNED_RULE_COUNT="$(
-    grep -Ec '^Bash\(git show [0-9a-fA-F]{40}:[A-Za-z0-9._/-]+\)$' \
+    grep -Ec "^Bash\(git show ($OID_RE):[A-Za-z0-9._/-]+\)\$" \
         "$ARGV_CAPTURE" || true
 )"
 OK=1
@@ -854,6 +871,48 @@ if jq -e \
 fi
 report_case "tip-file truncation is explicit and caps pinned grants" \
     "$OK" "status=$RUN_STATUS pinned_rules=$PINNED_RULE_COUNT"
+
+# 18. A changed gitlink is a present tree entry whose target commit normally
+# lives in the submodule's object store rather than this repository's, so the
+# entry's own type — not what the object database can answer about the target —
+# decides its evidence: present as a gitlink, with none of the blob claims
+# (size, line count, pinned read) a submodule commit could ever support.
+setup_harness
+seed_plan "fixture-feature"
+git_fixture "$REPO_ROOT_PATH" init -q -b main
+printf '%s\n' base >"$REPO_ROOT_PATH/base.txt"
+git_fixture "$REPO_ROOT_PATH" add base.txt
+git_fixture "$REPO_ROOT_PATH" commit -q -m base
+GITLINK_COMMIT="$(git_fixture "$REPO_ROOT_PATH" rev-parse refs/heads/main)"
+git_fixture "$REPO_ROOT_PATH" checkout -q -b feat/fixture-feature
+# An empty directory beside the index entry is the ordinary uninitialised
+# submodule shape; the entry itself is what the evidence must describe.
+mkdir -p "$REPO_ROOT_PATH/sub"
+git_fixture "$REPO_ROOT_PATH" update-index --add \
+    --cacheinfo "160000,$GITLINK_COMMIT,sub"
+git_fixture "$REPO_ROOT_PATH" commit -q -m "add gitlink"
+run_operator "implement" "$PROCEED_OUTPUT"
+BRANCH_EVIDENCE="$(branch_evidence_line)"
+OK=1
+if jq -e \
+        --arg commit "$GITLINK_COMMIT" \
+        '(.files | index("sub") != null)
+            and any(
+                .tip_files[];
+                . == {
+                    path: "sub",
+                    present: true,
+                    type: "gitlink",
+                    commit: $commit
+                }
+            )' \
+        <<<"$BRANCH_EVIDENCE" >/dev/null \
+    && ! rules_mention ":sub)" \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "a changed gitlink is present evidence without blob claims" \
+    "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

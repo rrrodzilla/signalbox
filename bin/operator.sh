@@ -168,10 +168,13 @@ branch_evidence() {
     local BRANCH_TIP=""
     local BRANCH_SHORT=""
     local COMMITS=""
-    local FILES=""
+    local FILES_JSON="[]"
     local DIFFSTAT=""
     local FILE_COUNT=0
     local FILE_PATH=""
+    local ENTRY_META=""
+    local ENTRY_TYPE=""
+    local ENTRY_OID=""
     local BLOB=""
     local SIZE=""
     local LINES=""
@@ -180,6 +183,8 @@ branch_evidence() {
     local ENTRY=""
     local TIP_FILES="[]"
     local TIP_FILES_TRUNCATED="false"
+    local -a CHANGED_PATHS=()
+    local -a FILE_PATH_OBJECTS=()
     local -a TIP_FILE_OBJECTS=()
 
     if ! BASE_TIP="$(
@@ -208,13 +213,11 @@ branch_evidence() {
     fi
     if ! COMMITS="$(
         git -C "$REPO_ROOT" log --oneline "$BASE_TIP..$BRANCH_TIP" 2>/dev/null
-    )" || ! FILES="$(
-        git -C "$REPO_ROOT" -c core.quotePath=false \
-            diff --name-only "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
     )" || ! DIFFSTAT="$(
         git -C "$REPO_ROOT" -c core.quotePath=false \
             diff --stat "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
-    )"; then
+    )" || ! git -C "$REPO_ROOT" diff --name-only -z \
+        "$BASE_TIP...$BRANCH_TIP" >/dev/null 2>&1; then
         jq -nc \
             --arg base "$BASE" \
             --arg branch "$BRANCH" \
@@ -228,18 +231,43 @@ branch_evidence() {
         git -C "$REPO_ROOT" rev-parse --short "$BRANCH_TIP" 2>/dev/null || true
     )"
 
-    while IFS= read -r FILE_PATH; do
+    # Only -z lists paths verbatim. Line-delimited --name-only C-quotes any path
+    # carrying a quote, a backslash, a tab, or a newline (core.quotePath governs
+    # non-ASCII alone), and that spelling is not the tree's path: the lookup
+    # below would miss and call a real file absent, while the published list
+    # would name paths the branch does not contain. Command substitution cannot
+    # carry NUL bytes, so the records are read straight into an array, and every
+    # later use is built from those exact values. The probe above is what proves
+    # git could compare at all: a process substitution would hide git's exit
+    # status behind mapfile's own.
+    mapfile -t -d '' CHANGED_PATHS < <(
+        git -C "$REPO_ROOT" diff --name-only -z \
+            "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
+    )
+
+    for FILE_PATH in ${CHANGED_PATHS[@]+"${CHANGED_PATHS[@]}"}; do
         [ -n "$FILE_PATH" ] || continue
+        # The published list is encoded from the exact delimited value rather
+        # than re-split out of a rendering, so it stays the tree's own paths.
+        FILE_PATH_OBJECTS+=("$(jq -nc --arg path "$FILE_PATH" '$path')")
         FILE_COUNT=$((FILE_COUNT + 1))
         if [ "$FILE_COUNT" -gt "$TIP_FILES_LIMIT" ]; then
             continue
         fi
 
-        BLOB=""
-        if ! BLOB="$(
-            git -C "$REPO_ROOT" rev-parse --verify --quiet \
-                "$BRANCH_TIP:$FILE_PATH" 2>/dev/null
-        )"; then
+        # The tree entry's own type decides what may be claimed about it. A
+        # gitlink is a present entry whose target commit normally lives in the
+        # submodule's object store rather than this one, so questioning the
+        # object database about it reads as absence; only a blob has a size, a
+        # line count, or content a pinned read can return. The pathspec is read
+        # against the whole tree, matching the diff's root-relative paths, and
+        # forced literal so a path carrying `*`, `?`, or `[` describes itself
+        # instead of matching its neighbours.
+        ENTRY_META=""
+        if ! ENTRY_META="$(
+            GIT_LITERAL_PATHSPECS=1 git -C "$REPO_ROOT" ls-tree \
+                --full-tree "$BRANCH_TIP" -- "$FILE_PATH" 2>/dev/null
+        )" || [ -z "$ENTRY_META" ]; then
             TIP_FILE_OBJECTS+=("$(
                 jq -nc \
                     --arg path "$FILE_PATH" \
@@ -248,16 +276,61 @@ branch_evidence() {
             )")
             continue
         fi
+        # `<mode> SP <type> SP <object> TAB <path>`; the path is already known,
+        # and is the only field ls-tree may quote, so it is discarded here.
+        ENTRY_TYPE=""
+        ENTRY_OID=""
+        read -r _ ENTRY_TYPE ENTRY_OID <<<"${ENTRY_META%%$'\t'*}"
 
+        case "$ENTRY_TYPE" in
+            blob) ;;
+            commit)
+                TIP_FILE_OBJECTS+=("$(
+                    jq -nc \
+                        --arg path "$FILE_PATH" \
+                        --argjson present true \
+                        --arg type "gitlink" \
+                        --arg commit "$ENTRY_OID" \
+                        '{
+                            path: $path,
+                            present: $present,
+                            type: $type,
+                            commit: $commit
+                        }'
+                )")
+                continue
+                ;;
+            *)
+                TIP_FILE_OBJECTS+=("$(
+                    jq -nc \
+                        --arg path "$FILE_PATH" \
+                        --argjson present true \
+                        --arg type "$ENTRY_TYPE" \
+                        '{path: $path, present: $present, type: $type}'
+                )")
+                continue
+                ;;
+        esac
+
+        BLOB="$ENTRY_OID"
         SIZE=""
         if ! SIZE="$(
             git -C "$REPO_ROOT" cat-file -s "$BLOB" 2>/dev/null
         )"; then
+            # The entry is in the tree, so it is present whatever the object
+            # database can still say about it; it simply has no measurable size.
             TIP_FILE_OBJECTS+=("$(
                 jq -nc \
                     --arg path "$FILE_PATH" \
-                    --argjson present false \
-                    '{path: $path, present: $present}'
+                    --argjson present true \
+                    --arg type "blob" \
+                    --arg blob "$BLOB" \
+                    '{
+                        path: $path,
+                        present: $present,
+                        type: $type,
+                        blob: $blob
+                    }'
             )")
             continue
         fi
@@ -285,6 +358,7 @@ branch_evidence() {
             jq -nc \
                 --arg path "$FILE_PATH" \
                 --argjson present true \
+                --arg type "blob" \
                 --arg blob "$BLOB" \
                 --argjson size "$SIZE" \
                 --argjson lines "$LINES_JSON" \
@@ -292,6 +366,7 @@ branch_evidence() {
                 '{
                     path: $path,
                     present: $present,
+                    type: $type,
                     blob: $blob,
                     size: $size,
                     lines: $lines
@@ -300,8 +375,13 @@ branch_evidence() {
                     end'
         )"
         TIP_FILE_OBJECTS+=("$ENTRY")
-    done <<<"$FILES"
+    done
 
+    if [ "${#FILE_PATH_OBJECTS[@]}" -gt 0 ]; then
+        FILES_JSON="$(
+            printf '%s\n' "${FILE_PATH_OBJECTS[@]}" | jq -sc '.'
+        )"
+    fi
     if [ "${#TIP_FILE_OBJECTS[@]}" -gt 0 ]; then
         TIP_FILES="$(
             printf '%s\n' "${TIP_FILE_OBJECTS[@]}" | jq -sc '.'
@@ -319,7 +399,7 @@ branch_evidence() {
         --arg branch_tip "$BRANCH_TIP" \
         --arg branch_tip_short "$BRANCH_SHORT" \
         --arg commits "$COMMITS" \
-        --arg files "$FILES" \
+        --argjson files "$FILES_JSON" \
         --arg diffstat "$DIFFSTAT" \
         --argjson tip_files "$TIP_FILES" \
         --argjson tip_files_truncated "$TIP_FILES_TRUNCATED" \
@@ -332,7 +412,7 @@ branch_evidence() {
             branch_tip: $branch_tip,
             branch_tip_short: $branch_tip_short,
             commits: ($commits | split("\n") | map(select(length > 0))),
-            files: ($files | split("\n") | map(select(length > 0))),
+            files: $files,
             diffstat: $diffstat,
             tip_files: $tip_files,
             tip_files_truncated: $tip_files_truncated,

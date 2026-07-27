@@ -87,7 +87,7 @@ live_runs() (
                 .pid as $value
                 | if $value == null then "-"
                   elif ($value | type) == "number" then
-                      # floor before tostring: jq preserves a number's original
+                      # floor before tostring: jq preserves the original numeric
                       # literal, so a whole-number pid written as 1234.0 or
                       # 1.234e3 would otherwise print in that form and fail
                       # pid_alive. Flooring produces the plain digits.

@@ -11,7 +11,7 @@
 #
 #   feature branch  feat/<plan.json .feature>
 #   worktrees       <parent>/<repo>-wt/...      (TRIP's worktree home)
-#   testing gate    the integration worktree root (cargo workspace)
+#   testing gate    the integration worktree root + detected/supplied GATE_CMD
 #   state           per-repo readiness ladder + assessment ledger, so every
 #                   repo earns its own autonomy track record from R2
 #
@@ -24,24 +24,77 @@
 # own idempotent setup, vendored as bin/vault-setup.sh) and a preflight that
 # fails fast on missing tooling instead of failing 20 minutes into a run.
 #
-# Usage: install.sh <target-repo-path> [--vault <vault-root> [--folder <f>]]
+# Usage: install.sh <target-repo-path> [--vault <vault-root> [--folder <f>]] [--gate '<command>']
 #   --vault   Obsidian vault root; wires .claude/docs into it (idempotent,
 #             migrates a pre-existing real docs/ dir). Default folder:
 #             TRIP/<repo-name>. Without --vault the repo must already be
 #             TRIP-wired (.claude/docs present) or init will refuse to run.
+#   --gate    Testing command to run in the integration worktree. Without it,
+#             the target checkout's repo root is probed in order for Taskfile
+#             ci, Cargo.toml, justfile/Makefile ci, then package.json test; the
+#             integration worktree is a checkout of that same repository.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="${1:?usage: install.sh <target-repo-path> [--vault <vault-root> [--folder <folder>]]}"
+TARGET="${1:?usage: install.sh <target-repo-path> [--vault <vault-root> [--folder <folder>]] [--gate '<command>']}"
 shift
-VAULT="" FOLDER=""
+VAULT="" FOLDER="" GATE_CMD=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --vault)  VAULT="${2:?--vault needs a path}"; shift 2 ;;
         --folder) FOLDER="${2:?--folder needs a name}"; shift 2 ;;
+        --gate) GATE_CMD="${2:?--gate needs a command}"; shift 2 ;;
         *) echo "error: unknown argument $1" >&2; exit 64 ;;
     esac
 done
+
+detect_gate() {
+    local repo="$1" file
+
+    # Deliberate grep-level YAML heuristic: no YAML parser is available.
+    for file in Taskfile.yml Taskfile.yaml; do
+        if [ -f "$repo/$file" ] \
+            && grep -qE '^[[:space:]]*ci:[[:space:]]*$|^[[:space:]]*ci:[[:space:]]' "$repo/$file"; then
+            printf '%s\n' 'task ci'
+            return 0
+        fi
+    done
+
+    if [ -f "$repo/Cargo.toml" ]; then
+        printf '%s\n' 'cargo clippy --all-targets -q && cargo nextest run'
+        return 0
+    fi
+
+    for file in justfile Justfile .justfile; do
+        if [ -f "$repo/$file" ] && grep -qE '^[[:space:]]*ci[[:space:]]*:' "$repo/$file"; then
+            printf '%s\n' 'just ci'
+            return 0
+        fi
+    done
+
+    for file in Makefile makefile; do
+        if [ -f "$repo/$file" ] && grep -qE '^[[:space:]]*ci[[:space:]]*:' "$repo/$file"; then
+            printf '%s\n' 'make ci'
+            return 0
+        fi
+    done
+
+    if [ -f "$repo/package.json" ] \
+        && jq -e '.scripts.test | type == "string"' "$repo/package.json" >/dev/null 2>&1; then
+        if [ -f "$repo/pnpm-lock.yaml" ]; then
+            printf '%s\n' 'pnpm test'
+        elif [ -f "$repo/yarn.lock" ]; then
+            printf '%s\n' 'yarn test'
+        elif [ -f "$repo/package-lock.json" ]; then
+            printf '%s\n' 'npm test'
+        else
+            printf '%s\n' 'pnpm test'
+        fi
+        return 0
+    fi
+
+    return 1
+}
 
 TARGET="$(cd "$TARGET" && pwd)"
 git -C "$TARGET" rev-parse --git-dir >/dev/null
@@ -58,6 +111,15 @@ need codex    "reviewers/implementers run codex exec"
 need claude   "fixers/assessor/operator run headless Claude"
 need gh       "plan seed and promotion use the GitHub CLI"
 need jq       "every topology transform is jq"
+if [ -z "$GATE_CMD" ]; then
+    GATE_CMD="$(detect_gate "$TARGET" || true)"
+fi
+if [ -z "$GATE_CMD" ]; then
+    echo "preflight: cannot detect a testing gate in $REPO — re-run with --gate '<command>' (tried: Taskfile ci, root Cargo.toml, justfile/Makefile ci, package.json test)" >&2
+    MISSING=1
+else
+    need "${GATE_CMD%% *}" "the testing gate runs: $GATE_CMD"
+fi
 for p in exec-source exec-handler exec-sink stream-runner; do
     [ -x "$HOME/.local/share/emergent/primitives/bin/$p" ] \
         || { echo "preflight: missing primitive $p — run: emergent marketplace install exec-source exec-handler exec-sink stream-runner" >&2; MISSING=1; }
@@ -116,7 +178,11 @@ INT_WT="$WT_BASE/$FEATURE"
 GATE_DIR="$INT_WT"
 ENGINE_PREFIX="$(basename "$REPO_ROOT")"
 SEED_WORKDIR="$INT_WT"
-export ROOT REPO_ROOT WT_BASE FEATURE BASE_BRANCH INT_BRANCH INT_WT GATE_DIR ENGINE_PREFIX SEED_WORKDIR
+# GATE_CMD is the detected-or-supplied gate, runs in GATE_DIR, and is safe to hand-edit.
+ENV
+printf 'GATE_CMD=%q\n' "$GATE_CMD" >>"$DEST/bin/_env.sh"
+cat >>"$DEST/bin/_env.sh" <<'ENV'
+export ROOT REPO_ROOT WT_BASE FEATURE BASE_BRANCH INT_BRANCH INT_WT GATE_DIR ENGINE_PREFIX SEED_WORKDIR GATE_CMD
 ENV
 
 chmod +x "$DEST"/bin/*.sh
@@ -137,6 +203,7 @@ grep -qxF '.claude' "$GIT_COMMON/info/exclude" 2>/dev/null \
 
 echo "installed: $DEST"
 echo "engines:   $REPO-pipeline (+ $REPO-init, $REPO-plan, $REPO-implement-stream, $REPO-review-loop)"
+echo "gate:      $GATE_CMD"
 echo "next:      emergent --config $DEST/init.toml                    (fill the vault, once per repo)"
 echo "           SIGNALBOX_ISSUE=<n> emergent --config $DEST/pipeline.toml (issue -> plan -> implement -> review,"
 echo "                                                                 Fable operating the phase seams)"

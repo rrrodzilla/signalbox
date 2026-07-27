@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Completion sink: stdin = plan.done payload. Runs the testing gate in the
-# integration worktree (clippy + nextest, mirroring TRIP-2's gate) and
-# reports the integrated history.
+# Completion sink: stdin = plan.done payload. Runs the gate command from
+# _env.sh (GATE_CMD, detected at install time) in the integration worktree
+# and reports the integrated history.
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
@@ -11,16 +11,32 @@ PAYLOAD="$(cat)"
 CID="$(jq -r '.correlation_id // empty' <<<"$PAYLOAD" 2>/dev/null || true)"
 [ -n "$CID" ] || CID="$(jq -r '.correlation_id // empty' "$ROOT/state/run.json" 2>/dev/null || true)"
 
-echo "ALL STAGES MERGED — running testing gate in $GATE_DIR"
+echo "ALL STAGES MERGED — running gate in $GATE_DIR: ${GATE_CMD:-}"
 cd "$GATE_DIR"
 
-if cargo clippy --all-targets -q 2>&1 | tail -3 && cargo nextest run 2>&1 | tail -3; then
-    VERDICT="GREEN"
-    echo "GATE GREEN on $INT_BRANCH:"
-    git log --oneline "$BASE_BRANCH".."$INT_BRANCH" | sed 's/^/  /'
-else
+if [ -z "${GATE_CMD:-}" ]; then
     VERDICT="RED"
+    echo "GATE CONFIGURATION ERROR: no GATE_CMD in bin/_env.sh — reinstall the harness or add one; install.sh --gate '<command>' sets it" >&2
     echo "GATE RED — inspect $INT_WT"
+else
+    # -o pipefail: a pipeline gate ("tests | tee log") must fail on the
+    # producer's failure, not just the last stage's. bash -c starts a fresh
+    # shell, so the set -euo above does not carry into it.
+    if GATE_OUTPUT="$(bash -o pipefail -c "$GATE_CMD" 2>&1)"; then
+        GATE_STATUS=0
+    else
+        GATE_STATUS=$?
+    fi
+    [ -z "$GATE_OUTPUT" ] || printf '%s\n' "$GATE_OUTPUT" | tail -n 20 >&2
+
+    if [ "$GATE_STATUS" -eq 0 ]; then
+        VERDICT="GREEN"
+        echo "GATE GREEN on $INT_BRANCH:"
+        git log --oneline "$BASE_BRANCH".."$INT_BRANCH" | sed 's/^/  /'
+    else
+        VERDICT="RED"
+        echo "GATE RED — inspect $INT_WT"
+    fi
 fi
 
 # The verdict as a DISK ARTIFACT (issue #1): engine stdout is buffered when

@@ -128,6 +128,16 @@ init_integration() {
     git_fixture "$INT_WT_PATH" commit -q -m initial
 }
 
+set_fixture_base_branch() {
+    local BASE="$1"
+    printf 'BASE_BRANCH=%s\nexport BASE_BRANCH\n' "$(printf '%q' "$BASE")" \
+        >>"$CASE_ROOT/bin/_env.sh"
+}
+
+rules_mention() {
+    grep '^Bash(' "$ARGV_CAPTURE" | grep -F -- "$1" >/dev/null
+}
+
 seed_plan() {
     local FEATURE="$1"
     jq -nc --argjson issue 25 --arg feature "$FEATURE" \
@@ -434,6 +444,33 @@ for BAD_FEATURE in 'a b --output=/tmp/x' '../escape' 'Feature' '-lead' 'trail-';
     fi
 done
 report_case "a non-slug plan feature grants no ref-bearing rule" "$RULES_OK" \
+    "$RULES_DETAIL"
+
+# 8. A rule is one exact command string, and git accepts branch names carrying
+# shell metacharacters, so a base branch that is not a plain ref token must
+# yield no rule bearing it — neither the origin/<base> forms nor the two
+# feature rules built from it — instead of a rule parsed as shell syntax.
+RULES_OK=0
+RULES_DETAIL=""
+for BAD_BASE in 'main;id' 'main --output=/tmp/x' 'main$(id)' '-main' 'a..b'; do
+    setup_harness
+    seed_plan "fixture-feature"
+    set_fixture_base_branch "$BAD_BASE"
+    run_operator "implement" "$PROCEED_OUTPUT"
+    if [ "$RUN_STATUS" -ne 0 ] \
+        || rules_mention "$BAD_BASE" \
+        || rules_mention 'Bash(git log origin/' \
+        || rules_mention 'Bash(git show --stat origin/' \
+        || ! grep -Fx 'Bash(git rev-parse --short feat/fixture-feature)' \
+            "$ARGV_CAPTURE" >/dev/null \
+        || ! read_only_git_rules \
+            "$ARGV_CAPTURE" "$INT_WT_PATH" "" "feat/fixture-feature" 0 1; then
+        RULES_OK=1
+        RULES_DETAIL="base=$BAD_BASE status=$RUN_STATUS"
+        break
+    fi
+done
+report_case "a non-token base branch grants no rule bearing it" "$RULES_OK" \
     "$RULES_DETAIL"
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"

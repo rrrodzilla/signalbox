@@ -20,9 +20,8 @@ Your session can run without approval only read-only `gh` (`pr view|checks|list`
 - `git branch --show-current`
 - `git branch --list`
 - `git worktree list`
-- `git log origin/<base> --oneline -20`
-- `git show --stat origin/<base>`
-- once the run's `plan.json` names a feature: `git rev-parse --short feat/<feature>`, `git log <base>..feat/<feature> --oneline`, `git diff --stat <base>...feat/<feature>`
+- once the run's `plan.json` names a feature: `git rev-parse --short feat/<feature>`
+- when the base branch is a plain ref token (letters, digits, `.`, `_`, `/`, `-`): `git log origin/<base> --oneline -20`, `git show --stat origin/<base>`, and — with a feature too — `git log <base>..feat/<feature> --oneline`, `git diff --stat <base>...feat/<feature>`
 - when the integration worktree exists: `git -C <integration worktree> status --porcelain`
 
 The worktree home is also granted as a readable directory. Anything else — every write, every other flag combination, every other `git -C` form — will be denied. A denial of a non-granted command is a fact about the sandbox, never a defect finding about the run.
@@ -46,8 +45,9 @@ The worktree home is also granted as a readable directory. Anything else — eve
 - Anything else (ESCALATED, ENGINE_DIED, TIMEOUT): HALT with what you found on disk.
 
 **promote** — the phase claims the PR was merged:
-- `gh pr view <feature-branch> --json state,mergedAt,url` shows MERGED with a timestamp.
-- The base branch actually contains the change: `git log origin/<base> --oneline -20` shows the squash commit referencing the issue, and `git show --stat origin/<base>` shows the feature's file changes present there.
+- `gh pr view <feature-branch> --json state,mergedAt,url,baseRefName,mergeCommit,files` shows MERGED with a timestamp, and `baseRefName` is the expected base branch.
+- The change actually landed: resolve this PR's own merge commit — `mergeCommit.oid` from that same `gh pr view` — and judge that commit, not whatever currently sits at `origin/<base>`. `files` is the file set that exact commit carried into the base; it must match the feature's declared scope. A missing or null `mergeCommit` alongside a MERGED state is a HALT: the merge cannot be pinned to a commit.
+- Do NOT verify the merge from `git log origin/<base> --oneline -20` or `git show --stat origin/<base>`. Both read the base branch's current HEAD, which a concurrent merge moves the instant this feature lands: `git show --stat origin/<base>` can then describe an unrelated commit, and enough later commits push this squash out of the 20-line window. Those two commands remain useful only as corroboration — if the squash for this issue does appear in the log window, say so in your reason; if it does not, that is not a HALT and not a finding.
 - The issue is CLOSED. The integration worktree and local feature branch are cleaned up (leftovers are worth naming in your reason but are not alone a HALT).
 - If `state/docs-sync.json` is absent, not newer than `state/pipeline-review.stamp`, not `status: "OK"`, or correlation-mismatched alongside a MERGED outcome, explicitly say in your reason that the promotion executor's mechanical docs-sync precondition was somehow bypassed and the human should investigate; this is not a fresh HALT reason on its own after a successful merge, because a HALT cannot un-merge the PR.
 - Runner outcome NO_GO: read the promotion log, HALT with the executor's stated reason and the state it left things in (branch pushed? PR open? CI failing?) — a NO_GO with everything parked safely is the executor's judgment working; your reason is the human's briefing.

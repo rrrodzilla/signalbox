@@ -84,7 +84,13 @@ fi
 # -m renaming). Exact forms keep the operator unable to mutate any state.
 #
 # The ref-bearing forms prompts/operator.md asks for at implement cannot be
-# written as constants, so they are spelled out from this run's own plan.
+# written as constants, so they are spelled out from this run's own plan and
+# from the configured base branch. Both refs are validated first: a rule is an
+# exact command string, and git permits branch names carrying `;`, `&`, or
+# `$(...)`, which would be parsed as shell syntax inside the rule. Anything
+# that is not a plain ref token simply yields no rule bearing that ref rather
+# than an unbounded or command-injecting one.
+#
 # The slug is accepted only when it is a kebab-case token — anything else
 # (missing, unreadable, or carrying shell or path characters) simply yields
 # no ref-bearing rules rather than an unbounded one.
@@ -97,6 +103,16 @@ if [ -r "$RUN_DIR/plan.json" ]; then
     esac
 fi
 
+# The base branch comes from _env.sh, not from a per-run artifact, but the
+# installer imposes no narrower contract than git's own ref rules, so it is
+# validated on the same terms as the slug: a plain ref token (letters, digits,
+# `.`, `_`, `/`, `-`), never leading `-`, never `..`, never a trailing `/`.
+SAFE_BASE=""
+case "$BASE_BRANCH" in
+    "" | -* | */ | *..* | *[!A-Za-z0-9._/-]*) ;;
+    *) SAFE_BASE="$BASE_BRANCH" ;;
+esac
+
 GIT_TOOLS=(
     "Bash(git status --porcelain)"
     "Bash(git rev-parse --short HEAD)"
@@ -104,15 +120,21 @@ GIT_TOOLS=(
     "Bash(git branch --show-current)"
     "Bash(git branch --list)"
     "Bash(git worktree list)"
-    "Bash(git log origin/$BASE_BRANCH --oneline -20)"
-    "Bash(git show --stat origin/$BASE_BRANCH)"
 )
-if [ -n "$FEATURE_BRANCH" ]; then
+if [ -n "$SAFE_BASE" ]; then
     GIT_TOOLS+=(
-        "Bash(git rev-parse --short $FEATURE_BRANCH)"
-        "Bash(git log $BASE_BRANCH..$FEATURE_BRANCH --oneline)"
-        "Bash(git diff --stat $BASE_BRANCH...$FEATURE_BRANCH)"
+        "Bash(git log origin/$SAFE_BASE --oneline -20)"
+        "Bash(git show --stat origin/$SAFE_BASE)"
     )
+fi
+if [ -n "$FEATURE_BRANCH" ]; then
+    GIT_TOOLS+=("Bash(git rev-parse --short $FEATURE_BRANCH)")
+    if [ -n "$SAFE_BASE" ]; then
+        GIT_TOOLS+=(
+            "Bash(git log $SAFE_BASE..$FEATURE_BRANCH --oneline)"
+            "Bash(git diff --stat $SAFE_BASE...$FEATURE_BRANCH)"
+        )
+    fi
 fi
 if [ -d "$INT_WT" ]; then
     GIT_TOOLS+=("Bash(git -C $INT_WT status --porcelain)")

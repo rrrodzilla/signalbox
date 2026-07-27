@@ -265,5 +265,24 @@ fi
 report_case "success path leaves stdout empty" "$OK" \
     "status=$RUN_STATUS stdout-bytes=$(wc -c <"$OUT")"
 
+# 12. Malformed input far larger than the pipe buffer is truncated, not dropped:
+# the fallback must not depend on a reader that closes the pipe early.
+fixture
+DIR="$FIXTURE_PATH"
+LARGE_INPUT="$(head -c 256000 /dev/zero | tr '\0' 'a')"
+printf '%s' "$LARGE_INPUT" >"$INPUT"
+run_subject "$INPUT" "$OUT" "$ERR" halted "$DIR"
+ACTUAL="$(jq -r \
+    '[.terminal, (.payload.raw | length | tostring),
+      (.payload.raw | test("^a+$") | tostring)] | @tsv' \
+    "$DIR/state/halted.json" 2>/dev/null)"
+EXPECTED=$'halted\t4096\ttrue'
+OK=1
+if [ "$RUN_STATUS" -eq 0 ] && [ "$ACTUAL" = "$EXPECTED" ]; then
+    OK=0
+fi
+report_case "oversized malformed input is truncated and exits zero" "$OK" \
+    "status=$RUN_STATUS actual=$ACTUAL"
+
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

@@ -4,8 +4,9 @@
 # stdin is exactly one pipeline.complete or pipeline.halted payload JSON value.
 # The script atomically records it as <run-dir>/state/complete.json or
 # <run-dir>/state/halted.json. When [run-dir] is omitted, bin/_env.sh supplies
-# RUN_DIR. Empty, malformed, or non-object input is preserved as a truncated
-# {"raw": ...} payload and still produces terminal evidence. stdout stays empty;
+# RUN_DIR. Empty, malformed, or non-object input is preserved as a
+# {"raw": ...} payload truncated to the first 4096 characters, and still
+# produces terminal evidence regardless of input size. stdout stays empty;
 # diagnostics go to stderr.
 #
 # Exit status:
@@ -47,10 +48,11 @@ if PAYLOAD="$(
 )"; then
     :
 else
+    # jq reads stdin to EOF and truncates internally: a `head` in this pipeline
+    # would close the pipe early and kill `printf` with SIGPIPE, which under
+    # `set -e -o pipefail` would abort before any terminal evidence is written.
     PAYLOAD="$(
-        LC_ALL=C printf '%s' "$RAW_PAYLOAD" \
-            | head -c 4096 \
-            | jq -Rsc '{raw: .}'
+        printf '%s' "$RAW_PAYLOAD" | jq -Rsc '{raw: .[0:4096]}'
     )"
 fi
 

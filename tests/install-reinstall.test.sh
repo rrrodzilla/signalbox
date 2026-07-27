@@ -357,7 +357,42 @@ report_case "launch metadata written after the withdrawal refuses the refresh" "
     "status=$RUN_STATUS staged-left=$STAGED_LEFT stderr=$(head -c 300 "$ERR")"
 rm -f -- "$RACE_LAUNCH"
 
-# 11. The refusal is a property of the metadata tree, not its timestamps:
+# 11. Stale launcher caught as a process: one past its last bin/ exec has not
+# yet written any metadata, so neither liveness nor the snapshot can see it —
+# but it still holds its executing script's descriptor open, and the /proc
+# scan of the withdrawn bin/ must refuse while it runs, then permit once it
+# exits. The holder stands in for a launcher bash mid-flight.
+HOLDER_READY="$FIXTURE_HOME/holder.ready"
+rm -f -- "$HOLDER_READY"
+( exec 3<"$FIXTURE_DEST/bin/run.sh"; : >"$HOLDER_READY"; sleep 60 ) &
+HOLDER_PID=$!
+CHILD_PIDS+=("$HOLDER_PID")
+for _ in $(seq 1 100); do
+    [ -e "$HOLDER_READY" ] && break
+    sleep 0.1
+done
+printf '\nHOLDER_SENTINEL\n' >>"$FIXTURE_DEST/bin/run.sh"
+run_subject "$OUT" "$ERR" --reinstall
+HELD_STATUS=$RUN_STATUS
+HELD_NAMED=1
+grep -q 'stale launcher' "$ERR" && grep -q "$HOLDER_PID" "$ERR" && HELD_NAMED=0
+HELD_INTACT=1
+grep -q 'HOLDER_SENTINEL' "$FIXTURE_DEST/bin/run.sh" && HELD_INTACT=0
+kill "$HOLDER_PID" 2>/dev/null || true
+wait "$HOLDER_PID" 2>/dev/null || true
+run_subject "$OUT" "$ERR" --reinstall
+OK=1
+if [ "$HELD_STATUS" -eq 1 ] \
+    && [ "$HELD_NAMED" -eq 0 ] \
+    && [ "$HELD_INTACT" -eq 0 ] \
+    && [ "$RUN_STATUS" -eq 0 ] \
+    && ! grep -q 'HOLDER_SENTINEL' "$FIXTURE_DEST/bin/run.sh"; then
+    OK=0
+fi
+report_case "a process holding the withdrawn bin refuses the refresh until it exits" "$OK" \
+    "held-status=$HELD_STATUS named=$HELD_NAMED intact=$HELD_INTACT release-status=$RUN_STATUS"
+
+# 12. The refusal is a property of the metadata tree, not its timestamps:
 # launch metadata that predates the reinstall never blocks it, however
 # recently it was written. Freshly created dead-run metadata — the normal
 # residue of finished runs — must ride through a refresh untouched.

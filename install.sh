@@ -32,12 +32,15 @@
 #             run under an exclusive <dest>/.install.lock that bin/run.sh also
 #             takes, and the installed bin/ is withdrawn before anything is
 #             destroyed, so no run can start in between — including from a
-#             harness installed before the lock existed. After the withdrawal
-#             the launch metadata under runs/ is compared against a snapshot
-#             taken before it: any launch.json created or changed since is a
-#             startup in flight and refuses the refresh deterministically —
-#             no timers, and metadata that merely predates the reinstall never
-#             blocks it. Preserves runs/ and the state/ readiness ledger. On a
+#             harness installed before the lock existed. After the withdrawal,
+#             three deterministic checks close every stale-launcher path: any
+#             process still holding an open file from the withdrawn bin/ is a
+#             launcher still running; the liveness rescan sees a run recorded
+#             since the first scan; and the launch metadata under runs/ is
+#             compared against a pre-withdrawal snapshot, so any launch.json
+#             created or changed since is a startup in flight. No timers, and
+#             metadata that merely predates the reinstall never blocks it.
+#             Preserves runs/ and the state/ readiness ledger. On a
 #             never-installed target, acts like a plain install.
 #   --vault   Obsidian vault root; wires .claude/docs into it (idempotent,
 #             migrates a pre-existing real docs/ dir). Default folder:
@@ -145,6 +148,43 @@ refuse_startup_in_flight() {
         printf '       startup in flight: %s\n' "$PENDING_FILE" >&2
     done <<<"$PENDING_LIST"
     echo "       wait for it to finish starting, then: $DEST/bin/run.sh --list" >&2
+    exit 1
+}
+
+# One line per process holding an open file descriptor on anything under the
+# withdrawn bin/ tree: "<pid>\t<file>". A bash process executing a script
+# keeps that script's descriptor open for its whole lifetime, so every stale
+# launcher still running — however far past its last bin/ exec — appears
+# here, and one that already exited either recorded launch.json (the liveness
+# rescan and snapshot comparison see it) or never will. Reading /proc answers
+# only for this user's processes, which is exactly the set that can launch
+# from this harness. Prints nothing when nothing holds the tree.
+holders_of_withdrawn_bin() {
+    local STAGED_DIR="$1" FD_LINK="" FD_TARGET="" HOLDER_PID=""
+
+    for FD_LINK in /proc/[0-9]*/fd/*; do
+        FD_TARGET="$(readlink "$FD_LINK" 2>/dev/null)" || continue
+        case "$FD_TARGET" in
+            "$STAGED_DIR"/*|"$STAGED_DIR")
+                HOLDER_PID="${FD_LINK#/proc/}"
+                HOLDER_PID="${HOLDER_PID%%/*}"
+                [ "$HOLDER_PID" = "$$" ] && continue
+                printf '%s\t%s\n' "$HOLDER_PID" "$FD_TARGET"
+                ;;
+        esac
+    done
+}
+
+refuse_stale_launcher_processes() {
+    local HOLDER_LIST="$1" HOLDER_PID HOLDER_FILE
+
+    echo "error: processes still hold open files from $DEST/bin — a launcher from the" >&2
+    echo "       pre-lock harness is running right now; refusing to refresh" >&2
+    while IFS=$'\t' read -r HOLDER_PID HOLDER_FILE; do
+        [ -n "$HOLDER_PID" ] || continue
+        printf '       stale launcher: pid=%s holds %s\n' "$HOLDER_PID" "$HOLDER_FILE" >&2
+    done <<<"$HOLDER_LIST"
+    echo "       wait for it to finish or stop it (kill -TERM <pid>), then re-run" >&2
     exit 1
 }
 
@@ -262,20 +302,30 @@ if [ "$REINSTALL_ACTIVE" -eq 1 ]; then
     # it still has to exec bin/ports.sh and bin/check-placeholders.sh from the
     # directory that just vanished — both run before it spawns emergent.
     # A stale launcher may still have recorded its run after the first scan,
-    # or be writing its metadata right now: the launch metadata under runs/ is
-    # snapshotted before the rename and compared after it, and the refresh is
-    # refused — bin/ restored, harness exactly as found — when the rescan sees
-    # a live run or the comparison sees any launch.json created or changed
-    # since the snapshot. The verdict is deterministic: it is a property of
-    # the metadata tree, not of how long anything was watched, and preexisting
-    # metadata never trips it however recent its timestamps (dead runs are
-    # normal residents of runs/, and runs/ itself is never touched either
-    # way). One tail remains open on principle: a launcher that had already
-    # passed its last bin/ exec AND writes launch.json only after the rescan
-    # below is invisible to every observation this side of its own write. Its
-    # run directory survives (runs/ is preserved), but its engine runs
-    # old-harness code — which is why --reinstall is never a licence to skip
-    # `bin/run.sh --list` first.
+    # or be running right now with its metadata write still ahead of it. Three
+    # checks after the rename close every path a stale launcher has to an
+    # unseen engine, each deterministic and each restoring bin/ on refusal:
+    #
+    #   1. The process check: any process holding an open descriptor on the
+    #      withdrawn bin/ tree is a launcher (or another consumer of this
+    #      harness) still running — bash keeps the executing script's
+    #      descriptor open for the process's whole lifetime, so a launcher
+    #      past its last bin/ exec is still visible here right up until it
+    #      exits.
+    #   2. The liveness rescan: a launcher that exited after spawning left
+    #      launch.json naming a live engine.
+    #   3. The snapshot comparison: launch metadata created or changed since
+    #      the pre-rename snapshot is a startup in flight even before it
+    #      names a live process, because run.sh writes launch.json before the
+    #      engine exists and patches the pid in afterwards.
+    #
+    # A launcher that exited before writing anything spawned nothing, and no
+    # new launcher can begin (bin/ is gone), so a stale launcher is caught
+    # running (1), caught by what it wrote (2, 3), or wrote nothing and never
+    # will. The verdicts are properties of the process table and the metadata
+    # tree, not of how long anything was watched, and preexisting metadata
+    # never trips them however recent its timestamps: dead runs are normal
+    # residents of runs/, and runs/ itself is never touched either way.
     STAGED_BIN="$DEST/.bin.reinstalling.$$"
     if [ -d "$DEST/bin" ]; then
         LAUNCH_SNAPSHOT="$(snapshot_launch_metadata "$DEST/runs")"
@@ -285,6 +335,11 @@ if [ "$REINSTALL_ACTIVE" -eq 1 ]; then
         # the test suite.
         if [ -n "${SIGNALBOX_REINSTALL_POST_WITHDRAW_HOOK:-}" ]; then
             eval "$SIGNALBOX_REINSTALL_POST_WITHDRAW_HOOK" || true
+        fi
+        STALE_LAUNCHERS="$(holders_of_withdrawn_bin "$STAGED_BIN")"
+        if [ -n "$STALE_LAUNCHERS" ]; then
+            mv -- "$STAGED_BIN" "$DEST/bin"
+            refuse_stale_launcher_processes "$STALE_LAUNCHERS"
         fi
         LIVE_RUNS="$(live_runs "$DEST/runs")"
         LAUNCH_RESCAN="$(snapshot_launch_metadata "$DEST/runs")"

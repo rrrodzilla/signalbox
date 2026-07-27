@@ -162,8 +162,8 @@ if [ "$RUN_STATUS" -eq 0 ] \
             .sent_at
             | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
         )
-        and .instance == {
-            key: "example-repo/issue-14",
+        and (.instance.key | test("^example-repo/issue-14@[A-Za-z0-9._/-]+$"))
+        and (.instance | del(.key)) == {
             repo: "example-repo",
             repo_root: ($harness + "/repos/example-repo"),
             harness: $harness,
@@ -335,6 +335,34 @@ if [ "$RUN_STATUS" -eq 0 ] \
 fi
 report_case "payload beyond the per-argument limit forwards intact" "$OK" \
     "status=$RUN_STATUS stderr=$(head -c 160 "$FIXTURE_ROOT/stderr")"
+
+# 10. Two harness trees that share a repository basename and a run slug are
+#     still two instances: the key carries canonical path identity, and it is
+#     stable across events from the same tree.
+reset_case
+TEST_INPUT='{"first":true}'
+run_subject pipeline phase.request
+FIRST_STATUS=$RUN_STATUS
+FIRST_KEY="$(jq -r '.instance.key // empty' "$FIXTURE_ROOT/curl-record/body" 2>/dev/null)"
+run_subject pipeline phase.request
+REPEAT_KEY="$(jq -r '.instance.key // empty' "$FIXTURE_ROOT/curl-record/body" 2>/dev/null)"
+reset_case
+TEST_INPUT='{"second":true}'
+run_subject pipeline phase.request
+SECOND_STATUS=$RUN_STATUS
+SECOND_KEY="$(jq -r '.instance.key // empty' "$FIXTURE_ROOT/curl-record/body" 2>/dev/null)"
+OK=1
+if [ "$FIRST_STATUS" -eq 0 ] \
+    && [ "$SECOND_STATUS" -eq 0 ] \
+    && [ -n "$FIRST_KEY" ] \
+    && [ "$FIRST_KEY" = "$REPEAT_KEY" ] \
+    && [ "$FIRST_KEY" != "$SECOND_KEY" ] \
+    && [ "${FIRST_KEY%@*}" = "example-repo/issue-14" ] \
+    && [ "${SECOND_KEY%@*}" = "example-repo/issue-14" ]; then
+    OK=0
+fi
+report_case "same repo basename and slug in two trees produce distinct keys" "$OK" \
+    "first=$FIRST_KEY repeat=$REPEAT_KEY second=$SECOND_KEY"
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

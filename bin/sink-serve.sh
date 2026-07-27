@@ -217,11 +217,12 @@ def instance_state(instance, now):
         if not os.path.exists(proc_dir):
             return "stopped"
 
-    # system.stopped.* is only a fast-path hint when /proc identity cannot be
-    # established. Wildcard exec-sink delivery is unverified, so authoritative
-    # liveness above stands alone and never depends on a system event arriving.
-    if instance.get("_stopped_hint"):
-        return "stopped"
+    # Only the authoritative identity above may report "stopped". A
+    # system.stopped.<name> event describes one primitive shutting down, not the
+    # end of the run, so it can never retire an instance whose engine is still
+    # up — and wildcard exec-sink delivery is unverified besides. An instance
+    # without launch identity (a direct or init run) therefore stays "unknown"
+    # until it goes quiet for IDLE seconds, and then "stale".
     last_event = instance.get("last_event")
     if isinstance(last_event, (int, float)) and now - last_event > IDLE:
         return "stale"
@@ -384,7 +385,6 @@ def ingest(envelope):
         if isinstance(engine, str) and "\x00" not in engine:
             instance["engines"][engine_label] = engine
         instance["last_event"] = now
-        instance["_stopped_hint"] = event_type.startswith("system.stopped.")
         EVENT_RING.append((event_type, compact))
         for client in tuple(CLIENTS):
             try:
@@ -407,12 +407,10 @@ def status():
             copied["engines"] = dict(original.get("engines", {}))
             copied["first_seen"] = original["first_seen"]
             copied["last_event"] = original["last_event"]
-            copied["_stopped_hint"] = original.get("_stopped_hint", False)
             instances.append(copied)
 
     for instance in instances:
         instance["state"] = instance_state(instance, now)
-        instance.pop("_stopped_hint", None)
         run_dir = instance.get("run_dir")
         if not isinstance(run_dir, str):
             run_dir = ""

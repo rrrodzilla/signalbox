@@ -170,7 +170,7 @@ if [ "$READY_STATUS" -eq 0 ] \
     && [ ! -s "$FORWARD_STDOUT" ] \
     && jq -e '
         .instances | length == 1
-        and .[0].key == "example-repo/issue-14"
+        and (.[0].key | startswith("example-repo/issue-14@"))
         and .[0].repo == "example-repo"
         and .[0].slug == "issue-14"
         and .[0].issue == 14
@@ -265,7 +265,7 @@ if [ "$READY_STATUS" -eq 0 ] \
             stage: "s1",
             nested: {ok: true}
         }
-        and .instance.key == "example-repo/issue-14"
+        and (.instance.key | startswith("example-repo/issue-14@"))
         and .instance.repo == "example-repo"
         and .instance.slug == "issue-14"
         and .instance.issue == 14
@@ -364,6 +364,42 @@ if [ "$READY_STATUS" -eq 0 ] \
 fi
 report_case "/proc identity alone marks a mismatched instance stopped" "$OK" \
     "ready=$READY_STATUS forward=$FORWARD_STATUS status=$STATUS_FETCH state=$(jq -r '.instances[0].state // "missing"' "$FIXTURE_ROOT/liveness.json" 2>/dev/null)"
+stop_service
+
+# 7. system.stopped.<primitive> names one component, not the run. An instance
+#    without launch identity must stay unknown when a component stops, because
+#    its engine may still be running.
+fixture
+rm -f "$RUN_DIR/launch.json"
+start_service
+READY_STATUS=$?
+if [ "$READY_STATUS" -eq 0 ]; then
+    printf '%s' '{"name":"forward-shard-built"}' \
+        | SIGNALBOX_RUN_SLUG="issue-14" \
+            SIGNALBOX_SINK_PORT="$SINK_PORT" \
+            "$FORWARD_SUBJECT" implement "system.stopped.forward-shard-built" \
+            >"$FORWARD_STDOUT" 2>"$FORWARD_STDERR"
+    FORWARD_STATUS=$?
+    curl -fsS --max-time 2 \
+        "http://127.0.0.1:$SINK_PORT/status" >"$FIXTURE_ROOT/component-stop.json"
+    STATUS_FETCH=$?
+else
+    FORWARD_STATUS=1
+    STATUS_FETCH=1
+fi
+OK=1
+if [ "$READY_STATUS" -eq 0 ] \
+    && [ "$FORWARD_STATUS" -eq 0 ] \
+    && [ "$STATUS_FETCH" -eq 0 ] \
+    && jq -e '
+        .instances | length == 1
+        and .[0].pid == null
+        and .[0].state == "unknown"
+        ' "$FIXTURE_ROOT/component-stop.json" >/dev/null 2>&1; then
+    OK=0
+fi
+report_case "a component stop leaves an unidentified instance unknown" "$OK" \
+    "ready=$READY_STATUS forward=$FORWARD_STATUS status=$STATUS_FETCH state=$(jq -r '.instances[0].state // "missing"' "$FIXTURE_ROOT/component-stop.json" 2>/dev/null)"
 stop_service
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"

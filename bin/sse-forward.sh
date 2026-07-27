@@ -3,7 +3,10 @@
 #
 # stdin is one event payload JSON value. The script wraps it in the shared
 # sink's event envelope, including run identity and launch metadata, then POSTs
-# that envelope to /ingest. Empty or invalid JSON is preserved as a truncated
+# that envelope to /ingest. The instance key inside that envelope is unique for
+# the whole machine: repository basename, run slug, and a digest of the
+# canonical repository and harness paths.
+# Empty or invalid JSON is preserved as a truncated
 # {"raw": ...} payload. Delivery is fire-and-forget: unavailable or slow sink
 # services, missing metadata, and environment discovery failures never stall or
 # fail the originating pipeline, and the success path prints nothing.
@@ -51,7 +54,40 @@ RUN_DIR="${RUN_DIR:-$FALLBACK_RUN_DIR}"
 REPO_ROOT="${REPO_ROOT:-$FALLBACK_REPO_ROOT}"
 FEATURE="${FEATURE:-}"
 
+# Registry keys must be unique for the whole machine. A repository basename and
+# a run slug are not: two checkouts named the same can run the same issue at the
+# same time and would otherwise collapse into one dashboard row. The key
+# therefore carries a digest of the canonical repository and harness paths plus
+# the slug — identity no second live instance can share. Only the digest inputs
+# are resolved; the reported repo_root/run_dir stay exactly as discovered.
+canonical_path() {
+    ( cd "$1" 2>/dev/null && pwd -P ) || printf '%s\n' "$1"
+}
+
+identity_digest() {
+    local DIGEST=""
+    if command -v sha256sum >/dev/null 2>&1; then
+        DIGEST="$(printf '%s' "$1" | sha256sum 2>/dev/null || true)"
+    elif command -v shasum >/dev/null 2>&1; then
+        DIGEST="$(printf '%s' "$1" | shasum -a 256 2>/dev/null || true)"
+    elif command -v cksum >/dev/null 2>&1; then
+        DIGEST="$(printf '%s' "$1" | cksum 2>/dev/null || true)"
+    fi
+    printf '%s' "${DIGEST%% *}"
+}
+
 SLUG="${RUN_SLUG:-single-run}"
+CANONICAL_REPO_ROOT="$(canonical_path "$REPO_ROOT")"
+CANONICAL_ROOT="$(canonical_path "$ROOT")"
+INSTANCE_IDENTITY="$CANONICAL_REPO_ROOT"$'\n'"$CANONICAL_ROOT"$'\n'"$SLUG"
+INSTANCE_ID="$(identity_digest "$INSTANCE_IDENTITY")"
+INSTANCE_ID="${INSTANCE_ID:0:12}"
+if [ -z "$INSTANCE_ID" ]; then
+    # No digest tool at all: the canonical harness path is itself unique, so the
+    # key stays correct even though it grows long.
+    INSTANCE_ID="${CANONICAL_ROOT//\//_}"
+fi
+
 REPO="$(basename -- "$REPO_ROOT" 2>/dev/null || true)"
 SENT_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
 RAW_WITH_SENTINEL="$({ cat 2>/dev/null || true; printf 'x'; })"
@@ -117,6 +153,7 @@ ENVELOPE="$(
         --arg slug "$SLUG" \
         --arg repo "$REPO" \
         --arg repo_root "$REPO_ROOT" \
+        --arg instance_id "$INSTANCE_ID" \
         --arg issue_env "${SIGNALBOX_ISSUE:-}" \
         --arg feature_env "$FEATURE" \
         '
@@ -153,7 +190,7 @@ ENVELOPE="$(
             ),
             payload: $payload,
             instance: {
-                key: ($repo + "/" + $slug),
+                key: ($repo + "/" + $slug + "@" + $instance_id),
                 repo: $repo,
                 repo_root: $repo_root,
                 harness: $root,

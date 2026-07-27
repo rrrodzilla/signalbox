@@ -14,15 +14,20 @@
 #
 # Configuration:
 #   HOME                 owns ~/.local/share/signalbox and ~/.config/systemd
-#   SIGNALBOX_SINK_PORT  health-probe port (default: 8099)
+#   SIGNALBOX_SINK_PORT  port baked into the unit and probed (default: 8099)
+#
+# The configured port is written into the unit as an Environment= line, so the
+# service, the health probe, and every forwarder that reads the same variable
+# agree on one value; changing it rewrites the unit and restarts the service.
 #
 # Several repositories can install their own harness, but exactly one process
-# may own port 8099. The unit therefore runs one canonical machine-level copy;
+# may own that port. The unit therefore runs one canonical machine-level copy;
 # the most recent harness installer wins by atomically replacing that copy.
 #
 # Exits 0 on success. `ensure` also exits 0 with a warning when systemctl or a
-# user D-Bus session is unavailable (headless/CI). Operational failures exit 1;
-# a missing/unknown subcommand or extra argument exits 64.
+# user D-Bus session is unavailable (headless/CI). Operational failures and an
+# out-of-range SIGNALBOX_SINK_PORT exit 1; a missing/unknown subcommand or
+# extra argument exits 64.
 set -euo pipefail
 
 usage() {
@@ -50,8 +55,23 @@ INSTALLED_SCRIPT="$BIN_DIR/sink-serve.sh"
 UNIT_DIR="$HOME/.config/systemd/user"
 UNIT_FILE="$UNIT_DIR/signalbox-sink.service"
 UNIT_NAME="signalbox-sink.service"
-HEALTH_URL="http://127.0.0.1:${SIGNALBOX_SINK_PORT:-8099}/healthz"
+SINK_PORT="${SIGNALBOX_SINK_PORT:-8099}"
+# The port is written verbatim into a systemd unit, so it is validated rather
+# than trusted: only a plain decimal port may reach that file. `stop`,
+# `restart`, and `uninstall` never read it, and must stay usable regardless.
+case "$COMMAND" in
+    install|ensure|status)
+        if ! [[ "$SINK_PORT" =~ ^[1-9][0-9]{0,4}$ ]] \
+            || [ "$SINK_PORT" -gt 65535 ]; then
+            echo "error: SIGNALBOX_SINK_PORT must be an integer from 1 to 65535" \
+                >&2
+            exit 1
+        fi
+        ;;
+esac
+HEALTH_URL="http://127.0.0.1:$SINK_PORT/healthz"
 SCRIPT_CHANGED=0
+UNIT_CHANGED=0
 TMP_SCRIPT=""
 TMP_UNIT=""
 
@@ -68,13 +88,16 @@ trap cleanup EXIT
 write_unit() {
     # Restart=on-failure does not fight a clean `systemctl --user stop`.
     # Persisting that stop across later starts needs `systemctl --user mask`.
-    cat <<'EOF'
+    # The port travels with the unit: without it the service would always bind
+    # the 8099 default while probes and forwarders honoured the override.
+    cat <<EOF
 [Unit]
 Description=Signalbox shared SSE sink (machine-wide instance dashboard)
 After=default.target
 
 [Service]
 Type=simple
+Environment=SIGNALBOX_SINK_PORT=$SINK_PORT
 ExecStart=%h/.local/share/signalbox/bin/sink-serve.sh
 Restart=on-failure
 RestartSec=2
@@ -107,6 +130,7 @@ install_files() {
     if [ ! -f "$UNIT_FILE" ] || ! cmp -s "$TMP_UNIT" "$UNIT_FILE"; then
         mv "$TMP_UNIT" "$UNIT_FILE"
         TMP_UNIT=""
+        UNIT_CHANGED=1
     else
         rm -f "$TMP_UNIT"
         TMP_UNIT=""
@@ -148,7 +172,9 @@ ensure_service() {
 
     systemctl --user daemon-reload
     systemctl --user enable --now "$UNIT_NAME"
-    if [ "$SCRIPT_CHANGED" -eq 1 ]; then
+    # A rewritten unit needs the restart too: enable --now leaves an already
+    # running service on its old port after the configured port changes.
+    if [ "$SCRIPT_CHANGED" -eq 1 ] || [ "$UNIT_CHANGED" -eq 1 ]; then
         systemctl --user restart "$UNIT_NAME"
     fi
 

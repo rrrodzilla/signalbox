@@ -215,8 +215,9 @@ narrow_git_rules() {
             | "Bash(git diff:*)" \
             | "Bash(git show:*)" \
             | "Bash(git rev-parse:*)" \
-            | "Bash(git symbolic-ref:*)" \
-            | "Bash(git branch:*)" \
+            | "Bash(git symbolic-ref --short HEAD)" \
+            | "Bash(git branch --show-current)" \
+            | "Bash(git branch --list)" \
             | "Bash(git worktree list:*)")
                 ;;
             "Bash(git -C $WORKTREE status --porcelain)" \
@@ -231,7 +232,12 @@ narrow_git_rules() {
         esac
     done < <(grep '^Bash(git ' "$FILE")
 
-    if grep -Fx 'Bash(git -C:*)' "$FILE" >/dev/null; then
+    # `symbolic-ref` and `branch` have write modes, so any trailing-argument
+    # wildcard on them escapes the read-only contract no matter what else the
+    # rule list contains.
+    if grep -Fx 'Bash(git -C:*)' "$FILE" >/dev/null \
+        || grep -E '^Bash\(git (-C [^ )]+ )?(symbolic-ref|branch)( [^)]*)?:\*\)$' \
+            "$FILE" >/dev/null; then
         OK=1
     fi
     return "$OK"
@@ -352,7 +358,8 @@ fi
 report_case "unparseable model output fails safe to HALT" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 200 "$SUBJECT_STDOUT")"
 
-# 6. Repo-root read-only rules are invariant across all phases, and the only
+# 6. Repo-root read-only rules are invariant across all phases: the write-capable
+# subcommands are granted only in their exact read-only forms, and the only
 # optional git -C rules are the two exact integration porcelain forms.
 RULES_OK=0
 RULES_DETAIL=""
@@ -367,6 +374,11 @@ for TEST_PHASE in plan implement review promote; do
     if [ "$RUN_STATUS" -ne 0 ] \
         || ! grep -Fx 'Bash(git log:*)' "$ARGV_CAPTURE" >/dev/null \
         || ! grep -Fx 'Bash(git diff:*)' "$ARGV_CAPTURE" >/dev/null \
+        || ! grep -Fx 'Bash(git symbolic-ref --short HEAD)' \
+            "$ARGV_CAPTURE" >/dev/null \
+        || ! grep -Fx 'Bash(git branch --show-current)' \
+            "$ARGV_CAPTURE" >/dev/null \
+        || ! grep -Fx 'Bash(git branch --list)' "$ARGV_CAPTURE" >/dev/null \
         || ! narrow_git_rules \
             "$ARGV_CAPTURE" "$INT_WT_PATH" "$EXPECT_WORKTREE_RULES"; then
         RULES_OK=1

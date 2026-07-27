@@ -79,15 +79,19 @@ fi
 # A path grant only makes the worktree visible; acceptEdits still denies Bash
 # commands unless their prefixes are allowed. Grant the narrow read-only git
 # forms the operator asks for, plus only the exact integration porcelain form
-# when that path exists. The operator remains unable to mutate repository state.
+# when that path exists. `symbolic-ref` and `branch` are spelled out in full
+# because a `:*` prefix on either would also admit their write modes (ref
+# updates, -d/-D deletion, -m renaming). The operator remains unable to mutate
+# repository state.
 GIT_TOOLS=(
     "Bash(git status:*)"
     "Bash(git log:*)"
     "Bash(git diff:*)"
     "Bash(git show:*)"
     "Bash(git rev-parse:*)"
-    "Bash(git symbolic-ref:*)"
-    "Bash(git branch:*)"
+    "Bash(git symbolic-ref --short HEAD)"
+    "Bash(git branch --show-current)"
+    "Bash(git branch --list)"
     "Bash(git worktree list:*)"
 )
 if [ -d "$INT_WT" ]; then

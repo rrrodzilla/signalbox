@@ -46,6 +46,7 @@ finish() {
     local UNCHANGED_JSON
     local ISSUE_JSON="null"
     local PROVENANCE
+    local STATE_TEMP
 
     UPDATED_JSON="$(jq -nc --args '$ARGS.positional' "${UPDATED[@]}")"
     UNCHANGED_JSON="$(jq -nc --args '$ARGS.positional' "${UNCHANGED[@]}")"
@@ -53,6 +54,15 @@ finish() {
         ISSUE_JSON="$ISSUE"
     fi
 
+    # The evidence file is the completion signal for two other processes:
+    # bin/engine-reaper.sh stops the review engine as soon as it appears fresh,
+    # and bin/docs-sync-wait.sh parses it as the promotion precondition. Writing
+    # in place would publish it at truncation time — empty, then partial — so
+    # both could act on a document this function has not finished writing. Build
+    # it in a sibling temp file and rename: the fresh path only ever names a
+    # complete document. `>|` because mktemp already created the temp file,
+    # which plain `>` refuses to truncate under noclobber.
+    STATE_TEMP="$(mktemp "$RUN_DIR/state/.docs-sync.json.tmp.XXXXXX")"
     jq -n \
         --argjson updated "$UPDATED_JSON" \
         --argjson unchanged "$UNCHANGED_JSON" \
@@ -72,7 +82,8 @@ finish() {
             issue: $issue,
             correlation_id: $cid,
             ts: (now | todate)
-        }' >"$STATE_PATH"
+        }' >|"$STATE_TEMP"
+    mv -f -- "$STATE_TEMP" "$STATE_PATH"
 
     if [ "$MODEL_RAN" -eq 1 ]; then
         stamp_provenance "state/docs-sync.json" claude sonnet ""

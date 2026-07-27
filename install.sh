@@ -16,7 +16,7 @@
 #                   repo earns its own autonomy track record from R2
 #
 # After installing: `emergent --config <dest>/init.toml` once to fill the
-# vault, then per feature: `TRIP_ISSUE=<n> emergent --config <dest>/plan.toml`
+# vault, then per feature: `SIGNALBOX_ISSUE=<n> emergent --config <dest>/plan.toml`
 # (issue -> validated plan.json), `emergent --config <dest>/implement.toml`,
 # then the review loop.
 # A repo that has never used TRIP needs two things this installer provides:
@@ -138,5 +138,5 @@ grep -qxF '.claude' "$GIT_COMMON/info/exclude" 2>/dev/null \
 echo "installed: $DEST"
 echo "engines:   $REPO-pipeline (+ $REPO-init, $REPO-plan, $REPO-implement-stream, $REPO-review-loop)"
 echo "next:      emergent --config $DEST/init.toml                    (fill the vault, once per repo)"
-echo "           TRIP_ISSUE=<n> emergent --config $DEST/pipeline.toml (issue -> plan -> implement -> review,"
+echo "           SIGNALBOX_ISSUE=<n> emergent --config $DEST/pipeline.toml (issue -> plan -> implement -> review,"
 echo "                                                                 Fable operating the phase seams)"

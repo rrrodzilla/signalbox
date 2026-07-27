@@ -1034,26 +1034,35 @@ function appendProvenancePills(parent, value) {
   }
 }
 
+// Phase state is derived from the current launch only. A stamp or artifact
+// /status marked stale belongs to an earlier launch of the same run
+// directory, so it is dropped here rather than read as this launch's
+// progress. An artifact that is live while its producing phase has no live
+// stamp is a bin/run.sh --phase launch: the phase produced it, so it counts
+// as done. A live state/escalated.json is already newer than every live
+// stamp — /status marks it stale otherwise — so no stamp comparison is left
+// to make.
 function derive(run) {
   const a = run.artifacts;
-  const stamp = p => a["state/pipeline-" + p + ".stamp"];
+  const live = x => (x && x.exists === true && x.stale !== true) ? x : null;
+  const stamp = p => live(a["state/pipeline-" + p + ".stamp"]);
   const out = {};
-  const ps = stamp("plan"), pj = a["plan.json"];
-  out.plan = !ps.exists ? "pending" : (pj.exists && pj.mtime >= ps.mtime ? "done" : "active");
-  const is = stamp("implement"), gj = a["state/gate.json"];
-  if (!is.exists) out.implement = "pending";
-  else if (gj.exists && gj.mtime >= is.mtime)
-    out.implement = (gj.json && gj.json.verdict === "GREEN") ? "done" : "failed";
+  const ps = stamp("plan"), pj = live(a["plan.json"]);
+  if (!ps) out.plan = pj ? "done" : "pending";
+  else out.plan = (pj && pj.mtime >= ps.mtime) ? "done" : "active";
+  const is = stamp("implement"), gj = live(a["state/gate.json"]);
+  const verdictState = () => (gj.json && gj.json.verdict === "GREEN") ? "done" : "failed";
+  if (!is) out.implement = gj ? verdictState() : "pending";
+  else if (gj && gj.mtime >= is.mtime) out.implement = verdictState();
   else out.implement = "active";
-  const rs = stamp("review"), cr = a["results/CR.md"], pend = a["state/pending.json"];
-  if (!rs.exists) out.review = "pending";
-  else if (cr.exists && cr.mtime >= rs.mtime) out.review = "done";
-  else if (pend.exists && pend.mtime >= rs.mtime) out.review = "parked";
+  const rs = stamp("review"), cr = live(a["results/CR.md"]), pend = live(a["state/pending.json"]);
+  if (!rs) out.review = cr ? "done" : (pend ? "parked" : "pending");
+  else if (cr && cr.mtime >= rs.mtime) out.review = "done";
+  else if (pend && pend.mtime >= rs.mtime) out.review = "parked";
   else out.review = "active";
   out.promote = promoteStates[run.key] || "pending";
-  const esc = a["state/escalated.json"];
-  const stamps = PHASES.map(p => stamp(p)).filter(x => x && x.exists).map(x => x.mtime);
-  if (esc.exists && esc.json && stamps.length && esc.mtime >= Math.max(...stamps)) {
+  const esc = live(a["state/escalated.json"]);
+  if (esc && esc.json) {
     const p = esc.json.escalated_phase === "shard" ? "implement" : esc.json.escalated_phase;
     if (out[p]) out[p] = "escalated";
   }

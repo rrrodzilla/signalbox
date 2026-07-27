@@ -120,9 +120,32 @@ def load_launch(run_dir):
         return None
     return launch if isinstance(launch, dict) else None
 
-def pid_state(pid):
+def engine_pid(run_dir):
+    """The active-run marker bin/run.sh writes on launch and removes on exit."""
+    p = os.path.join(run_dir, "state", "engine.pid")
+    try:
+        with open(p) as fh:
+            first = fh.readline().strip()
+    except OSError:
+        return None
+    try:
+        return int(first)
+    except ValueError:
+        return None
+
+def pid_state(pid, marker_pid):
+    """Liveness of a run's launch PID, corroborated by its engine.pid marker.
+
+    A launch PID alone proves nothing once the run is over: the OS recycles
+    PIDs, so an unrelated process can make a finished run look alive and keep
+    it holding a port its lease already released. bin/run.sh removes
+    state/engine.pid when the launcher exits, so a launch PID counts as alive
+    only while that marker still names it.
+    """
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return "unknown"
+    if marker_pid != pid:
+        return "dead"
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -170,7 +193,8 @@ def run_info(run_dir, fallback_slug):
         "issue": issue,
         "feature": feature,
         "launch": launch,
-        "pid_state": pid_state(launch.get("pid") if launch else None),
+        "pid_state": pid_state(launch.get("pid") if launch else None,
+                               engine_pid(run_dir)),
         "artifacts": artifacts,
         "logs": logs,
         "streams": discover_streams(run_dir, slug),
@@ -189,6 +213,9 @@ def resolve_stream_ports(runs):
     would relabel the active run's events (and its promote state). So: a dead
     run owns no stream at all, and among the survivors a live run outranks an
     "unknown" one. Ties keep the first run scanned.
+
+    A finished run always ranks dead here, PID recycling included, because
+    pid_state requires its engine.pid marker to still name the launch PID.
     """
     owner = {}
     for run_idx, run in enumerate(runs):
@@ -234,6 +261,10 @@ def discover_runs():
 def status():
     return {"now": time.time(), "harness": HARNESS, "runs": discover_runs()}
 
+def header_text(value):
+    """Header-safe label: run slugs come from launch.json, headers are ASCII."""
+    return "".join(c if 32 <= ord(c) < 127 else "?" for c in str(value))
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -260,19 +291,22 @@ class Handler(BaseHTTPRequestHandler):
             except (IndexError, ValueError):
                 self._body(400, "text/plain", b"bad stream path")
                 return
-            allowed = {
-                stream["port"]
+            # resolve_stream_ports leaves at most one stream per port, so this
+            # is the port's sole owner as of this connect.
+            owners = {
+                stream["port"]: stream
                 for run in discover_runs()
                 for stream in run["streams"]
             }
-            if port not in allowed:
+            owner = owners.get(port)
+            if owner is None:
                 self._body(404, "text/plain", b"unknown stream port")
                 return
-            self.proxy_sse(port)
+            self.proxy_sse(port, owner)
         else:
             self._body(404, "text/plain", b"not found")
 
-    def proxy_sse(self, port):
+    def proxy_sse(self, port, owner):
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=4)
         try:
             conn.request("GET", "/events", headers={"Accept": "text/event-stream"})
@@ -288,6 +322,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
+        # The owner resolved for this connection, so the page can label the
+        # events it is about to read without waiting for its next /status poll
+        # — a port re-leased between polls would otherwise carry the previous
+        # run's name (and promote state) into the new owner's events.
+        self.send_header("X-Signalbox-Run", header_text(owner["run"]))
+        self.send_header("X-Signalbox-Stream", header_text(owner["name"]))
         self.end_headers()
         # SSE idles between events; only the connect gets a timeout.
         conn.sock.settimeout(None)
@@ -370,20 +410,27 @@ td.age, td.size { color:var(--dim); white-space:nowrap; text-align:right; }
 // Streams are discovered server-side from the harness TOMLs and delivered
 // via /status — the page assumes no port numbers. /status already resolves a
 // reused port to its owning live run, so at most one stream per port arrives
-// and a changed label means the port genuinely changed hands.
+// and a changed label means the port genuinely changed hands. Each SSE
+// response repeats the owner it resolved at connect time, which is what the
+// event labels follow: a handoff between two polls must not be read through
+// the previous owner's identity.
 const STREAMS = [];
 const PHASES = ["plan","implement","review","promote"];
 const promoteStates = {};
 const $ = id => document.getElementById(id);
 
+function adoptIdentity(stream, run, name) {
+  if (run) stream.run = run;
+  if (name) stream.name = name;
+  const b = $("badge-" + stream.port);
+  if (b) b.textContent = stream.run + "/" + stream.name + " :" + stream.port;
+}
+
 function ensureStreams(list) {
   for (const s of list || []) {
     const existing = STREAMS.find(x => x.port === s.port);
     if (existing) {
-      existing.run = s.run;
-      existing.name = s.name;
-      const oldBadge = $("badge-" + s.port);
-      if (oldBadge) oldBadge.textContent = s.run + "/" + s.name + " :" + s.port;
+      adoptIdentity(existing, s.run, s.name);
       continue;
     }
     const stream = Object.assign({}, s, {cls: "c" + (STREAMS.length % 5)});
@@ -533,6 +580,11 @@ async function attach(stream) {
       badge(stream.port, "connecting");
       const r = await fetch("/stream/" + stream.port + "/events");
       if (!r.ok) throw new Error("offline");
+      // Take the owner the proxy actually connected to before reading a
+      // single event: on a fast handoff this connection belongs to the new
+      // run while /status still reports the old one.
+      adoptIdentity(stream, r.headers.get("X-Signalbox-Run"),
+                    r.headers.get("X-Signalbox-Stream"));
       badge(stream.port, "live");
       const rd = r.body.getReader();
       const dec = new TextDecoder();

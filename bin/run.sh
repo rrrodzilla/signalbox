@@ -6,8 +6,10 @@
 # is human narration and diagnostics go to stderr.
 #
 # Launches one Emergent engine as a child, records its run metadata, and remains
-# its foreground supervisor. Startup — from inspecting existing run state until
-# launch.json records the engine — holds the harness lock shared, so a
+# its foreground supervisor. Every launcher mode claims the run exclusively
+# first (see claim_run_ownership), so a run has exactly one launcher of any
+# mode at a time. Startup — from inspecting existing run state until
+# launch.json records the engine — then holds the harness lock shared, so a
 # concurrent install.sh --reinstall cannot refresh the tree around a run its
 # liveness scan never saw. Because the run directory is reused across launches
 # of the same issue, it also removes the previous launch's terminal evidence
@@ -15,20 +17,20 @@
 #
 # Standalone plan, implement, and review launches stamp their phase, supervise
 # fresh disk artifacts rather than buffered engine narration, stop only their
-# own child PID, and publish normalized complete/halted terminal evidence. The
+# own child PID, and publish normalized complete/halted terminal evidence whose
+# correlation ID is read from the fresh artifact that settled the terminal. The
 # pipeline launch deliberately keeps the original bare wait contract: its
 # topology owns phase stamps, artifact supervision, operator verification, and
 # terminal records.
 #
 # Promote is a non-engine recovery path. It first fails closed on the existing
 # review CR (an exact PROMOTION_READY line), correlation ID, and review stamp,
-# then takes an exclusive per-run promotion lock — only one launcher may ever
-# push and merge a given run — and records this launcher as the live owner
-# without leasing a port, rendering templates, spawning Emergent, or
-# fabricating a promote/review stamp. It invokes bin/promote-exec.sh with the
-# normal phase.request shape and records the result as a standalone terminal.
-# No standalone terminal claims operator verification: bin/operator.sh runs
-# only inside the pipeline topology.
+# then claims the run — only one launcher may ever push and merge a given run —
+# and records this launcher as the live owner without leasing a port, rendering
+# templates, spawning Emergent, or fabricating a promote/review stamp. It
+# invokes bin/promote-exec.sh with the normal phase.request shape and records
+# the result as a standalone terminal. No standalone terminal claims operator
+# verification: bin/operator.sh runs only inside the pipeline topology.
 set -euo pipefail
 # shellcheck source=_liveness.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_liveness.sh"
@@ -57,10 +59,9 @@ forward_event() {
 
     # Dashboard delivery is parity-only. Detach all output and do not wait:
     # an unavailable or wedged shared sink must never stall this launcher.
-    # 8>&- keeps the promote path's exclusive lock out of this detached child,
-    # which may outlive the launcher; an inherited copy would hold the run's
-    # promotion ownership after exit. Closing an unopened fd is a no-op on the
-    # phases that never take it.
+    # 8>&- keeps this launcher's run ownership out of the detached child, which
+    # may outlive the launcher; an inherited copy would hold the run claimed
+    # after exit. Closing an unopened fd is a no-op if the claim was never made.
     printf '%s\n' "$PAYLOAD" \
         | "$ROOT/bin/sse-forward.sh" pipeline "$TOPIC" \
             >/dev/null 2>&1 8>&- &
@@ -131,39 +132,58 @@ terminal_next_step() {
     esac
 }
 
+# Correlation from a JSON artifact, but only while that artifact is fresh for
+# this launch; a stale one contributes nothing.
+fresh_json_correlation() {
+    local ARTIFACT="$1"
+
+    fresh "$ARTIFACT" || return 0
+    jq -r '
+        if type == "object"
+            and (.correlation_id | type) == "string"
+        then .correlation_id
+        else ""
+        end
+    ' "$ARTIFACT" 2>/dev/null || true
+}
+
+fresh_cr_correlation() {
+    local ARTIFACT="$RUN_DIR/results/CR.md"
+
+    fresh "$ARTIFACT" || return 0
+    cr_correlation_id "$ARTIFACT" 2>/dev/null || true
+}
+
+# The terminal's correlation ID comes from the artifact that actually settled
+# it, keyed on the observed outcome — never from the phase alone. A run
+# directory is reused across launches, so plan.json, state/gate.json and
+# results/CR.md all survive from the previous attempt: reading results/CR.md
+# for every review terminal would stamp a fresh PARKED or ESCALATED record with
+# the *previous* review's identity, while the current ID sits unread in
+# state/pending.json or state/escalated.json. Outcomes with no artifact of
+# their own (TIMEOUT, ENGINE_DIED) resolve to empty, which record_terminal
+# writes as null: no correlation is truthful, borrowed correlation is not.
 resolve_correlation_id() {
     local CORRELATION=""
 
-    case "$PHASE" in
-        plan)
-            CORRELATION="$(
-                jq -r '
-                    if type == "object"
-                        and (.correlation_id | type) == "string"
-                    then .correlation_id
-                    else ""
-                    end
-                ' "$RUN_DIR/plan.json" 2>/dev/null || true
-            )"
-            ;;
-        implement)
-            CORRELATION="$(
-                jq -r '
-                    if type == "object"
-                        and (.correlation_id | type) == "string"
-                    then .correlation_id
-                    else ""
-                    end
-                ' "$RUN_DIR/state/run.json" 2>/dev/null || true
-            )"
-            ;;
-        review)
-            if [ -f "$RUN_DIR/results/CR.md" ]; then
-                CORRELATION="$(cr_correlation_id "$RUN_DIR/results/CR.md" 2>/dev/null || true)"
-            fi
-            ;;
-        promote)
+    case "$PHASE:$OUTCOME" in
+        promote:*)
             CORRELATION="${PROMOTE_CORRELATION_ID:-}"
+            ;;
+        *:ESCALATED)
+            CORRELATION="$(fresh_json_correlation "$RUN_DIR/state/escalated.json")"
+            ;;
+        plan:ARTIFACT)
+            CORRELATION="$(fresh_json_correlation "$RUN_DIR/plan.json")"
+            ;;
+        implement:ARTIFACT | implement:GATE_RED)
+            CORRELATION="$(fresh_json_correlation "$RUN_DIR/state/gate.json")"
+            ;;
+        review:ARTIFACT)
+            CORRELATION="$(fresh_cr_correlation)"
+            ;;
+        review:PARKED)
+            CORRELATION="$(fresh_json_correlation "$RUN_DIR/state/pending.json")"
             ;;
     esac
 
@@ -297,6 +317,33 @@ list_runs() {
     done
 }
 
+# Claim this run for this launcher, atomically, across every launcher mode.
+# Each mode writes the same shared run metadata — launch.json, state/engine.pid,
+# the rendered configs — and promote additionally pushes a branch and merges a
+# PR, so at most one launcher of any mode may own a run at a time. The
+# state/engine.pid check cannot provide that: two launchers can both read the
+# same stale PID file, or both pass it before either writes its own, and both
+# proceed. Take an exclusive lock on the run first and hold it for this
+# launcher's whole life. Non-blocking on purpose — a second launcher must
+# refuse, not queue behind work that is already in flight. Callers must close
+# fd 8 in any child that can outlive them, or the claim outlives the launcher.
+claim_run_ownership() {
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "error: flock is missing — reinstall; run ownership depends on it" >&2
+        exit 1
+    fi
+    mkdir -p "$RUN_DIR/state"
+    RUN_LOCK="$RUN_DIR/state/launcher.lock"
+    if ! exec 8>>"$RUN_LOCK"; then
+        echo "error: cannot create the run ownership lock: $RUN_LOCK" >&2
+        exit 1
+    fi
+    if ! flock -n 8; then
+        echo "error: run $RUN_SLUG is already owned by another bin/run.sh launcher; wait for it to finish" >&2
+        exit 1
+    fi
+}
+
 stop_child() {
     if [ -z "$CHILD_PID" ] || [ "$CHILD_REAPED" -eq 1 ]; then
         return 0
@@ -406,26 +453,11 @@ if [ "$PHASE" = "promote" ]; then
         exit 1
     fi
 
-    # Promotion pushes a branch and merges a PR, so exactly one launcher may own
-    # it per run. The engine.pid check below cannot provide that: two same-issue
-    # launchers can both read the same stale PID file and both proceed. Take an
-    # atomic exclusive lock on the run first and hold it for the whole
-    # promotion. Non-blocking on purpose — a second promoter must refuse, not
-    # queue behind a merge that is already in flight.
-    mkdir -p "$RUN_DIR/state"
-    PROMOTE_LOCK="$RUN_DIR/state/promote.lock"
-    if ! command -v flock >/dev/null 2>&1; then
-        echo "error: flock is missing — reinstall; promotion ownership depends on it" >&2
-        exit 1
-    fi
-    if ! exec 8>>"$PROMOTE_LOCK"; then
-        echo "error: cannot create the promotion lock: $PROMOTE_LOCK" >&2
-        exit 1
-    fi
-    if ! flock -n 8; then
-        echo "error: promotion for $RUN_SLUG is already owned by another launcher; wait for it to finish" >&2
-        exit 1
-    fi
+    # Promotion pushes a branch and merges a PR, so it must hold the run
+    # exclusively against every other launcher mode, not just against another
+    # promoter — a plan, implement, review, or pipeline launcher overwrites the
+    # same launch.json and state/engine.pid this promotion depends on.
+    claim_run_ownership
 
     install_lock "$ROOT" shared || exit 1
 
@@ -598,6 +630,11 @@ if [ ! -f "$DOCS/ARCHI.md" ]; then
     exit 1
 fi
 
+# Claim the run before anything reads or writes its shared metadata, so a
+# concurrent launcher of any mode — including a promotion that may push and
+# merge — refuses instead of racing this one.
+claim_run_ownership
+
 # Startup window: everything from here until launch.json carries this engine's
 # pid runs under the shared harness lock, which install.sh --reinstall takes
 # exclusively across its liveness scan and refresh. Holding it shared means
@@ -704,9 +741,11 @@ esac
 
 # 9>&- keeps the harness lock out of the engine: an inherited copy would hold
 # it for the whole run, so a later reinstall would block on the lock instead of
-# refusing with the live run named.
+# refusing with the live run named. 8>&- does the same for this launcher's run
+# ownership: an engine that outlives its launcher must not keep the next
+# launcher of any mode locked out of the run.
 SIGNALBOX_ISSUE="$ISSUE" SIGNALBOX_RUN_SLUG="$RUN_SLUG" \
-    emergent --config "$RUN_DIR/$CONFIG_NAME.toml" >"$LOG" 2>&1 9>&- &
+    emergent --config "$RUN_DIR/$CONFIG_NAME.toml" >"$LOG" 2>&1 9>&- 8>&- &
 CHILD_PID=$!
 printf '%s\n' "$CHILD_PID" >"$PID_FILE"
 PID_FILE_OWNED=1

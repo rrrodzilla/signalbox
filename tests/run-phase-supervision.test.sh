@@ -75,6 +75,8 @@ skip_all() {
         "promote garbage records halted"
         "promote preserves launch start"
         "pipeline SIGTERM records no launcher terminal"
+        "parked review ignores stale CR correlation"
+        "promote refuses while another mode owns the run"
     )
 
     for NAME in "${NAMES[@]}"; do
@@ -188,6 +190,9 @@ printf '%s\n' \
     '        ;;' \
     '    review-parked)' \
     '        jq -n '"'"'{decision: "human"}'"'"' >"$RUN_DIR/state/pending.json"' \
+    '        ;;' \
+    '    review-parked-cid)' \
+    '        jq -n --arg correlation_id pending-correlation '"'"'{decision: "human", correlation_id: $correlation_id}'"'"' >"$RUN_DIR/state/pending.json"' \
     '        ;;' \
     '    review-no-sync)' \
     '        printf '"'"'# CR\ncorrelation_id: grace-correlation\nPROMOTION_READY\n'"'"' >"$RUN_DIR/results/CR.md"' \
@@ -569,6 +574,62 @@ if [ "$LAUNCH_READY" -eq 0 ] \
     OK=0
 fi
 report_case "pipeline SIGTERM records no launcher terminal" "$OK" \
+    "status=$SUBJECT_STATUS launch=$LAUNCH_READY stderr=$(head -c 240 "$ERR")"
+
+# 16. A reused run directory keeps the previous review's CR.md. A fresh PARKED
+# terminal must carry the id from this launch's pending.json, never that
+# leftover.
+ISSUE=3216
+RUN_DIR="$HARNESS/runs/issue-$ISSUE"
+mkdir -p "$RUN_DIR/results" \
+    || fatal 'the stale CR results directory could not be created'
+printf '# CR\ncorrelation_id: stale-correlation\nPROMOTION_READY\n' \
+    >"$RUN_DIR/results/CR.md" \
+    || fatal 'the stale CR could not be written'
+run_subject "$ISSUE" review review-parked-cid
+OK=1
+if [ "$SUBJECT_STATUS" -eq 0 ] \
+    && jq -e '
+        .terminal == "complete"
+        and .payload.outcome == "PARKED"
+        and .correlation_id == "pending-correlation"
+    ' "$RUN_DIR/state/complete.json" >/dev/null 2>&1; then
+    OK=0
+fi
+report_case "parked review ignores stale CR correlation" "$OK" \
+    "status=$SUBJECT_STATUS correlation=$(jq -r '.correlation_id' "$RUN_DIR/state/complete.json" 2>/dev/null)"
+
+# 17. Run ownership is exclusive across launcher modes, not just among
+# promoters: a promotion refuses while a plan launcher owns the same run, and
+# refuses on the ownership claim rather than on the PID file.
+ISSUE=3217
+RUN_DIR="$HARNESS/runs/issue-$ISSUE"
+CASE_DIR="$FIX/case-$ISSUE-owner"
+mkdir -p "$CASE_DIR" || fatal 'the ownership case directory could not be created'
+write_review_evidence "$ISSUE" owner-correlation
+PATH="$STUB_BIN:$PATH" \
+    SIGNALBOX_LEASE_REGISTRY="$LEASE_REGISTRY" \
+    SIGNALBOX_TEST_HARNESS="$HARNESS" \
+    SIGNALBOX_TEST_MODE=idle \
+    "$SUBJECT" "$ISSUE" --phase plan \
+    >"$CASE_DIR/stdout" 2>"$CASE_DIR/stderr" &
+OWNER_PID=$!
+CHILD_PIDS+=("$OWNER_PID")
+OWNER_INDEX=$((${#CHILD_PIDS[@]} - 1))
+await_launch "$RUN_DIR/launch.json" "$OWNER_PID"
+LAUNCH_READY=$?
+run_subject "$ISSUE" promote idle artifact
+OK=1
+if [ "$LAUNCH_READY" -eq 0 ] \
+    && [ "$SUBJECT_STATUS" -eq 1 ] \
+    && [ ! -e "$PROMOTE_MARKER" ] \
+    && grep -q 'already owned by another bin/run.sh launcher' "$ERR"; then
+    OK=0
+fi
+kill -TERM "$OWNER_PID" 2>/dev/null || true
+wait "$OWNER_PID" 2>/dev/null
+CHILD_PIDS[$OWNER_INDEX]=""
+report_case "promote refuses while another mode owns the run" "$OK" \
     "status=$SUBJECT_STATUS launch=$LAUNCH_READY stderr=$(head -c 240 "$ERR")"
 
 printf '%d/%d cases passed (%d skipped)\n' \

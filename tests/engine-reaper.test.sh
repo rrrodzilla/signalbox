@@ -13,6 +13,7 @@ TESTS_PASSED=0
 RUN_STATUS=0
 FIXTURE_PATH=""
 VICTIM_PID=""
+VICTIM_START=""
 
 cleanup() {
     local FIXTURE
@@ -33,15 +34,23 @@ fixture() {
     FIXTURE_PATH="$DIR"
 }
 
+# Field 22 of /proc/<pid>/stat, read the same way the subject reads it: the
+# leading pid and parenthesized comm are stripped through the last ") ".
+proc_starttime() {
+    awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$1/stat" 2>/dev/null
+}
+
 start_victim() {
     sleep 300 &
     VICTIM_PID=$!
+    VICTIM_START="$(proc_starttime "$VICTIM_PID")"
 }
 
 finish_victim() {
     kill -TERM "$VICTIM_PID" 2>/dev/null || true
     wait "$VICTIM_PID" 2>/dev/null || true
     VICTIM_PID=""
+    VICTIM_START=""
 }
 
 run_subject() {
@@ -76,7 +85,7 @@ start_victim
 printf '%s\n' "$VICTIM_PID" >"$PID_FILE"
 (sleep 1; touch "$WATCH") &
 TOUCH_PID=$!
-run_subject "$OUT" "$ERR" "$VICTIM_PID" "$PID_FILE" "$WATCH" "$STAMP" 10
+run_subject "$OUT" "$ERR" "$VICTIM_PID" "$PID_FILE" "$WATCH" "$STAMP" 10 "$VICTIM_START"
 wait "$TOUCH_PID" 2>/dev/null || true
 OK=1
 if [ "$RUN_STATUS" -eq 0 ] \
@@ -101,7 +110,7 @@ touch "$STAMP"
 start_victim
 printf '%s\n' "$VICTIM_PID" >"$PID_FILE"
 START="$SECONDS"
-run_subject "$OUT" "$ERR" "$VICTIM_PID" "$PID_FILE" "$WATCH" "$STAMP" 2
+run_subject "$OUT" "$ERR" "$VICTIM_PID" "$PID_FILE" "$WATCH" "$STAMP" 2 "$VICTIM_START"
 ELAPSED=$((SECONDS - START))
 OK=1
 if [ "$RUN_STATUS" -eq 0 ] \
@@ -130,7 +139,7 @@ touch "$STAMP"
 start_victim
 printf '%s\n' "$VICTIM_PID" >"$PID_FILE"
 START="$SECONDS"
-run_subject "$OUT" "$ERR" "$VICTIM_PID" "$PID_FILE" "$WATCH" "$STAMP" 1
+run_subject "$OUT" "$ERR" "$VICTIM_PID" "$PID_FILE" "$WATCH" "$STAMP" 1 "$VICTIM_START"
 ELAPSED=$((SECONDS - START))
 OK=1
 if [ "$RUN_STATUS" -eq 0 ] \
@@ -155,11 +164,13 @@ STAMP="$DIR/stamp"
 PID_FILE="$DIR/engine.pid"
 start_victim
 DEAD_PID="$VICTIM_PID"
+DEAD_START="$VICTIM_START"
 kill -TERM "$DEAD_PID" 2>/dev/null || true
 wait "$DEAD_PID" 2>/dev/null || true
 VICTIM_PID=""
+VICTIM_START=""
 printf '%s\n' "$DEAD_PID" >"$PID_FILE"
-run_subject "$OUT" "$ERR" "$DEAD_PID" "$PID_FILE" "$WATCH" "$STAMP" 1
+run_subject "$OUT" "$ERR" "$DEAD_PID" "$PID_FILE" "$WATCH" "$STAMP" 1 "$DEAD_START"
 OK=1
 if [ "$RUN_STATUS" -eq 0 ] \
     && [ ! -e "$PID_FILE" ] \
@@ -177,18 +188,18 @@ OUT="$DIR/stdout"
 ERR="$DIR/stderr"
 run_subject "$OUT" "$ERR"
 S0=$RUN_STATUS
-run_subject "$OUT" "$ERR" 1 "$DIR/pid" "$DIR/watch" "$DIR/stamp"
-S4=$RUN_STATUS
+run_subject "$OUT" "$ERR" 1 "$DIR/pid" "$DIR/watch" "$DIR/stamp" 1
+S5=$RUN_STATUS
 OK=1
-[ "$S0" -eq 64 ] && [ "$S4" -eq 64 ] && OK=0
-report_case "wrong argument count exits 64" "$OK" "zero-args=$S0 four-args=$S4"
+[ "$S0" -eq 64 ] && [ "$S5" -eq 64 ] && OK=0
+report_case "wrong argument count exits 64" "$OK" "zero-args=$S0 five-args=$S5"
 
 # 6. A non-numeric PID is invalid invocation.
 fixture
 DIR="$FIXTURE_PATH"
 OUT="$DIR/stdout"
 ERR="$DIR/stderr"
-run_subject "$OUT" "$ERR" nope "$DIR/pid" "$DIR/watch" "$DIR/stamp" 1
+run_subject "$OUT" "$ERR" nope "$DIR/pid" "$DIR/watch" "$DIR/stamp" 1 1
 OK=1
 [ "$RUN_STATUS" -eq 64 ] && OK=0
 report_case "non-numeric pid exits 64" "$OK" "status=$RUN_STATUS"
@@ -198,10 +209,46 @@ fixture
 DIR="$FIXTURE_PATH"
 OUT="$DIR/stdout"
 ERR="$DIR/stderr"
-run_subject "$OUT" "$ERR" 1 "$DIR/pid" "$DIR/watch" "$DIR/stamp" nope
+run_subject "$OUT" "$ERR" 1 "$DIR/pid" "$DIR/watch" "$DIR/stamp" nope 1
 OK=1
 [ "$RUN_STATUS" -eq 64 ] && OK=0
 report_case "non-numeric deadline exits 64" "$OK" "status=$RUN_STATUS"
+
+# 8. A non-numeric start time is invalid invocation: identity cannot be checked.
+fixture
+DIR="$FIXTURE_PATH"
+OUT="$DIR/stdout"
+ERR="$DIR/stderr"
+run_subject "$OUT" "$ERR" 1 "$DIR/pid" "$DIR/watch" "$DIR/stamp" 1 nope
+OK=1
+[ "$RUN_STATUS" -eq 64 ] && OK=0
+report_case "non-numeric start time exits 64" "$OK" "status=$RUN_STATUS"
+
+# 9. A live PID whose start time does not match the transferred identity is a
+# recycled number, not the engine: it must be left alone, not signalled.
+fixture
+DIR="$FIXTURE_PATH"
+OUT="$DIR/stdout"
+ERR="$DIR/stderr"
+STAMP="$DIR/stamp"
+WATCH="$DIR/watch"
+PID_FILE="$DIR/engine.pid"
+touch "$STAMP"
+start_victim
+printf '%s\n' "$VICTIM_PID" >"$PID_FILE"
+run_subject "$OUT" "$ERR" "$VICTIM_PID" "$PID_FILE" "$WATCH" "$STAMP" 30 \
+    $((VICTIM_START + 1))
+OK=1
+if [ "$RUN_STATUS" -eq 0 ] \
+    && kill -0 "$VICTIM_PID" 2>/dev/null \
+    && [ ! -e "$PID_FILE" ] \
+    && [ ! -s "$OUT" ] \
+    && [ ! -s "$ERR" ]; then
+    OK=0
+fi
+report_case "recycled pid with a foreign start time is never signalled" "$OK" \
+    "status=$RUN_STATUS stderr=$(head -c 200 "$ERR")"
+finish_victim
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

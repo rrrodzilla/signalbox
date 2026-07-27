@@ -9,11 +9,12 @@
 # so its event trail flushes. Exception: at a review ARTIFACT terminal with
 # docs-sync still in flight, ownership passes to bin/engine-reaper.sh so the
 # sync can finish after the pipeline advances; the reaper performs the same
-# PID-targeted graceful stop under a hard deadline. The normal shutdown also
-# runs from an EXIT/INT/TERM trap, so a runner killed mid-watch still reaps its
-# engine and clears its PID file rather than orphaning both. The runner reports
-# what it OBSERVED; judging whether the phase actually succeeded is the
-# operator's job.
+# graceful stop under a hard deadline, targeted at the engine's PID *and* the
+# start time recorded here so a recycled PID is never signalled. The normal
+# shutdown also runs from an EXIT/INT/TERM trap, so a runner killed mid-watch
+# still reaps its engine and clears its PID file rather than orphaning both.
+# The runner reports what it OBSERVED; judging whether the phase actually
+# succeeded is the operator's job.
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
@@ -79,6 +80,17 @@ SIGNALBOX_ISSUE="$ISSUE" SIGNALBOX_RUN_SLUG="$RUN_SLUG" \
     emergent --config "$CONFIG" >"$LOG" 2>&1 &
 PID=$!
 printf '%s\n' "$PID" >"$PID_FILE"
+
+# The engine's stable identity: field 22 (starttime) of /proc/<pid>/stat, read
+# now, while the engine is still this runner's unreaped child and the kernel
+# therefore cannot hand its number to anyone else. Only the deferred reaper
+# needs it — it outlives the engine and would otherwise have no way to tell a
+# recycled PID from the engine. The pid and comm are stripped through the LAST
+# ") " because comm may itself contain spaces and parentheses.
+ENGINE_STARTTIME="$(awk '{ sub(/^.*\) /, ""); print $20 }' \
+    "/proc/$PID/stat" 2>/dev/null || true)"
+[[ "$ENGINE_STARTTIME" =~ ^[0-9]+$ ]] || ENGINE_STARTTIME=""
+
 echo "[pipeline] $PHASE engine up (pid $PID), watching artifacts" >&2
 
 # Every terminal condition is a DISK ARTIFACT (issue #1): the engine's
@@ -115,6 +127,7 @@ done
 
 if [ "$PHASE" = "review" ] \
     && [ "$OUTCOME" = "ARTIFACT" ] \
+    && [ -n "$ENGINE_STARTTIME" ] \
     && kill -0 "$PID" 2>/dev/null \
     && ! fresh "$RUN_DIR/state/docs-sync.json"; then
     TRANSFERRED_PID="$PID"
@@ -126,12 +139,22 @@ if [ "$PHASE" = "review" ] \
     # belongs in the phase log.
     setsid "$(dirname "${BASH_SOURCE[0]}")/engine-reaper.sh" \
         "$PID" "$PID_FILE" "$RUN_DIR/state/docs-sync.json" "$STAMP" 960 \
+        "$ENGINE_STARTTIME" \
         </dev/null >>"$LOG" 2>&1 &
     # Ownership has passed to the reaper: emptying PID makes stop_engine a no-op,
     # so the still-armed traps can no longer terminate the transferred engine.
     PID=""
     echo "[pipeline] review terminal reached with docs-sync in flight; handed engine pid $TRANSFERRED_PID to deferred reaper (deadline: 960s)" >&2
 else
+    # Without a readable start time the reaper could not distinguish the engine
+    # from a later process reusing its number, so the handoff is declined and
+    # this runner reaps the engine itself — docs-sync loses the deferred window,
+    # which the promotion precondition then reports as missing evidence.
+    if [ "$PHASE" = "review" ] && [ "$OUTCOME" = "ARTIFACT" ] \
+        && [ -z "$ENGINE_STARTTIME" ]; then
+        echo "[pipeline] engine identity unreadable; declining the deferred docs-sync handoff" >&2
+    fi
+
     # Let in-flight sinks finish narrating, then stop ONLY our child, gracefully.
     if kill -0 "$PID" 2>/dev/null; then
         sleep 5

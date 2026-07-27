@@ -35,6 +35,7 @@ STATE="${SIGNALBOX_SINK_STATE:-$HOME/.local/share/signalbox/instances.json}"
 IDLE="${SIGNALBOX_SINK_IDLE:-900}"
 
 exec python3 - "$PORT" "$STATE" "$IDLE" <<'PYEOF'
+import calendar
 import errno
 import json
 import math
@@ -94,6 +95,25 @@ ARTIFACTS = [
     "state/pipeline-review.stamp",
 ]
 
+PIPELINE_STAMPS = (
+    "state/pipeline-plan.stamp",
+    "state/pipeline-implement.stamp",
+    "state/pipeline-review.stamp",
+)
+
+# bin/run.sh writes this record before it spawns any engine, for pipeline and
+# --phase launches alike, so it dates the launch that owns the run directory.
+LAUNCH_RECORD = "launch.json"
+
+ARTIFACT_GATES = {
+    "plan.json": "state/pipeline-plan.stamp",
+    "state/run.json": "state/pipeline-implement.stamp",
+    "state/gate.json": "state/pipeline-implement.stamp",
+    "results/CR.md": "state/pipeline-review.stamp",
+    "state/pending.json": "state/pipeline-review.stamp",
+    "state/docs-sync.json": "state/pipeline-review.stamp",
+}
+
 IDENTITY_FIELDS = (
     "repo",
     "repo_root",
@@ -141,6 +161,149 @@ def artifact_info(run_dir, rel):
             except (OSError, ValueError, RecursionError):
                 info["json"] = None
     return info
+
+
+def parse_started(value):
+    """Epoch seconds for an ISO-8601 UTC instant as bin/run.sh records it."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def launch_boundary(run_dir):
+    """Epoch seconds at which the run directory's current launch began.
+
+    Nothing the current launch produces can predate its launch record, so the
+    record dates the boundary between this launch's artifacts and whatever an
+    earlier launch of the same run directory left behind. The recorded start
+    instant is preferred over the record's own mtime because bin/run.sh
+    rewrites the record moments after the spawn to add the engine identity;
+    the recorded instant is truncated to the second and therefore never lands
+    after the launch. Returns None when a run directory carries no readable
+    launch record, which leaves stale detection with only the producer-phase
+    gate to go on.
+    """
+    if not isinstance(run_dir, str) or not run_dir or "\x00" in run_dir:
+        return None
+    path = os.path.join(run_dir, LAUNCH_RECORD)
+    if not os.path.isfile(path):
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    fallback = st.st_mtime if math.isfinite(st.st_mtime) else None
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(MAX_ARTIFACT_JSON)
+            if len(raw) >= MAX_ARTIFACT_JSON or fh.read(1):
+                return fallback
+        record = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=reject_constant,
+            parse_float=finite_float,
+        )
+    except (OSError, ValueError, RecursionError):
+        return fallback
+    if not isinstance(record, dict):
+        return fallback
+    started = parse_started(record.get("started"))
+    return fallback if started is None else started
+
+
+def mark_stale(artifacts, boundary=None):
+    """Mark run artifacts that the current launch did not produce.
+
+    An artifact is current when it is at least as new as the launch boundary
+    AND at least as new as the stamp of the phase that produces it, counting
+    only a stamp the current launch itself wrote. Both halves are needed: a
+    rerun under a harness that does not archive keeps the previous launch's
+    artifacts and its stamps together, so the producer-phase gate alone reads
+    them as current, while a bin/run.sh --phase launch writes no pipeline
+    stamp at all, so the gate alone reads its fresh output as stale. Without
+    a boundary — a run directory whose launch record is missing or unreadable
+    — the producer-phase gate is all that is left and is applied alone.
+    """
+    if not isinstance(artifacts, dict):
+        return artifacts
+
+    def mtime(entry):
+        if not isinstance(entry, dict):
+            return None
+        value = entry.get("mtime")
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        try:
+            return value if math.isfinite(value) else None
+        except (OverflowError, TypeError, ValueError):
+            return None
+
+    for stamp in PIPELINE_STAMPS:
+        entry = artifacts.get(stamp)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("exists") is not True or boundary is None:
+            entry["stale"] = False
+            continue
+        stamp_mtime = mtime(entry)
+        entry["stale"] = stamp_mtime is None or stamp_mtime < boundary
+
+    newest_stamp = None
+    newest_clock_valid = True
+    for stamp in PIPELINE_STAMPS:
+        entry = artifacts.get(stamp)
+        if not isinstance(entry, dict) or entry.get("exists") is not True:
+            continue
+        stamp_mtime = mtime(entry)
+        if stamp_mtime is None:
+            newest_clock_valid = False
+            break
+        if boundary is not None and stamp_mtime < boundary:
+            continue  # a stamp the previous launch left behind
+        newest_stamp = (stamp_mtime if newest_stamp is None
+                        else max(newest_stamp, stamp_mtime))
+
+    for artifact, stamp in ARTIFACT_GATES.items():
+        entry = artifacts.get(artifact)
+        if not isinstance(entry, dict) or entry.get("exists") is not True:
+            continue
+        gate = artifacts.get(stamp)
+        gate_exists = isinstance(gate, dict) and gate.get("exists") is True
+        gate_mtime = mtime(gate) if gate_exists else None
+        entry_mtime = mtime(entry)
+        if entry_mtime is None:
+            entry["stale"] = True
+        elif boundary is None:
+            entry["stale"] = gate_mtime is None or entry_mtime < gate_mtime
+        elif entry_mtime < boundary:
+            entry["stale"] = True
+        elif gate_exists and gate_mtime is None:
+            entry["stale"] = True  # unreadable phase clock: fail conservative
+        elif gate_mtime is not None and gate_mtime >= boundary:
+            entry["stale"] = entry_mtime < gate_mtime
+        else:
+            # Produced by the current launch, which wrote no stamp for the
+            # producing phase: a bin/run.sh --phase launch. It is current.
+            entry["stale"] = False
+
+    escalated = artifacts.get("state/escalated.json")
+    if isinstance(escalated, dict) and escalated.get("exists") is True:
+        escalated_mtime = mtime(escalated)
+        if escalated_mtime is None or not newest_clock_valid:
+            escalated["stale"] = True
+        elif boundary is not None and escalated_mtime < boundary:
+            escalated["stale"] = True
+        elif boundary is None:
+            escalated["stale"] = (newest_stamp is None
+                                  or escalated_mtime < newest_stamp)
+        else:
+            escalated["stale"] = (newest_stamp is not None
+                                  and escalated_mtime < newest_stamp)
+
+    return artifacts
 
 
 def log_info(run_dir):
@@ -470,6 +633,7 @@ def status():
             entry = provenance.get(artifact)
             if entry is not None:
                 info["provenance"] = entry
+        mark_stale(artifacts, launch_boundary(run_dir))
         logs = log_info(run_dir)
         for info in logs:
             entry = provenance.get("logs/" + info["file"])
@@ -734,6 +898,9 @@ table { width:100%; border-collapse:collapse; font-size:11px; }
 td { padding:2px 6px 2px 0; vertical-align:top; overflow-wrap:anywhere; }
 td.age, td.size { color:var(--faint); white-space:nowrap; text-align:right; }
 .miss { color:var(--faint); }
+.stale { color:var(--faint); opacity:.65; }
+.badge-stale { margin-left:4px; padding:0 5px; border:1px solid var(--seam);
+  border-radius:8px; color:var(--faint); font-size:10px; white-space:nowrap; }
 .ok { color:var(--green); } .bad { color:var(--red); }
 
 /* ── provenance pills (asserted by tests: keep class names) ── */
@@ -867,26 +1034,35 @@ function appendProvenancePills(parent, value) {
   }
 }
 
+// Phase state is derived from the current launch only. A stamp or artifact
+// /status marked stale belongs to an earlier launch of the same run
+// directory, so it is dropped here rather than read as this launch's
+// progress. An artifact that is live while its producing phase has no live
+// stamp is a bin/run.sh --phase launch: the phase produced it, so it counts
+// as done. A live state/escalated.json is already newer than every live
+// stamp — /status marks it stale otherwise — so no stamp comparison is left
+// to make.
 function derive(run) {
   const a = run.artifacts;
-  const stamp = p => a["state/pipeline-" + p + ".stamp"];
+  const live = x => (x && x.exists === true && x.stale !== true) ? x : null;
+  const stamp = p => live(a["state/pipeline-" + p + ".stamp"]);
   const out = {};
-  const ps = stamp("plan"), pj = a["plan.json"];
-  out.plan = !ps.exists ? "pending" : (pj.exists && pj.mtime >= ps.mtime ? "done" : "active");
-  const is = stamp("implement"), gj = a["state/gate.json"];
-  if (!is.exists) out.implement = "pending";
-  else if (gj.exists && gj.mtime >= is.mtime)
-    out.implement = (gj.json && gj.json.verdict === "GREEN") ? "done" : "failed";
+  const ps = stamp("plan"), pj = live(a["plan.json"]);
+  if (!ps) out.plan = pj ? "done" : "pending";
+  else out.plan = (pj && pj.mtime >= ps.mtime) ? "done" : "active";
+  const is = stamp("implement"), gj = live(a["state/gate.json"]);
+  const verdictState = () => (gj.json && gj.json.verdict === "GREEN") ? "done" : "failed";
+  if (!is) out.implement = gj ? verdictState() : "pending";
+  else if (gj && gj.mtime >= is.mtime) out.implement = verdictState();
   else out.implement = "active";
-  const rs = stamp("review"), cr = a["results/CR.md"], pend = a["state/pending.json"];
-  if (!rs.exists) out.review = "pending";
-  else if (cr.exists && cr.mtime >= rs.mtime) out.review = "done";
-  else if (pend.exists && pend.mtime >= rs.mtime) out.review = "parked";
+  const rs = stamp("review"), cr = live(a["results/CR.md"]), pend = live(a["state/pending.json"]);
+  if (!rs) out.review = cr ? "done" : (pend ? "parked" : "pending");
+  else if (cr && cr.mtime >= rs.mtime) out.review = "done";
+  else if (pend && pend.mtime >= rs.mtime) out.review = "parked";
   else out.review = "active";
   out.promote = promoteStates[run.key] || "pending";
-  const esc = a["state/escalated.json"];
-  const stamps = PHASES.map(p => stamp(p)).filter(x => x && x.exists).map(x => x.mtime);
-  if (esc.exists && esc.json && stamps.length && esc.mtime >= Math.max(...stamps)) {
+  const esc = live(a["state/escalated.json"]);
+  if (esc && esc.json) {
     const p = esc.json.escalated_phase === "shard" ? "implement" : esc.json.escalated_phase;
     if (out[p]) out[p] = "escalated";
   }
@@ -896,12 +1072,17 @@ function derive(run) {
 function artifactRows(run, now) {
   return Object.values(run.artifacts).map(x => {
     let extra = "";
+    const stale = x.exists && x.stale === true;
+    if (stale) {
+      extra = ' <span class="badge-stale">' + esc("previous run") + "</span>";
+    }
     if (x.exists && x.json && x.json.verdict) {
       const verdictClass = x.json.verdict === "GREEN" ? "ok" : "bad";
-      extra = ' <span class="' + verdictClass + '">' + esc(x.json.verdict) + "</span>";
+      extra += ' <span class="' + verdictClass + '">' + esc(x.json.verdict) + "</span>";
     }
     extra += provenancePills(x.provenance);
-    return "<tr><td class='" + (x.exists ? "" : "miss") + "'>" + esc(x.file) + extra + "</td>" +
+    return "<tr class='" + (stale ? "stale" : "") + "'><td class='" +
+      (x.exists ? "" : "miss") + "'>" + esc(x.file) + extra + "</td>" +
       "<td class='age'>" + (x.exists ? age(now, x.mtime) : "—") + "</td>" +
       "<td class='size'>" + (x.exists ? x.size + "b" : "") + "</td></tr>";
   }).join("");
@@ -945,14 +1126,14 @@ function verdictFor(run, states) {
   const escArt = run.artifacts["state/escalated.json"];
   const escPhase = PHASES.find(p => states[p] === "escalated");
   if (escPhase) {
-    const why = escArt.exists && escArt.json &&
+    const why = escArt.exists && escArt.stale !== true && escArt.json &&
       (escArt.json.reason || escArt.json.summary);
     return { cls:"v-red", label:"ESCALATED IN " + escPhase.toUpperCase(),
              text:why || "escalation recorded" };
   }
   if (states.review === "parked") {
     const pend = run.artifacts["state/pending.json"];
-    const j = pend.exists && pend.json ? pend.json : null;
+    const j = pend.exists && pend.stale !== true && pend.json ? pend.json : null;
     const bits = [];
     if (j && j.floor !== undefined) bits.push("floor R" + j.floor);
     if (j && j.earned !== undefined) bits.push("earned R" + j.earned);
@@ -962,13 +1143,16 @@ function verdictFor(run, states) {
   }
   const gate = run.artifacts["state/gate.json"];
   const cr = run.artifacts["results/CR.md"];
-  if (gate.exists && gate.json && gate.json.verdict && gate.json.verdict !== "GREEN") {
+  if (gate.exists && gate.stale !== true && gate.json &&
+      gate.json.verdict && gate.json.verdict !== "GREEN") {
     return { cls:"v-red", label:"GATE " + gate.json.verdict,
              text:"tip " + (gate.json.tip || "?") };
   }
-  if (cr.exists && states.review === "done" && states.promote === "pending") {
+  if (cr.exists && cr.stale !== true &&
+      states.review === "done" && states.promote === "pending") {
     return { cls:"v-white", label:"PROMOTION READY",
-             text:"CR.md written" + (gate.exists && gate.json && gate.json.tip
+             text:"CR.md written" + (gate.exists && gate.stale !== true &&
+               gate.json && gate.json.tip
                ? " · gate GREEN at " + gate.json.tip : "") };
   }
   const activePhase = PHASES.find(p => states[p] === "active");
@@ -1014,10 +1198,12 @@ function runCard(run, now, states, verdict, attention) {
   const engines = Object.entries(run.engines || {}).map(([label, engine]) =>
     esc(label) + "=" + esc(engine)).join(" · ") || "no engines registered";
   const runJson = run.artifacts["state/run.json"];
-  const correlation = runJson.exists && runJson.json && runJson.json.correlation_id
+  const correlation = runJson.exists && runJson.stale !== true &&
+    runJson.json && runJson.json.correlation_id
     ? '<div class="idline">correlation ' + esc(runJson.json.correlation_id) + "</div>" : "";
   const docs = run.artifacts["state/docs-sync.json"];
-  const docsLine = docs.exists && docs.json && Array.isArray(docs.json.updated)
+  const docsLine = docs.exists && docs.stale !== true &&
+    docs.json && Array.isArray(docs.json.updated)
     ? '<div class="idline">docs-sync: ' + esc(docs.json.updated.join(", ") || "none") + "</div>" : "";
   return '<article class="run ' + (attention ? "attention " : "") +
       (selectedKey === run.key ? "selected" : "") + '" data-key="' + esc(run.key) + '">' +

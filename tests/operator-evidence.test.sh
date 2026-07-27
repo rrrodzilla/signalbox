@@ -146,6 +146,28 @@ init_repo_branches() {
     git_fixture "$REPO_ROOT_PATH" commit -q -m "shard commit"
 }
 
+write_numbered_lines() {
+    local FILE="$1"
+    local COUNT="$2"
+
+    awk -v count="$COUNT" \
+        'BEGIN { for (line = 1; line <= count; line++) print "line " line }' \
+        >"$FILE"
+}
+
+init_tip_content_fixture() {
+    git_fixture "$REPO_ROOT_PATH" init -q -b main
+    mkdir -p "$REPO_ROOT_PATH/bin"
+    write_numbered_lines "$REPO_ROOT_PATH/bin/thing.sh" 2
+    git_fixture "$REPO_ROOT_PATH" add bin/thing.sh
+    git_fixture "$REPO_ROOT_PATH" commit -q -m base
+    git_fixture "$REPO_ROOT_PATH" checkout -q -b feat/fixture-feature
+    write_numbered_lines "$REPO_ROOT_PATH/bin/thing.sh" 20
+    git_fixture "$REPO_ROOT_PATH" add bin/thing.sh
+    git_fixture "$REPO_ROOT_PATH" commit -q -m "rewrite thing"
+    git_fixture "$REPO_ROOT_PATH" checkout -q main
+}
+
 set_fixture_base_branch() {
     local BASE="$1"
     printf 'BASE_BRANCH=%s\nexport BASE_BRANCH\n' "$(printf '%q' "$BASE")" \
@@ -256,10 +278,14 @@ read_only_git_rules() {
     local FEATURE_BRANCH="$4"
     local EXPECT_WORKTREE_RULES="$5"
     local EXPECT_FEATURE_RULES="$6"
+    local EXPECT_PINNED_READ_RULES="$7"
     local RULE
     local OK=0
     local WORKTREE_RULES=0
     local FEATURE_RULES=0
+    local PINNED_READ_RULES=0
+    local PINNED_PATH=""
+    local PINNED_RULE_RE='^Bash\(git show ([0-9a-fA-F]{40}):([A-Za-z0-9._/-]+)\)$'
 
     while IFS= read -r RULE; do
         case "$RULE" in
@@ -284,6 +310,17 @@ read_only_git_rules() {
             "Bash(git -C $WORKTREE status --porcelain)")
                 WORKTREE_RULES=$((WORKTREE_RULES + 1))
                 ;;
+            "Bash(git show "*)
+                if [[ "$RULE" =~ $PINNED_RULE_RE ]]; then
+                    PINNED_PATH="${BASH_REMATCH[2]}"
+                    case "$PINNED_PATH" in
+                        "" | -* | /* | *..*) OK=1 ;;
+                        *) PINNED_READ_RULES=$((PINNED_READ_RULES + 1)) ;;
+                    esac
+                else
+                    OK=1
+                fi
+                ;;
             *)
                 OK=1
                 ;;
@@ -294,7 +331,8 @@ read_only_git_rules() {
         OK=1
     fi
     if [ "$WORKTREE_RULES" -ne "$EXPECT_WORKTREE_RULES" ] \
-        || [ "$FEATURE_RULES" -ne "$EXPECT_FEATURE_RULES" ]; then
+        || [ "$FEATURE_RULES" -ne "$EXPECT_FEATURE_RULES" ] \
+        || [ "$PINNED_READ_RULES" -ne "$EXPECT_PINNED_READ_RULES" ]; then
         OK=1
     fi
     return "$OK"
@@ -431,7 +469,18 @@ for TEST_PHASE in plan implement review promote; do
         EXPECT_WORKTREE_RULES=1
     fi
     run_operator "$TEST_PHASE" "$PROCEED_OUTPUT"
+    EXPECT_BRANCH_SECTION=0
+    if [ "$TEST_PHASE" = "implement" ] || [ "$TEST_PHASE" = "review" ]; then
+        EXPECT_BRANCH_SECTION=1
+    fi
+    ACTUAL_BRANCH_SECTION=0
+    if grep -Fx \
+            '## Branch evidence (harness-captured live at operator time)' \
+            "$PROMPT_CAPTURE" >/dev/null; then
+        ACTUAL_BRANCH_SECTION=1
+    fi
     if [ "$RUN_STATUS" -ne 0 ] \
+        || [ "$ACTUAL_BRANCH_SECTION" -ne "$EXPECT_BRANCH_SECTION" ] \
         || ! grep -Fx 'Bash(git status --porcelain)' "$ARGV_CAPTURE" >/dev/null \
         || ! grep -Fx 'Bash(git symbolic-ref --short HEAD)' \
             "$ARGV_CAPTURE" >/dev/null \
@@ -444,7 +493,7 @@ for TEST_PHASE in plan implement review promote; do
             "$ARGV_CAPTURE" >/dev/null \
         || ! read_only_git_rules \
             "$ARGV_CAPTURE" "$INT_WT_PATH" "main" "feat/fixture-feature" \
-            "$EXPECT_WORKTREE_RULES" 3; then
+            "$EXPECT_WORKTREE_RULES" 3 0; then
         RULES_OK=1
         RULES_DETAIL="phase=$TEST_PHASE status=$RUN_STATUS"
         break
@@ -464,7 +513,8 @@ for BAD_FEATURE in 'a b --output=/tmp/x' '../escape' 'Feature' '-lead' 'trail-';
     run_operator "implement" "$PROCEED_OUTPUT"
     if [ "$RUN_STATUS" -ne 0 ] \
         || grep -F 'feat/' "$ARGV_CAPTURE" >/dev/null \
-        || ! read_only_git_rules "$ARGV_CAPTURE" "$INT_WT_PATH" "main" "" 0 0; then
+        || ! read_only_git_rules \
+            "$ARGV_CAPTURE" "$INT_WT_PATH" "main" "" 0 0 0; then
         RULES_OK=1
         RULES_DETAIL="feature=$BAD_FEATURE status=$RUN_STATUS"
         break
@@ -491,7 +541,7 @@ for BAD_BASE in 'main;id' 'main --output=/tmp/x' 'main$(id)' '-main' 'a..b'; do
         || ! grep -Fx 'Bash(git rev-parse --short feat/fixture-feature)' \
             "$ARGV_CAPTURE" >/dev/null \
         || ! read_only_git_rules \
-            "$ARGV_CAPTURE" "$INT_WT_PATH" "" "feat/fixture-feature" 0 1; then
+            "$ARGV_CAPTURE" "$INT_WT_PATH" "" "feat/fixture-feature" 0 1 0; then
         RULES_OK=1
         RULES_DETAIL="base=$BAD_BASE status=$RUN_STATUS"
         break
@@ -548,8 +598,15 @@ run_operator "implement" "$PROCEED_OUTPUT"
 BRANCH_EVIDENCE="$(branch_evidence_line)"
 OK=1
 if jq -e \
-        '.resolved == false and (.error | length > 0) and (has("commits") | not)' \
+        '.resolved == false
+            and (.error | length > 0)
+            and (has("commits") | not)
+            and (has("tip_files") | not)
+            and (has("tip_files_truncated") | not)
+            and (has("tip_files_limit") | not)' \
         <<<"$BRANCH_EVIDENCE" >/dev/null \
+    && ! grep -E '^Bash\(git show [0-9a-fA-F]{40}:' \
+        "$ARGV_CAPTURE" >/dev/null \
     && valid_proceed_payload; then
     OK=0
 fi
@@ -626,6 +683,177 @@ for INT_NAME in 'integration wt' "integration'wt" 'integration;id'; do
 done
 report_case "a worktree path carrying shell characters is granted escaped" \
     "$RULES_OK" "$RULES_DETAIL"
+
+# 13. Regression for issue #36: the primary checkout remains on main, whose
+# copy has 2 lines, while review evidence must describe the feature tip's
+# 20-line blob instead of accidentally reading the working tree.
+setup_harness
+seed_plan "fixture-feature"
+init_tip_content_fixture
+EXPECTED_BLOB="$(
+    git_fixture "$REPO_ROOT_PATH" \
+        rev-parse refs/heads/feat/fixture-feature:bin/thing.sh
+)"
+WORKTREE_LINES="$(wc -l <"$REPO_ROOT_PATH/bin/thing.sh")"
+run_operator "review" "$PROCEED_OUTPUT"
+BRANCH_EVIDENCE="$(branch_evidence_line)"
+OK=1
+if grep -Fx \
+        '## Branch evidence (harness-captured live at operator time)' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && [ "$WORKTREE_LINES" -eq 2 ] \
+    && jq -e \
+        --arg blob "$EXPECTED_BLOB" \
+        '.tip_files[]
+            | select(.path == "bin/thing.sh")
+            | .present == true and .lines == 20 and .blob == $blob' \
+        <<<"$BRANCH_EVIDENCE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "issue #36 review evidence reads the feature tip, not main" \
+    "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
+
+# 14. The evidence-published command is the granted command, and executing it
+# from the operator's repo-root cwd reads the pinned feature blob.
+setup_harness
+seed_plan "fixture-feature"
+init_tip_content_fixture
+run_operator "review" "$PROCEED_OUTPUT"
+BRANCH_EVIDENCE="$(branch_evidence_line)"
+mapfile -t PINNED_READS < <(
+    jq -r '.tip_files[]? | .pinned_read // empty' <<<"$BRANCH_EVIDENCE"
+)
+PINNED_RULES_OK=0
+PINNED_OUTPUT=""
+for PINNED_READ in "${PINNED_READS[@]}"; do
+    if ! grep -Fx "Bash($PINNED_READ)" "$ARGV_CAPTURE" >/dev/null; then
+        PINNED_RULES_OK=1
+        break
+    fi
+done
+if [ "${#PINNED_READS[@]}" -eq 1 ]; then
+    PINNED_OUTPUT="$(
+        cd "$REPO_ROOT_PATH" && bash -c "${PINNED_READS[0]}"
+    )"
+else
+    PINNED_RULES_OK=1
+fi
+OK=1
+if [ "$PINNED_RULES_OK" -eq 0 ] \
+    && [ "$(wc -l <<<"$PINNED_OUTPUT")" -eq 20 ] \
+    && [ "$(wc -l <"$REPO_ROOT_PATH/bin/thing.sh")" -eq 2 ] \
+    && ! grep -E '^Bash\(git show .*\*.*\)$' "$ARGV_CAPTURE" >/dev/null \
+    && read_only_git_rules \
+        "$ARGV_CAPTURE" "$INT_WT_PATH" "main" "feat/fixture-feature" 0 3 1 \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "tip-pinned reads are granted exactly and read tip content" \
+    "$OK" "status=$RUN_STATUS pinned=${PINNED_READS[*]:-none}"
+
+# 15. Paths that cannot be one safe rule token remain visible as content
+# evidence, but neither their published entries nor allowedTools grant a read.
+setup_harness
+seed_plan "fixture-feature"
+SPACE_PATH="with space.txt"
+COMMAND_PATH='$(id).txt'
+git_fixture "$REPO_ROOT_PATH" init -q -b main
+printf '%s\n' base >"$REPO_ROOT_PATH/base.txt"
+git_fixture "$REPO_ROOT_PATH" add base.txt
+git_fixture "$REPO_ROOT_PATH" commit -q -m base
+git_fixture "$REPO_ROOT_PATH" checkout -q -b feat/fixture-feature
+printf '%s\n' spaced >"$REPO_ROOT_PATH/$SPACE_PATH"
+printf '%s\n' literal >"$REPO_ROOT_PATH/$COMMAND_PATH"
+git_fixture "$REPO_ROOT_PATH" add "$SPACE_PATH" "$COMMAND_PATH"
+git_fixture "$REPO_ROOT_PATH" commit -q -m "add non-token paths"
+run_operator "implement" "$PROCEED_OUTPUT"
+BRANCH_EVIDENCE="$(branch_evidence_line)"
+OK=1
+if jq -e \
+        --arg space "$SPACE_PATH" \
+        --arg command "$COMMAND_PATH" \
+        '([.tip_files[].path] | index($space) != null)
+            and ([.tip_files[].path] | index($command) != null)
+            and all(
+                .tip_files[];
+                if .path == $space or .path == $command then
+                    .present == true and (has("pinned_read") | not)
+                else true
+                end
+            )' \
+        <<<"$BRANCH_EVIDENCE" >/dev/null \
+    && ! rules_mention "$SPACE_PATH" \
+    && ! rules_mention "$COMMAND_PATH" \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "non-token paths are described without granting a command" \
+    "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
+
+# 16. A path removed by the feature diff has no branch-tip blob to identify or
+# read, so its evidence is the minimal exact negative object.
+setup_harness
+seed_plan "fixture-feature"
+DELETED_PATH="deleted.txt"
+git_fixture "$REPO_ROOT_PATH" init -q -b main
+printf '%s\n' delete-me >"$REPO_ROOT_PATH/$DELETED_PATH"
+git_fixture "$REPO_ROOT_PATH" add "$DELETED_PATH"
+git_fixture "$REPO_ROOT_PATH" commit -q -m base
+git_fixture "$REPO_ROOT_PATH" checkout -q -b feat/fixture-feature
+git_fixture "$REPO_ROOT_PATH" rm -q "$DELETED_PATH"
+git_fixture "$REPO_ROOT_PATH" commit -q -m "delete file"
+run_operator "implement" "$PROCEED_OUTPUT"
+BRANCH_EVIDENCE="$(branch_evidence_line)"
+OK=1
+if jq -e \
+        --arg path "$DELETED_PATH" \
+        'any(
+            .tip_files[];
+            . == {path: $path, present: false}
+        )' \
+        <<<"$BRANCH_EVIDENCE" >/dev/null \
+    && ! rules_mention "$DELETED_PATH" \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "deleted feature files carry exact negative tip evidence" \
+    "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
+
+# 17. The cap is part of the evidence contract so a large diff cannot look
+# complete after its content identities and grants are intentionally bounded.
+setup_harness
+seed_plan "fixture-feature"
+git_fixture "$REPO_ROOT_PATH" init -q -b main
+printf '%s\n' base >"$REPO_ROOT_PATH/base.txt"
+git_fixture "$REPO_ROOT_PATH" add base.txt
+git_fixture "$REPO_ROOT_PATH" commit -q -m base
+git_fixture "$REPO_ROOT_PATH" checkout -q -b feat/fixture-feature
+for INDEX in {1..45}; do
+    printf -v MANY_PATH 'file-%02d.txt' "$INDEX"
+    printf '%s\n' "$INDEX" >"$REPO_ROOT_PATH/$MANY_PATH"
+done
+git_fixture "$REPO_ROOT_PATH" add .
+git_fixture "$REPO_ROOT_PATH" commit -q -m "add many files"
+run_operator "implement" "$PROCEED_OUTPUT"
+BRANCH_EVIDENCE="$(branch_evidence_line)"
+PINNED_RULE_COUNT="$(
+    grep -Ec '^Bash\(git show [0-9a-fA-F]{40}:[A-Za-z0-9._/-]+\)$' \
+        "$ARGV_CAPTURE" || true
+)"
+OK=1
+if jq -e \
+        '.tip_files | length == 40' \
+        <<<"$BRANCH_EVIDENCE" >/dev/null \
+    && jq -e \
+        '.tip_files_truncated == true and .tip_files_limit == 40' \
+        <<<"$BRANCH_EVIDENCE" >/dev/null \
+    && [ "$PINNED_RULE_COUNT" -le 40 ] \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "tip-file truncation is explicit and caps pinned grants" \
+    "$OK" "status=$RUN_STATUS pinned_rules=$PINNED_RULE_COUNT"
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

@@ -4,14 +4,21 @@
 #
 # Headless Opus applies the phantom-run discipline as topology: never trust
 # the runner's outcome, verify the phase's disk artifacts first-hand, then
-# PROCEED or HALT. Review and promote prompts include harness-captured live
-# integration-worktree evidence; implement prompts include the harness-captured
-# live branch comparison. Fail-safe: an unparseable verdict is a HALT
-# — when the operator can't be understood, the pipeline stops.
+# PROCEED or HALT. Review and implement prompts carry harness-captured branch
+# evidence including tip-pinned file content identity, and the operator is
+# granted exact `git show <tip>:<path>` reads for those files. Review and
+# promote also carry live integration-worktree evidence. Fail-safe: an
+# unparseable verdict is a HALT — when the operator can't be understood, the
+# pipeline stops.
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
+
+# Bound prompt and permission-rule growth when a branch changes many files.
+TIP_FILES_LIMIT=40
+# Avoid streaming arbitrarily large blobs merely to count their lines.
+TIP_FILE_MAX_BYTES=1048576
 
 PAYLOAD="$(cat)"
 PHASE="$(jq -r '.phase' <<<"$PAYLOAD")"
@@ -128,6 +135,18 @@ case "$BASE_BRANCH" in
     *) SAFE_BASE="$BASE_BRANCH" ;;
 esac
 
+# A permission rule is one exact command string, so a path carrying whitespace,
+# quotes, `;`, `&`, or `$(...)` has no safe spelling inside it. Such files still
+# appear in evidence, but receive no injectable permission grant.
+plain_path_token() {
+    local PATH_TOKEN="$1"
+
+    case "$PATH_TOKEN" in
+        "" | -* | /* | *..* | *[!A-Za-z0-9._/-]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 # The implement terminal's two mandatory checks — at least one shard commit,
 # and a diff confined to plan.json's declared files — are both ref-bearing, and
 # a rule is one exact command string. A base branch spelled with `;`, `&`, or
@@ -151,6 +170,17 @@ branch_evidence() {
     local COMMITS=""
     local FILES=""
     local DIFFSTAT=""
+    local FILE_COUNT=0
+    local FILE_PATH=""
+    local BLOB=""
+    local SIZE=""
+    local LINES=""
+    local LINES_JSON="null"
+    local PINNED_READ=""
+    local ENTRY=""
+    local TIP_FILES="[]"
+    local TIP_FILES_TRUNCATED="false"
+    local -a TIP_FILE_OBJECTS=()
 
     if ! BASE_TIP="$(
         git -C "$REPO_ROOT" rev-parse --verify --quiet \
@@ -179,9 +209,11 @@ branch_evidence() {
     if ! COMMITS="$(
         git -C "$REPO_ROOT" log --oneline "$BASE_TIP..$BRANCH_TIP" 2>/dev/null
     )" || ! FILES="$(
-        git -C "$REPO_ROOT" diff --name-only "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
+        git -C "$REPO_ROOT" -c core.quotePath=false \
+            diff --name-only "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
     )" || ! DIFFSTAT="$(
-        git -C "$REPO_ROOT" diff --stat "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
+        git -C "$REPO_ROOT" -c core.quotePath=false \
+            diff --stat "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
     )"; then
         jq -nc \
             --arg base "$BASE" \
@@ -196,6 +228,89 @@ branch_evidence() {
         git -C "$REPO_ROOT" rev-parse --short "$BRANCH_TIP" 2>/dev/null || true
     )"
 
+    while IFS= read -r FILE_PATH; do
+        [ -n "$FILE_PATH" ] || continue
+        FILE_COUNT=$((FILE_COUNT + 1))
+        if [ "$FILE_COUNT" -gt "$TIP_FILES_LIMIT" ]; then
+            continue
+        fi
+
+        BLOB=""
+        if ! BLOB="$(
+            git -C "$REPO_ROOT" rev-parse --verify --quiet \
+                "$BRANCH_TIP:$FILE_PATH" 2>/dev/null
+        )"; then
+            TIP_FILE_OBJECTS+=("$(
+                jq -nc \
+                    --arg path "$FILE_PATH" \
+                    --argjson present false \
+                    '{path: $path, present: $present}'
+            )")
+            continue
+        fi
+
+        SIZE=""
+        if ! SIZE="$(
+            git -C "$REPO_ROOT" cat-file -s "$BLOB" 2>/dev/null
+        )"; then
+            TIP_FILE_OBJECTS+=("$(
+                jq -nc \
+                    --arg path "$FILE_PATH" \
+                    --argjson present false \
+                    '{path: $path, present: $present}'
+            )")
+            continue
+        fi
+
+        LINES_JSON="null"
+        if [ "$SIZE" -le "$TIP_FILE_MAX_BYTES" ]; then
+            LINES=""
+            if LINES="$(
+                git -C "$REPO_ROOT" show "$BRANCH_TIP:$FILE_PATH" 2>/dev/null \
+                    | wc -l
+            )"; then
+                LINES="${LINES//[[:space:]]/}"
+                case "$LINES" in
+                    "" | *[!0-9]*) ;;
+                    *) LINES_JSON="$LINES" ;;
+                esac
+            fi
+        fi
+
+        PINNED_READ=""
+        if plain_path_token "$FILE_PATH"; then
+            PINNED_READ="git show $BRANCH_TIP:$FILE_PATH"
+        fi
+        ENTRY="$(
+            jq -nc \
+                --arg path "$FILE_PATH" \
+                --argjson present true \
+                --arg blob "$BLOB" \
+                --argjson size "$SIZE" \
+                --argjson lines "$LINES_JSON" \
+                --arg pinned_read "$PINNED_READ" \
+                '{
+                    path: $path,
+                    present: $present,
+                    blob: $blob,
+                    size: $size,
+                    lines: $lines
+                } + if $pinned_read == "" then {}
+                    else {pinned_read: $pinned_read}
+                    end'
+        )"
+        TIP_FILE_OBJECTS+=("$ENTRY")
+    done <<<"$FILES"
+
+    if [ "${#TIP_FILE_OBJECTS[@]}" -gt 0 ]; then
+        TIP_FILES="$(
+            printf '%s\n' "${TIP_FILE_OBJECTS[@]}" | jq -sc '.'
+        )"
+    fi
+    if [ "$FILE_COUNT" -gt "$TIP_FILES_LIMIT" ]; then
+        TIP_FILES_TRUNCATED="true"
+    fi
+
     jq -nc \
         --arg base "$BASE" \
         --arg branch "$BRANCH" \
@@ -206,6 +321,9 @@ branch_evidence() {
         --arg commits "$COMMITS" \
         --arg files "$FILES" \
         --arg diffstat "$DIFFSTAT" \
+        --argjson tip_files "$TIP_FILES" \
+        --argjson tip_files_truncated "$TIP_FILES_TRUNCATED" \
+        --argjson tip_files_limit "$TIP_FILES_LIMIT" \
         '{
             base: $base,
             branch: $branch,
@@ -215,11 +333,16 @@ branch_evidence() {
             branch_tip_short: $branch_tip_short,
             commits: ($commits | split("\n") | map(select(length > 0))),
             files: ($files | split("\n") | map(select(length > 0))),
-            diffstat: $diffstat
+            diffstat: $diffstat,
+            tip_files: $tip_files,
+            tip_files_truncated: $tip_files_truncated,
+            tip_files_limit: $tip_files_limit
         }'
 }
 
-if [ "$PHASE" = "implement" ] && [ -n "$FEATURE_BRANCH" ]; then
+BRANCH_EVIDENCE=""
+if { [ "$PHASE" = "implement" ] || [ "$PHASE" = "review" ]; } \
+    && [ -n "$FEATURE_BRANCH" ]; then
     BRANCH_EVIDENCE="$(branch_evidence "$BASE_BRANCH" "$FEATURE_BRANCH")"
     BRANCH_CAPTURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     PROMPT="$PROMPT
@@ -258,6 +381,15 @@ if [ -n "$FEATURE_BRANCH" ]; then
 fi
 if [ -n "$INT_WT_STATUS_CMD" ]; then
     GIT_TOOLS+=("Bash($INT_WT_STATUS_CMD)")
+fi
+if [ -n "$BRANCH_EVIDENCE" ]; then
+    while IFS= read -r PINNED_READ; do
+        [ -n "$PINNED_READ" ] || continue
+        GIT_TOOLS+=("Bash($PINNED_READ)")
+    done < <(
+        jq -r '.tip_files[]? | .pinned_read // empty' \
+            <<<"$BRANCH_EVIDENCE" 2>/dev/null || true
+    )
 fi
 
 # Test-only binary seam for tests/operator-evidence.test.sh; production keeps

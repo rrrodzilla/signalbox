@@ -5,6 +5,8 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+# shellcheck source=_correlation.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_correlation.sh"
 
 # The run's git namespace: branches are shard/<feature>/... and worktrees are
 # <feature>-<stage>-<shard>, so concurrent runs in one repo never collide.
@@ -45,11 +47,11 @@ WORKTREE_LOCK="$ROOT/state/worktree.lock"
     fi
 } >&2
 
-# Stamp the run's correlation_id: <feature>-<timestamp>, on the plan AND on
-# every stage item (stream-runner emits stage items verbatim, so the id must
-# already be inside each one). Everything downstream carries it in-payload —
-# the audit trail is reconstructable from the event store by this one key.
-CID="$(jq -r '.feature // "feature"' "$RUN_DIR/plan.json")-$(date +%Y%m%d-%H%M%S)"
+# Stamp the pipeline run's correlation_id when inherited from
+# SIGNALBOX_CORRELATION_ID; otherwise mint impl-<feature>-<UTC> locally. Stamp
+# it on the plan AND every stage item because stream-runner emits stage items
+# verbatim. The trail is reconstructable from the event store by this one key.
+CID="$(resolve_correlation_id impl "$FEATURE")"
 echo "[plan-seed] correlation_id: $CID" >&2
 # Run manifest: plan.done (stream-runner's end event) carries only {count},
 # so the finisher reads the run's id from here to cite the audit trail.

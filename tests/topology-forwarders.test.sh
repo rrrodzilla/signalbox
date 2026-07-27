@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Self-contained conformance test runner for the five tracked topology files.
-# No framework and no dependencies beyond coreutils + jq + curl + python3;
+# No framework and no dependencies beyond coreutils + git + jq + curl + python3;
 # python3's tomllib parses the TOML rather than treating it as line-oriented
 # text. Every diagnostic fixture is built under its own mktemp -d. Prints
 # PASS/FAIL per case and exits non-zero when any case failed.
@@ -40,7 +40,7 @@ run_check() {
 
     python3 - "$ROOT" "$CHECK" >"$CHECK_STDOUT" 2>"$CHECK_STDERR" <<'PYEOF'
 import re
-import struct
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -140,6 +140,33 @@ def forwarders(name):
     ]
 
 
+FORWARDER = "__SIGNALBOX_ROOT__/bin/sse-forward.sh"
+
+
+def canonical_args(topic, label):
+    """The exec-sink argv a forwarder for `topic` must carry.
+
+    A wildcard topic cannot be forwarded verbatim — the concrete engine
+    name only exists in the payload — so those sinks intentionally go
+    through a `bash -c` wrapper that reads the payload, pulls `.name`
+    out of it, and rebuilds the concrete topic before handing both to
+    the forwarder passed as "$0".
+    """
+    head = ["-s", topic, "-t", "5000", "--"]
+    if not topic.endswith(".*"):
+        return head + [FORWARDER, label, topic]
+    prefix = topic[: -len(".*")]
+    wrapper = (
+        'payload=$(cat); name=$(jq -r ".name // empty" <<<"$payload" '
+        '2>/dev/null); printf "%s" "$payload" | "$0" '
+        + label
+        + ' "'
+        + prefix
+        + '.${name:-unknown}"'
+    )
+    return head + ["bash", "-c", wrapper, FORWARDER]
+
+
 def fail(messages):
     if messages:
         print("; ".join(messages), file=sys.stderr)
@@ -147,38 +174,26 @@ def fail(messages):
 
 
 def tracked_paths():
-    dot_git = root / ".git"
-    if dot_git.is_file():
-        marker, value = dot_git.read_text(encoding="utf-8").strip().split(
-            ":", 1
-        )
-        if marker != "gitdir":
-            raise ValueError(f"unrecognized .git pointer: {marker!r}")
-        git_dir = Path(value.strip())
-        if not git_dir.is_absolute():
-            git_dir = (root / git_dir).resolve()
-    else:
-        git_dir = dot_git
+    """Every path tracked in the work tree, via Git itself.
 
-    index = (git_dir / "index").read_bytes()
-    signature, version, count = struct.unpack(">4sLL", index[:12])
-    if signature != b"DIRC" or version not in (2, 3):
-        raise ValueError(f"unsupported Git index version: {version}")
-
-    offset = 12
-    paths = []
-    for _ in range(count):
-        entry_start = offset
-        flags = struct.unpack(">H", index[offset + 60 : offset + 62])[0]
-        offset += 62
-        if version == 3 and flags & 0x4000:
-            offset += 2
-        path_end = index.index(b"\0", offset)
-        paths.append(
-            index[offset:path_end].decode("utf-8", "surrogateescape")
+    Asking Git rather than decoding .git/index keeps this correct across
+    index formats (v2/v3/v4) and split indexes, and works the same in a
+    linked worktree, where .git is a pointer file.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z"],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise ValueError(
+            "git ls-files failed: "
+            + result.stderr.decode("utf-8", "replace").strip()
         )
-        offset = entry_start + ((path_end + 1 - entry_start + 7) // 8 * 8)
-    return paths
+    return [
+        entry.decode("utf-8", "surrogateescape")
+        for entry in result.stdout.split(b"\0")
+        if entry
+    ]
 
 
 if check == "legacy":
@@ -235,16 +250,7 @@ elif check == "shape":
                 continue
             topic = subscriptions[0]
             label = expected_labels[name]
-            expected_args = [
-                "-s",
-                topic,
-                "-t",
-                "5000",
-                "--",
-                "__SIGNALBOX_ROOT__/bin/sse-forward.sh",
-                label,
-                topic,
-            ]
+            expected_args = canonical_args(topic, label)
             expected_name = "forward-" + topic.replace(".", "-").replace(
                 "*", "any"
             )

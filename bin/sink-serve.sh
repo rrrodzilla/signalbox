@@ -711,8 +711,9 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 
 /* ── status line: why this run is where it is ── */
 .verdict { display:flex; gap:8px; align-items:baseline; padding:8px 12px 10px;
-  font-size:12px; color:var(--dim); overflow-wrap:anywhere; }
-.verdict b { font-weight:700; letter-spacing:.08em; }
+  font-size:12px; color:var(--dim); }
+.verdict span { overflow-wrap:anywhere; min-width:0; }
+.verdict b { font-weight:700; letter-spacing:.08em; flex:none; }
 .verdict.v-green b { color:var(--green); } .verdict.v-red b { color:var(--red); }
 .verdict.v-amber b { color:var(--amber); } .verdict.v-violet b { color:var(--violet); }
 .verdict.v-white b { color:var(--white-lamp); }

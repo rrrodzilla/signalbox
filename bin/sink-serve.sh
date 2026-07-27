@@ -1458,26 +1458,32 @@ async function poll() {
   setTimeout(poll, 4000);
 }
 
-// Identity travels inside every envelope, so a row never needs correlation
-// with a separately-polled owner table. That makes the old X-Signalbox-Run
-// connection handshake unnecessary.
-function addEvent(topic, dataText) {
-  let obj = null;
-  try { obj = JSON.parse(dataText); } catch (e) {}
-  const t = topic || (obj && obj.type) || "message";
-  const instance = obj && obj.instance && typeof obj.instance === "object"
-    ? obj.instance : {};
-  const key = instance.key || "";
-  const pl = obj && obj.payload !== undefined ? obj.payload : obj;
+// Apply the run-state half of an event. It is DOM-free so tests can exercise
+// it directly.
+function applyRunState(t, key, pl, engineLabel) {
+  // A run re-enters through phase.request in the pipeline topology, or through
+  // system.started.* when bin/run.sh --phase starts a phase engine directly
+  // and never publishes phase.request. verdictFor checks terminal latches
+  // before every state the new launch can produce, so either latch would
+  // otherwise shadow the entire relaunch.
+  const reentered = (t === "phase.request" && pl && typeof pl.phase === "string")
+    || t.indexOf("system.started.") === 0;
+  if (reentered) {
+    delete haltInfo[key];
+    delete completeInfo[key];
+    if (promoteStates[key] !== "active") delete promoteStates[key];
+  }
   if (t === "phase.request" && pl && pl.phase === "promote") promoteStates[key] = "active";
   // A phase (re)start clears that phase's cycle state so a rerun of the same
   // run key never wears the previous attempt's rounds or shard lamps.
+  // Keep these phase.request-only: system.started.* arrives once per node, and
+  // a late node can follow fresh cycle events from the same launch.
   if (t === "phase.request" && pl && pl.phase === "implement") delete shardYard[key];
   if (t === "phase.request" && pl && pl.phase === "review") delete reviewLoop[key];
   const round = pl && typeof pl.round === "number" ? pl.round : 1;
   // The review phase is a cycle (review -> fix -> review), not one long state.
   // Track whose hands the work is in and which round it is on.
-  if (obj && obj.engine_label === "review") {
+  if (engineLabel === "review") {
     if (t === "review.requested") reviewLoop[key] = { mode:"review", round };
     if (t === "fix.requested") reviewLoop[key] = { mode:"fixing", round };
     if (t === "review.approved") reviewLoop[key] = { mode:"approved", round };
@@ -1520,6 +1526,20 @@ function addEvent(topic, dataText) {
       reason: pl && typeof pl.reason === "string" ? pl.reason.slice(0, 300) : ""
     };
   }
+}
+
+// Identity travels inside every envelope, so a row never needs correlation
+// with a separately-polled owner table. That makes the old X-Signalbox-Run
+// connection handshake unnecessary.
+function addEvent(topic, dataText) {
+  let obj = null;
+  try { obj = JSON.parse(dataText); } catch (e) {}
+  const t = topic || (obj && obj.type) || "message";
+  const instance = obj && obj.instance && typeof obj.instance === "object"
+    ? obj.instance : {};
+  const key = instance.key || "";
+  const pl = obj && obj.payload !== undefined ? obj.payload : obj;
+  applyRunState(t, key, pl, obj && obj.engine_label ? obj.engine_label : "");
   const div = document.createElement("div");
   div.dataset.key = key;
   div.hidden = selectedKey !== "all" && selectedKey !== key;

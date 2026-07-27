@@ -41,11 +41,19 @@ $(cat "$RUN_DIR/results/CR.md" 2>/dev/null || echo "(CR.md MISSING — that is a
 
 $(jq -r '.scope_notes // "(none)"' "$RUN_DIR/plan.json" 2>/dev/null || echo "(plan.json missing)")"
 
+# The promotion role must reach INT_WT under WT_BASE, a sibling of REPO_ROOT,
+# to verify the worktree is clean and remove it during cleanup (issue #12).
+ADD_DIR=()
+if [ -d "$WT_BASE" ]; then
+    ADD_DIR=(--add-dir "$WT_BASE")
+fi
+
 cd "$REPO_ROOT"
 env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     claude -p "$PROMPT" \
     --model claude-fable-5 \
     --permission-mode bypassPermissions \
+    ${ADD_DIR[@]+"${ADD_DIR[@]}"} \
     >"$LOG" 2>"$LOG.stderr" || true
 stamp_provenance "logs/promote-$ISSUE.md" claude claude-fable-5 ""
 

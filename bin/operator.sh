@@ -33,12 +33,26 @@ PROMPT="$(cat "$ROOT/prompts/operator.md")
 - run root: $RUN_DIR
 - run slug: $RUN_DISPLAY
 - repo root: $REPO_ROOT
+- worktree home: $WT_BASE
+- integration worktree: $INT_WT
 - base branch: $BASE_BRANCH
 - engine log: $LOG
 
 ## Engine log tail (runner's view, last 30 lines)
 
 $(tail -30 "$LOG" 2>/dev/null || echo "(log unreadable)")"
+
+# The worktrees this operator must inspect are siblings of REPO_ROOT, so the
+# session's default allowed directory cannot reach them and every check of the
+# integration worktree was permission-denied (issue #12). WT_BASE rather than
+# INT_WT so shard worktrees stay visible to future checks. Guarded because the
+# worktree home does not exist until bin/plan-seed.sh creates it during the
+# first implement phase — handing claude a nonexistent --add-dir path would
+# break the plan-phase operator instead of unblocking it.
+ADD_DIR=()
+if [ -d "$WT_BASE" ]; then
+    ADD_DIR=(--add-dir "$WT_BASE")
+fi
 
 cd "$REPO_ROOT"
 # Read-only gh is explicitly allowed so the operator can confirm PR/issue/CI
@@ -48,6 +62,7 @@ env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     claude -p "$PROMPT" \
     --model claude-fable-5 \
     --permission-mode acceptEdits \
+    ${ADD_DIR[@]+"${ADD_DIR[@]}"} \
     --allowedTools \
         "Bash(gh pr view:*)" "Bash(gh pr checks:*)" "Bash(gh pr list:*)" \
         "Bash(gh issue view:*)" "Bash(gh issue list:*)" \

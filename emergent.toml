@@ -180,3 +180,12 @@ name = "errors"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "exec.error", "--", "jq", "-c", "."]
 subscribes = ["exec.error"]
+
+# Live watch: stream every interesting topic to the browser (bin/watch.sh
+# proxies this port so the dashboard needs no CORS). Ports are fixed per
+# topology: pipeline 8100, plan 8101, implement 8102, review 8103, init 8104.
+[[sinks]]
+name = "watchtower"
+path = "~/.local/share/emergent/primitives/bin/sse-sink"
+args = ["--port", "8103"]
+subscribes = ["review.requested", "review.raw", "fix.requested", "review.approved", "review.escalated", "gate.assessed", "gate.decided", "approval.requested", "approval.granted", "exec.error", "system.started.*", "system.stopped.*", "system.error.*"]

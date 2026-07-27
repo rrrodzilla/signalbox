@@ -613,7 +613,7 @@ for INT_NAME in 'integration wt' "integration'wt" 'integration;id'; do
     if [ "$RUN_STATUS" -ne 0 ] \
         || [ "$GRANTED_CMD" != "$EXPECTED_CMD" ] \
         || [ -n "$PORCELAIN_OUT" ] \
-        || ! grep -Fx \
+        || ! grep -Fx -- \
             "- integration worktree status command: $EXPECTED_CMD" \
             "$PROMPT_CAPTURE" >/dev/null \
         || ! jq -e '.exists == true and .clean == true' \

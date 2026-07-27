@@ -20,7 +20,13 @@ FEATURE="$(jq -r '.feature // empty' <<<"$PAYLOAD")"
 [ -n "$FEATURE" ] || FEATURE="$(jq -r '.feature' "$ROOT/plan.json" 2>/dev/null || true)"
 ISSUE="$(jq -r '.issue // empty' "$ROOT/plan.json" 2>/dev/null || true)"
 
-VAULT="$(readlink -f "$REPO_ROOT/.claude/docs")"
+# Resolution must stay nonfatal: an unresolvable vault symlink has to reach
+# finish "ERROR" rather than kill the script and suppress the downstream event.
+VAULT_ERR=""
+if ! VAULT="$(readlink -f "$REPO_ROOT/.claude/docs" 2>&1)"; then
+    VAULT_ERR="cannot resolve vault path $REPO_ROOT/.claude/docs: $VAULT"
+    VAULT="$REPO_ROOT/.claude/docs"
+fi
 STATE_PATH="$ROOT/state/docs-sync.json"
 DOCS=("ARCHI.md" "ARCHI-rules.md" "TESTING.md")
 UPDATED=()
@@ -76,13 +82,25 @@ finish() {
     exit 0
 }
 
+if [ -n "$VAULT_ERR" ]; then
+    UNCHANGED=("${DOCS[@]}")
+    finish "ERROR" "$VAULT_ERR"
+fi
+
 if [ ! -d "$VAULT" ]; then
     UNCHANGED=("${DOCS[@]}")
     finish "ERROR" "vault not found at resolved path: $VAULT"
 fi
 
-CHANGED_FILES="$(git -C "$WORKDIR" diff --name-only "$BASE_BRANCH"...HEAD || true)"
-DIFF_STAT="$(git -C "$WORKDIR" diff --stat "$BASE_BRANCH"...HEAD || true)"
+# A broken worktree or a missing base ref must be an ERROR, not an OK empty diff.
+if ! CHANGED_FILES="$(git -C "$WORKDIR" diff --name-only "$BASE_BRANCH"...HEAD 2>&1)"; then
+    UNCHANGED=("${DOCS[@]}")
+    finish "ERROR" "git diff --name-only $BASE_BRANCH...HEAD failed in $WORKDIR: $CHANGED_FILES"
+fi
+if ! DIFF_STAT="$(git -C "$WORKDIR" diff --stat "$BASE_BRANCH"...HEAD 2>&1)"; then
+    UNCHANGED=("${DOCS[@]}")
+    finish "ERROR" "git diff --stat $BASE_BRANCH...HEAD failed in $WORKDIR: $DIFF_STAT"
+fi
 
 if [ -z "$CHANGED_FILES" ]; then
     UNCHANGED=("${DOCS[@]}")
@@ -91,6 +109,7 @@ fi
 
 declare -A BEFORE=()
 declare -A AFTER=()
+# Documents still absent after the run; filled in by the post-run pass.
 MISSING=()
 
 for DOC in "${DOCS[@]}"; do
@@ -98,7 +117,6 @@ for DOC in "${DOCS[@]}"; do
         BEFORE["$DOC"]="$(sha256sum "$VAULT/$DOC" | awk '{print $1}')"
     else
         BEFORE["$DOC"]=""
-        MISSING+=("$DOC")
     fi
 done
 
@@ -135,14 +153,17 @@ Use the available git diff, git log, git show, and git status commands to read
 the portions of the feature delta and repository context you need. Do not
 infer the change from the stat alone."
 
-cd "$REPO_ROOT"
+# Run from the feature worktree: the allowed git commands must inspect the HEAD
+# under review, not the base checkout.
+cd "$WORKDIR"
+CLAUDE_RC=0
 env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     claude -p "$PROMPT" \
     --model opus \
     --permission-mode acceptEdits \
     --add-dir "$VAULT" \
     --allowedTools "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git status:*)" \
-    >"$ROOT/logs/docs-sync.md" 2>"$ROOT/logs/docs-sync.md.stderr" || true
+    >"$ROOT/logs/docs-sync.md" 2>"$ROOT/logs/docs-sync.md.stderr" || CLAUDE_RC=$?
 
 for DOC in "${DOCS[@]}"; do
     if [ -f "$VAULT/$DOC" ]; then
@@ -151,12 +172,12 @@ for DOC in "${DOCS[@]}"; do
         AFTER["$DOC"]=""
     fi
 
-    if [ -z "${BEFORE[$DOC]}" ]; then
-        UNCHANGED+=("$DOC")
-    elif [ "${BEFORE[$DOC]}" != "${AFTER[$DOC]}" ]; then
+    # An absent-then-created document changed hash state: that is an update.
+    if [ "${BEFORE[$DOC]}" != "${AFTER[$DOC]}" ]; then
         UPDATED+=("$DOC")
     else
         UNCHANGED+=("$DOC")
+        [ -n "${AFTER[$DOC]}" ] || MISSING+=("$DOC")
     fi
 done
 
@@ -166,19 +187,26 @@ if [ -n "$NOTE_LINE" ] && jq -e . >/dev/null 2>&1 <<<"$NOTE_LINE"; then
     NOTE="$(jq -r '.note // ""' <<<"$NOTE_LINE")"
 fi
 
-if [ "${#MISSING[@]}" -gt 0 ]; then
-    MISSING_NOTE="Missing vault documents treated as unchanged: $(IFS=', '; echo "${MISSING[*]}")."
+append_note() {
     if [ -n "$NOTE" ]; then
-        NOTE="$NOTE $MISSING_NOTE"
+        NOTE="$NOTE $1"
     else
-        NOTE="$MISSING_NOTE"
+        NOTE="$1"
     fi
+}
+
+if [ "${#MISSING[@]}" -gt 0 ]; then
+    append_note "Missing vault documents treated as unchanged: $(IFS=', '; echo "${MISSING[*]}")."
 fi
 
 STATUS="OK"
 if [ ! -s "$ROOT/logs/docs-sync.md" ]; then
     STATUS="ERROR"
     [ -n "$NOTE" ] || NOTE="model process produced no output; vault files were still verified by hash"
+elif [ "$CLAUDE_RC" -ne 0 ]; then
+    # Nonzero exit with partial stdout must not be reported as a clean sync.
+    STATUS="ERROR"
+    append_note "model process exited $CLAUDE_RC; its output may be incomplete."
 fi
 
 finish "$STATUS" "$NOTE"

@@ -170,7 +170,7 @@ cd "$WORKDIR"
 CLAUDE_RC=0
 env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     claude -p "$PROMPT" \
-    --model opus \
+    --model sonnet \
     --permission-mode acceptEdits \
     --add-dir "$VAULT" \
     --allowedTools "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git status:*)" \

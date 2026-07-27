@@ -129,6 +129,19 @@ args = ["-s", "http.request", "--publish-as", "approval.granted", "--", "jq", "-
 subscribes = ["http.request"]
 publishes = ["approval.granted"]
 
+# ── Vault sync: promotion cannot outrun architectural memory ────────────────
+# results/CR.md is the review phase's terminal artifact and phase-run.sh watches
+# it, so the syncer sits upstream of the promoter sink. This makes it
+# structurally impossible for a PR to exist without a recorded docs-sync; the
+# event wiring is the contract, not a checklist item.
+
+[[handlers]]
+name = "docs-syncer"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "approval.granted", "--publish-as", "docs.synced", "-t", "900000", "--", "__SIGNALBOX_ROOT__/bin/docs-sync.sh"]
+subscribes = ["approval.granted"]
+publishes = ["docs.synced"]
+
 # ── Readiness ladder: autonomy is earned, not granted ────────────────────────
 
 [[sinks]]
@@ -166,8 +179,8 @@ subscribes = ["approval.requested"]
 [[sinks]]
 name = "promoter"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "approval.granted", "--", "__SIGNALBOX_ROOT__/bin/promote.sh"]
-subscribes = ["approval.granted"]
+args = ["-s", "docs.synced", "--", "__SIGNALBOX_ROOT__/bin/promote.sh"]
+subscribes = ["docs.synced"]
 
 [[sinks]]
 name = "escalation"
@@ -188,4 +201,4 @@ subscribes = ["exec.error"]
 name = "watchtower"
 path = "~/.local/share/emergent/primitives/bin/sse-sink"
 args = ["--port", "__SIGNALBOX_PORT_REVIEW__"]
-subscribes = ["review.requested", "review.raw", "fix.requested", "review.approved", "review.escalated", "gate.assessed", "gate.decided", "approval.requested", "approval.granted", "exec.error", "system.started.*", "system.stopped.*", "system.error.*"]
+subscribes = ["review.requested", "review.raw", "fix.requested", "review.approved", "review.escalated", "gate.assessed", "gate.decided", "approval.requested", "approval.granted", "docs.synced", "exec.error", "system.started.*", "system.stopped.*", "system.error.*"]

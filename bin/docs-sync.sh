@@ -109,7 +109,8 @@ fi
 
 declare -A BEFORE=()
 declare -A AFTER=()
-# Documents still absent after the run; filled in by the post-run pass.
+# Documents absent from the vault after the run, whatever their hash history;
+# filled in by the post-run pass. Any entry here forces an ERROR status.
 MISSING=()
 
 for DOC in "${DOCS[@]}"; do
@@ -177,8 +178,12 @@ for DOC in "${DOCS[@]}"; do
         UPDATED+=("$DOC")
     else
         UNCHANGED+=("$DOC")
-        [ -n "${AFTER[$DOC]}" ] || MISSING+=("$DOC")
     fi
+
+    # Absence is judged on the post-run state alone, independent of the hash
+    # comparison above: a deleted document also changes hash state, so the
+    # update branch is not evidence that the document exists.
+    [ -n "${AFTER[$DOC]}" ] || MISSING+=("$DOC")
 done
 
 NOTE_LINE="$(grep -E '^\{.*"note".*\}[[:space:]]*$' "$ROOT/logs/docs-sync.md" | tail -1 || true)"
@@ -195,10 +200,6 @@ append_note() {
     fi
 }
 
-if [ "${#MISSING[@]}" -gt 0 ]; then
-    append_note "Missing vault documents treated as unchanged: $(IFS=', '; echo "${MISSING[*]}")."
-fi
-
 STATUS="OK"
 if [ ! -s "$ROOT/logs/docs-sync.md" ]; then
     STATUS="ERROR"
@@ -207,6 +208,14 @@ elif [ "$CLAUDE_RC" -ne 0 ]; then
     # Nonzero exit with partial stdout must not be reported as a clean sync.
     STATUS="ERROR"
     append_note "model process exited $CLAUDE_RC; its output may be incomplete."
+fi
+
+# All three vault documents are required. A run that ends with any of them
+# absent — deleted by the sync, or never present at all — is an ERROR, so the
+# operator seam blocks promotion instead of reading a status: "OK" note.
+if [ "${#MISSING[@]}" -gt 0 ]; then
+    STATUS="ERROR"
+    append_note "Required vault documents absent after sync: $(IFS=', '; echo "${MISSING[*]}")."
 fi
 
 finish "$STATUS" "$NOTE"

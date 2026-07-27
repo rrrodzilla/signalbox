@@ -117,16 +117,18 @@ if [ "$PHASE" = "review" ] \
     && [ "$OUTCOME" = "ARTIFACT" ] \
     && kill -0 "$PID" 2>/dev/null \
     && ! fresh "$RUN_DIR/state/docs-sync.json"; then
-    # Disarm shutdown before transferring the live PID: this runner's normal
-    # exit must not terminate the engine now owned by the detached reaper.
-    trap - EXIT INT TERM
     TRANSFERRED_PID="$PID"
-    # Both redirections are load-bearing: stdin is the event payload pipe, so a
-    # detached descendant inheriting it would hold EOF open and stall the
-    # exec-handler; all reaper narration belongs in the phase log.
+    # Keep the traps armed across the launch: clearing them first would open a
+    # window where a signal kills this runner with the engine still unowned,
+    # orphaning it behind a stale PID file. Both redirections are load-bearing:
+    # stdin is the event payload pipe, so a detached descendant inheriting it
+    # would hold EOF open and stall the exec-handler; all reaper narration
+    # belongs in the phase log.
     setsid "$(dirname "${BASH_SOURCE[0]}")/engine-reaper.sh" \
         "$PID" "$PID_FILE" "$RUN_DIR/state/docs-sync.json" "$STAMP" 960 \
         </dev/null >>"$LOG" 2>&1 &
+    # Ownership has passed to the reaper: emptying PID makes stop_engine a no-op,
+    # so the still-armed traps can no longer terminate the transferred engine.
     PID=""
     echo "[pipeline] review terminal reached with docs-sync in flight; handed engine pid $TRANSFERRED_PID to deferred reaper (deadline: 960s)" >&2
 else

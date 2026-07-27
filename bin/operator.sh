@@ -77,28 +77,45 @@ if [ -d "$WT_BASE" ]; then
 fi
 
 # A path grant only makes the worktree visible; acceptEdits still denies Bash
-# commands unless their prefixes are allowed. Grant the narrow read-only git
-# forms the operator asks for, plus only the exact integration porcelain form
-# when that path exists. `symbolic-ref` and `branch` are spelled out in full
-# because a `:*` prefix on either would also admit their write modes (ref
-# updates, -d/-D deletion, -m renaming). The operator remains unable to mutate
-# repository state.
+# commands unless the invocation is allowed. Every rule below is one whole
+# command with no trailing wildcard: a `:*` suffix admits arbitrary trailing
+# arguments, so `git log`/`git diff`/`git show` would gain `--output=<file>`
+# and `symbolic-ref`/`branch` their write modes (ref updates, -d/-D deletion,
+# -m renaming). Exact forms keep the operator unable to mutate any state.
+#
+# The ref-bearing forms prompts/operator.md asks for at implement cannot be
+# written as constants, so they are spelled out from this run's own plan.
+# The slug is accepted only when it is a kebab-case token — anything else
+# (missing, unreadable, or carrying shell or path characters) simply yields
+# no ref-bearing rules rather than an unbounded one.
+FEATURE_BRANCH=""
+if [ -r "$RUN_DIR/plan.json" ]; then
+    FEATURE_SLUG="$(jq -r '.feature // ""' "$RUN_DIR/plan.json" 2>/dev/null || true)"
+    case "$FEATURE_SLUG" in
+        "" | -* | *- | *[!a-z0-9-]*) ;;
+        *) FEATURE_BRANCH="feat/$FEATURE_SLUG" ;;
+    esac
+fi
+
 GIT_TOOLS=(
-    "Bash(git status:*)"
-    "Bash(git log:*)"
-    "Bash(git diff:*)"
-    "Bash(git show:*)"
-    "Bash(git rev-parse:*)"
+    "Bash(git status --porcelain)"
+    "Bash(git rev-parse --short HEAD)"
     "Bash(git symbolic-ref --short HEAD)"
     "Bash(git branch --show-current)"
     "Bash(git branch --list)"
-    "Bash(git worktree list:*)"
+    "Bash(git worktree list)"
+    "Bash(git log origin/$BASE_BRANCH --oneline -20)"
+    "Bash(git show --stat origin/$BASE_BRANCH)"
 )
-if [ -d "$INT_WT" ]; then
+if [ -n "$FEATURE_BRANCH" ]; then
     GIT_TOOLS+=(
-        "Bash(git -C $INT_WT status --porcelain)"
-        "Bash(git -C $INT_WT status --porcelain:*)"
+        "Bash(git rev-parse --short $FEATURE_BRANCH)"
+        "Bash(git log $BASE_BRANCH..$FEATURE_BRANCH --oneline)"
+        "Bash(git diff --stat $BASE_BRANCH...$FEATURE_BRANCH)"
     )
+fi
+if [ -d "$INT_WT" ]; then
+    GIT_TOOLS+=("Bash(git -C $INT_WT status --porcelain)")
 fi
 
 # Test-only binary seam for tests/operator-evidence.test.sh; production keeps

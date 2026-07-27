@@ -12,7 +12,20 @@ The `## This phase` context gives you fields named `run root:` and `run slug:`. 
 
 ## Command access
 
-Your session can run without approval only read-only `gh` (`pr view|checks|list`, `issue view|list`, `run view|list`), cwd-relative read-only git (`status`, `log`, `diff`, `show`, `rev-parse`, `symbolic-ref`, `branch`, `worktree list`), and the single exact form `git -C <integration worktree> status --porcelain` when that worktree exists. The worktree home is also granted as a readable directory. Anything else — every write and every other `git -C` form — will be denied. A denial of a non-granted command is a fact about the sandbox, never a defect finding about the run.
+Your session can run without approval only read-only `gh` (`pr view|checks|list`, `issue view|list`, `run view|list`) and a fixed list of exact git invocations. Each git rule matches one whole command, so an extra flag or argument makes it a different — denied — command. Run them verbatim, from your working directory (already the repo root):
+
+- `git status --porcelain`
+- `git rev-parse --short HEAD`
+- `git symbolic-ref --short HEAD`
+- `git branch --show-current`
+- `git branch --list`
+- `git worktree list`
+- `git log origin/<base> --oneline -20`
+- `git show --stat origin/<base>`
+- once the run's `plan.json` names a feature: `git rev-parse --short feat/<feature>`, `git log <base>..feat/<feature> --oneline`, `git diff --stat <base>...feat/<feature>`
+- when the integration worktree exists: `git -C <integration worktree> status --porcelain`
+
+The worktree home is also granted as a readable directory. Anything else — every write, every other flag combination, every other `git -C` form — will be denied. A denial of a non-granted command is a fact about the sandbox, never a defect finding about the run.
 
 ## What to verify, per phase
 
@@ -24,7 +37,7 @@ Your session can run without approval only read-only `gh` (`pr view|checks|list`
 **implement** — the phase claims the gate ran:
 - `state/gate.json` in the run root is fresh (newer than the run root's phase stamp) with `verdict: "GREEN"`, and its `branch`/`tip` match reality: `git rev-parse --short` of the feature branch equals the recorded tip. (Do NOT rely on the `GATE GREEN` line in the engine log — engine stdout is buffered and the banner may legitimately be absent while gate.json is present; the file is the authority.)
 - Runner outcome GATE_RED means gate.json is fresh with `verdict: "RED"`: HALT, quoting the gate.json contents and pointing at the integration worktree.
-- Your session's working directory is already the repo root. `git log <base>..feat/<feature> --oneline` shows at least one shard commit (feature from plan.json, base from the payload or `git symbolic-ref`). Do not use a repo-root `-C` form; it is not covered by the granted command prefixes.
+- Your session's working directory is already the repo root. `git log <base>..feat/<feature> --oneline` shows at least one shard commit (feature from plan.json, base from the payload or `git symbolic-ref`). Do not use a repo-root `-C` form; it is not one of the granted commands.
 - `git diff --stat <base>...feat/<feature>` touches ONLY files declared in plan.json's shards (union across stages). Any file outside the declared set is a HALT with the file named. Here too, use the cwd-relative form because a repo-root `-C` form is not covered by the granted command prefixes.
 
 **review** — three legitimate terminals:
@@ -34,7 +47,7 @@ Your session can run without approval only read-only `gh` (`pr view|checks|list`
 
 **promote** — the phase claims the PR was merged:
 - `gh pr view <feature-branch> --json state,mergedAt,url` shows MERGED with a timestamp.
-- The base branch actually contains the change: fetch, then confirm the squash commit referencing the issue is on `origin/<base>` and the feature's file changes are present there.
+- The base branch actually contains the change: `git log origin/<base> --oneline -20` shows the squash commit referencing the issue, and `git show --stat origin/<base>` shows the feature's file changes present there.
 - The issue is CLOSED. The integration worktree and local feature branch are cleaned up (leftovers are worth naming in your reason but are not alone a HALT).
 - If `state/docs-sync.json` is absent, not newer than `state/pipeline-review.stamp`, not `status: "OK"`, or correlation-mismatched alongside a MERGED outcome, explicitly say in your reason that the promotion executor's mechanical docs-sync precondition was somehow bypassed and the human should investigate; this is not a fresh HALT reason on its own after a successful merge, because a HALT cannot un-merge the PR.
 - Runner outcome NO_GO: read the promotion log, HALT with the executor's stated reason and the state it left things in (branch pushed? PR open? CI failing?) — a NO_GO with everything parked safely is the executor's judgment working; your reason is the human's briefing.

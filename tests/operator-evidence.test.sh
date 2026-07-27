@@ -128,6 +128,13 @@ init_integration() {
     git_fixture "$INT_WT_PATH" commit -q -m initial
 }
 
+seed_plan() {
+    local FEATURE="$1"
+    jq -nc --argjson issue 25 --arg feature "$FEATURE" \
+        '{issue: $issue, feature: $feature, stages: []}' \
+        >"$RUN_DIR_PATH/plan.json"
+}
+
 run_operator() {
     local PHASE="$1"
     local MODEL_OUTPUT="$2"
@@ -201,43 +208,56 @@ valid_proceed_payload() {
             "$SUBJECT_STDOUT" >/dev/null
 }
 
-narrow_git_rules() {
+# Every granted git rule must be one whole read-only invocation. A `:*` suffix
+# would admit arbitrary trailing arguments — `--output=<file>` on log/diff/show,
+# the write modes of symbolic-ref and branch — so any suffix-capable git rule
+# fails the case regardless of what else the list contains.
+read_only_git_rules() {
     local FILE="$1"
     local WORKTREE="$2"
-    local EXPECT_WORKTREE_RULES="$3"
+    local BASE="$3"
+    local FEATURE_BRANCH="$4"
+    local EXPECT_WORKTREE_RULES="$5"
+    local EXPECT_FEATURE_RULES="$6"
     local RULE
     local OK=0
+    local WORKTREE_RULES=0
+    local FEATURE_RULES=0
 
     while IFS= read -r RULE; do
         case "$RULE" in
-            "Bash(git status:*)" \
-            | "Bash(git log:*)" \
-            | "Bash(git diff:*)" \
-            | "Bash(git show:*)" \
-            | "Bash(git rev-parse:*)" \
+            "Bash(git status --porcelain)" \
+            | "Bash(git rev-parse --short HEAD)" \
             | "Bash(git symbolic-ref --short HEAD)" \
             | "Bash(git branch --show-current)" \
             | "Bash(git branch --list)" \
-            | "Bash(git worktree list:*)")
+            | "Bash(git worktree list)" \
+            | "Bash(git log origin/$BASE --oneline -20)" \
+            | "Bash(git show --stat origin/$BASE)")
                 ;;
-            "Bash(git -C $WORKTREE status --porcelain)" \
-            | "Bash(git -C $WORKTREE status --porcelain:*)")
-                if [ "$EXPECT_WORKTREE_RULES" -ne 1 ]; then
+            "Bash(git rev-parse --short $FEATURE_BRANCH)" \
+            | "Bash(git log $BASE..$FEATURE_BRANCH --oneline)" \
+            | "Bash(git diff --stat $BASE...$FEATURE_BRANCH)")
+                if [ -z "$FEATURE_BRANCH" ]; then
                     OK=1
+                else
+                    FEATURE_RULES=$((FEATURE_RULES + 1))
                 fi
+                ;;
+            "Bash(git -C $WORKTREE status --porcelain)")
+                WORKTREE_RULES=$((WORKTREE_RULES + 1))
                 ;;
             *)
                 OK=1
                 ;;
         esac
-    done < <(grep '^Bash(git ' "$FILE")
+    done < <(grep '^Bash(git' "$FILE")
 
-    # `symbolic-ref` and `branch` have write modes, so any trailing-argument
-    # wildcard on them escapes the read-only contract no matter what else the
-    # rule list contains.
-    if grep -Fx 'Bash(git -C:*)' "$FILE" >/dev/null \
-        || grep -E '^Bash\(git (-C [^ )]+ )?(symbolic-ref|branch)( [^)]*)?:\*\)$' \
-            "$FILE" >/dev/null; then
+    if grep -E '^Bash\(git.*:\*\)$' "$FILE" >/dev/null; then
+        OK=1
+    fi
+    if [ "$WORKTREE_RULES" -ne "$EXPECT_WORKTREE_RULES" ] \
+        || [ "$FEATURE_RULES" -ne "$EXPECT_FEATURE_RULES" ]; then
         OK=1
     fi
     return "$OK"
@@ -277,13 +297,13 @@ if grep -Fx \
     && grep -Fx \
         "Bash(git -C $INT_WT_PATH status --porcelain)" \
         "$ARGV_CAPTURE" >/dev/null \
-    && grep -Fx \
+    && ! grep -F \
         "Bash(git -C $INT_WT_PATH status --porcelain:*)" \
         "$ARGV_CAPTURE" >/dev/null \
     && valid_proceed_payload; then
     OK=0
 fi
-report_case "review injects clean live evidence and porcelain grants" "$OK" \
+report_case "review injects clean live evidence and the exact porcelain grant" "$OK" \
     "status=$RUN_STATUS evidence=$(printf '%.200s' "$EVIDENCE")"
 
 # 2. Dirtiness is evidence for the model, not a reason for the handler to fail.
@@ -316,6 +336,7 @@ if ! grep -Fx \
         "$PROMPT_CAPTURE" >/dev/null \
     && ! grep -Fx -- "--add-dir" "$ARGV_CAPTURE" >/dev/null \
     && ! grep '^Bash(git -C ' "$ARGV_CAPTURE" >/dev/null \
+    && ! grep -F 'feat/' "$ARGV_CAPTURE" >/dev/null \
     && [ ! -e "$WT_BASE_PATH" ] \
     && valid_proceed_payload; then
     OK=0
@@ -358,13 +379,15 @@ fi
 report_case "unparseable model output fails safe to HALT" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 200 "$SUBJECT_STDOUT")"
 
-# 6. Repo-root read-only rules are invariant across all phases: the write-capable
-# subcommands are granted only in their exact read-only forms, and the only
-# optional git -C rules are the two exact integration porcelain forms.
+# 6. Read-only git rules are invariant across all phases: every granted git
+# command is one exact read-only invocation with no trailing wildcard, the
+# ref-bearing forms come from the run's own plan, and the only optional git -C
+# rule is the exact integration porcelain form.
 RULES_OK=0
 RULES_DETAIL=""
 for TEST_PHASE in plan implement review promote; do
     setup_harness
+    seed_plan "fixture-feature"
     EXPECT_WORKTREE_RULES=0
     if [ "$TEST_PHASE" = "review" ] || [ "$TEST_PHASE" = "promote" ]; then
         init_integration "integration-$TEST_PHASE"
@@ -372,21 +395,45 @@ for TEST_PHASE in plan implement review promote; do
     fi
     run_operator "$TEST_PHASE" "$PROCEED_OUTPUT"
     if [ "$RUN_STATUS" -ne 0 ] \
-        || ! grep -Fx 'Bash(git log:*)' "$ARGV_CAPTURE" >/dev/null \
-        || ! grep -Fx 'Bash(git diff:*)' "$ARGV_CAPTURE" >/dev/null \
+        || ! grep -Fx 'Bash(git status --porcelain)' "$ARGV_CAPTURE" >/dev/null \
         || ! grep -Fx 'Bash(git symbolic-ref --short HEAD)' \
             "$ARGV_CAPTURE" >/dev/null \
         || ! grep -Fx 'Bash(git branch --show-current)' \
             "$ARGV_CAPTURE" >/dev/null \
         || ! grep -Fx 'Bash(git branch --list)' "$ARGV_CAPTURE" >/dev/null \
-        || ! narrow_git_rules \
-            "$ARGV_CAPTURE" "$INT_WT_PATH" "$EXPECT_WORKTREE_RULES"; then
+        || ! grep -Fx 'Bash(git log main..feat/fixture-feature --oneline)' \
+            "$ARGV_CAPTURE" >/dev/null \
+        || ! grep -Fx 'Bash(git diff --stat main...feat/fixture-feature)' \
+            "$ARGV_CAPTURE" >/dev/null \
+        || ! read_only_git_rules \
+            "$ARGV_CAPTURE" "$INT_WT_PATH" "main" "feat/fixture-feature" \
+            "$EXPECT_WORKTREE_RULES" 3; then
         RULES_OK=1
         RULES_DETAIL="phase=$TEST_PHASE status=$RUN_STATUS"
         break
     fi
 done
-report_case "repo-root git grants stay read-only in every phase" "$RULES_OK" \
+report_case "git grants stay exact and read-only in every phase" "$RULES_OK" \
+    "$RULES_DETAIL"
+
+# 7. The ref-bearing rules are interpolated from plan.json, so a slug that is
+# not a kebab-case token must yield no rule at all rather than an unbounded or
+# argument-bearing one.
+RULES_OK=0
+RULES_DETAIL=""
+for BAD_FEATURE in 'a b --output=/tmp/x' '../escape' 'Feature' '-lead' 'trail-'; do
+    setup_harness
+    seed_plan "$BAD_FEATURE"
+    run_operator "implement" "$PROCEED_OUTPUT"
+    if [ "$RUN_STATUS" -ne 0 ] \
+        || grep -F 'feat/' "$ARGV_CAPTURE" >/dev/null \
+        || ! read_only_git_rules "$ARGV_CAPTURE" "$INT_WT_PATH" "main" "" 0 0; then
+        RULES_OK=1
+        RULES_DETAIL="feature=$BAD_FEATURE status=$RUN_STATUS"
+        break
+    fi
+done
+report_case "a non-slug plan feature grants no ref-bearing rule" "$RULES_OK" \
     "$RULES_DETAIL"
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"

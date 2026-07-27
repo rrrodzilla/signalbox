@@ -4,10 +4,20 @@
 # by this runner. Prints PASS/FAIL per case and exits non-zero on failure.
 #
 # Deliberately no -e: cases capture subject statuses that may be non-zero.
+# Fixture creation and setup are therefore checked explicitly and abort the
+# runner, so a broken fixture can never pass as an empty (0/0) success.
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FIX="$(mktemp -d)"
+fatal() {
+    printf 'FATAL %s\n' "$1" >&2
+    exit 1
+}
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" \
+    || fatal 'the repository root could not be resolved'
+FIX="$(mktemp -d)" || fatal 'a fixture directory could not be created'
+[ -n "$FIX" ] && [ -d "$FIX" ] \
+    || fatal 'mktemp -d produced no usable fixture directory'
 HARNESS="$FIX/harness"
 SUBJECT="$HARNESS/bin/run.sh"
 STUB_BIN="$FIX/stub-bin"
@@ -128,19 +138,28 @@ for REQUIRED in jq flock; do
 done
 
 mkdir -p "$HARNESS" "$STUB_BIN" "$HARNESS/templates" \
-    "$HARNESS/.claude/docs"
-cp -r "$ROOT/bin" "$HARNESS/"
-printf '# fixture architecture\n' >"$HARNESS/.claude/docs/ARCHI.md"
+    "$HARNESS/.claude/docs" \
+    || fatal 'the fixture harness directories could not be created'
+cp -r "$ROOT/bin" "$HARNESS/" \
+    || fatal 'bin/ could not be copied into the fixture harness'
+[ -x "$SUBJECT" ] || fatal "the fixture subject $SUBJECT is missing"
+[ -x "$HARNESS/bin/ports.sh" ] \
+    || fatal 'the fixture harness is missing bin/ports.sh'
+printf '# fixture architecture\n' >"$HARNESS/.claude/docs/ARCHI.md" \
+    || fatal 'the fixture ARCHI.md could not be written'
 
 for TEMPLATE in pipeline plan implement emergent init; do
     printf 'name = "fixture__SIGNALBOX_RUN_SUFFIX__"\napproval = __SIGNALBOX_PORT_APPROVAL__\n' \
-        >"$HARNESS/templates/$TEMPLATE.toml"
+        >"$HARNESS/templates/$TEMPLATE.toml" \
+        || fatal "the fixture template $TEMPLATE.toml could not be written"
 done
 
 printf '%s\n' \
     '#!/usr/bin/env bash' \
-    'exec sleep 120' >"$STUB_BIN/emergent"
-chmod +x "$STUB_BIN/emergent"
+    'exec sleep 120' >"$STUB_BIN/emergent" \
+    || fatal 'the emergent stub could not be written'
+chmod +x "$STUB_BIN/emergent" \
+    || fatal 'the emergent stub could not be made executable'
 
 PATH="$STUB_BIN:$PATH" \
     SIGNALBOX_LEASE_REGISTRY="$LEASE_REGISTRY" \

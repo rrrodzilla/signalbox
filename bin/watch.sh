@@ -14,8 +14,11 @@
 #
 # Nothing here assumes port numbers: the watchtower ports are discovered
 # by parsing every run's rendered TOMLs, plus the harness-root TOMLs used by
-# single-run/prototype launches. The page port is WATCH_PORT if set, else
-# 8099, else an ephemeral port — the URL actually bound is always printed.
+# single-run/prototype launches. Port leases are released and reused, so a
+# finished run's TOML can still name a port a newer run now owns; streams are
+# therefore claimed by run liveness (see resolve_stream_ports). The page port
+# is WATCH_PORT if set, else 8099, else an ephemeral port — the URL actually
+# bound is always printed.
 #
 # The artifact poll works even for engines started before the watchtower
 # sinks existed; the SSE streams light up whenever an engine with a
@@ -173,6 +176,37 @@ def run_info(run_dir, fallback_slug):
         "streams": discover_streams(run_dir, slug),
     }
 
+# Liveness ranking used to settle a port claimed by more than one run.
+# "unknown" covers runs with no launch.json (prototype/single-run launches),
+# which still deserve a stream when nothing live contradicts them.
+PID_RANK = {"alive": 2, "unknown": 1, "dead": 0}
+
+def resolve_stream_ports(runs):
+    """Give each watchtower port to exactly one run, by liveness.
+
+    A released port lease can be re-leased to a later run while the earlier
+    run's rendered TOML still names it. Left alone, a finished run's stream
+    would relabel the active run's events (and its promote state). So: a dead
+    run owns no stream at all, and among the survivors a live run outranks an
+    "unknown" one. Ties keep the first run scanned.
+    """
+    owner = {}
+    for run_idx, run in enumerate(runs):
+        rank = PID_RANK.get(run["pid_state"], 1)
+        if rank == 0:
+            continue
+        for stream_idx, stream in enumerate(run["streams"]):
+            best = owner.get(stream["port"])
+            if best is None or rank > best[0]:
+                owner[stream["port"]] = (rank, run_idx, stream_idx)
+    for run_idx, run in enumerate(runs):
+        run["streams"] = [
+            stream
+            for stream_idx, stream in enumerate(run["streams"])
+            if owner.get(stream["port"], (0, -1, -1))[1:] == (run_idx, stream_idx)
+        ]
+    return runs
+
 def discover_runs():
     """Re-scan run directories and TOMLs for every request."""
     runs = []
@@ -195,7 +229,7 @@ def discover_runs():
     )
     if root_has_artifacts:
         runs.append(root)
-    return runs
+    return resolve_stream_ports(runs)
 
 def status():
     return {"now": time.time(), "harness": HARNESS, "runs": discover_runs()}
@@ -334,7 +368,9 @@ td.age, td.size { color:var(--dim); white-space:nowrap; text-align:right; }
 <div id="runs"></div>
 <script>
 // Streams are discovered server-side from the harness TOMLs and delivered
-// via /status — the page assumes no port numbers.
+// via /status — the page assumes no port numbers. /status already resolves a
+// reused port to its owning live run, so at most one stream per port arrives
+// and a changed label means the port genuinely changed hands.
 const STREAMS = [];
 const PHASES = ["plan","implement","review","promote"];
 const promoteStates = {};

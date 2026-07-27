@@ -68,7 +68,14 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --data-binary)
             shift
-            BODY="${1:-}"
+            # @- means the subject streams the body on stdin, matching how real
+            # curl reads it; anything else is a literal inline body.
+            if [ "${1:-}" = "@-" ]; then
+                BODY="$({ cat 2>/dev/null || true; printf 'x'; })"
+                BODY="${BODY%?}"
+            else
+                BODY="${1:-}"
+            fi
             ;;
     esac
     shift
@@ -263,7 +270,7 @@ fi
 report_case "wrong or empty arguments exit 64" "$OK" \
     "zero=$S0 three=$S3 empty=$SE"
 
-# 7. The default port is 8099 and the request options/body are exact.
+# 7. The default port is 8099, the options are exact, and the body is streamed.
 reset_case
 TEST_INPUT='{"default":true}'
 run_subject pipeline system.started.pipeline
@@ -282,8 +289,9 @@ if [ "$RUN_STATUS" -eq 0 ] \
     && [ "${CURL_ARGS[7]}" = "-H" ] \
     && [ "${CURL_ARGS[8]}" = "Content-Type: application/json" ] \
     && [ "${CURL_ARGS[9]}" = "--data-binary" ] \
-    && [ "${CURL_ARGS[10]}" = "$(cat "$BODY")" ] \
-    && [ "${CURL_ARGS[11]}" = "http://127.0.0.1:8099/ingest" ]; then
+    && [ "${CURL_ARGS[10]}" = "@-" ] \
+    && [ "${CURL_ARGS[11]}" = "http://127.0.0.1:8099/ingest" ] \
+    && jq -e '.payload == {default: true}' "$BODY" >/dev/null; then
     OK=0
 fi
 report_case "default URL and fire-and-forget curl options are exact" "$OK" \
@@ -303,6 +311,30 @@ if [ "$RUN_STATUS" -eq 0 ] \
 fi
 report_case "SIGNALBOX_SINK_PORT overrides the posted URL" "$OK" \
     "status=$RUN_STATUS url=${CURL_ARGS[11]:-missing}"
+
+# 9. A payload past the per-argument size limit still forwards intact. Linux
+#    caps a single argv element at 128 KiB, so 200 KB of payload would fail with
+#    "Argument list too long" if the envelope were built or posted through argv.
+reset_case
+LARGE_VALUE="$(head -c 200000 /dev/zero | tr '\0' 'a')"
+TEST_INPUT="$(
+    printf '%s' "$LARGE_VALUE" | jq -Rsc '{correlation_id: "cid-big", blob: .}'
+)"
+run_subject pipeline phase.request
+BODY="$FIXTURE_ROOT/curl-record/body"
+OK=1
+if [ "$RUN_STATUS" -eq 0 ] \
+    && [ ! -s "$FIXTURE_ROOT/stderr" ] \
+    && jq -e '
+        .correlation_id == "cid-big"
+        and .payload.correlation_id == "cid-big"
+        and (.payload.blob | length) == 200000
+        and (.payload.blob | test("^a+$"))
+    ' "$BODY" >/dev/null; then
+    OK=0
+fi
+report_case "payload beyond the per-argument limit forwards intact" "$OK" \
+    "status=$RUN_STATUS stderr=$(head -c 160 "$FIXTURE_ROOT/stderr")"
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

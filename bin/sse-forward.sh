@@ -100,8 +100,15 @@ if [ -f "$RUN_DIR/plan.json" ]; then
     fi
 fi
 
+# The payload, launch, and plan documents reach jq on stdin rather than through
+# --argjson: a large but valid payload would otherwise exceed the per-argument
+# size limit and drop the event with "Argument list too long". printf is a shell
+# builtin, so composing the stream costs no argument space. A stream that is not
+# exactly three documents (an unparseable payload leaves its slot empty) fails
+# the guard below and falls through to the envelope-construction error path.
 ENVELOPE="$(
-    jq -cn -c \
+    printf '%s\n%s\n%s\n' "$PARSED_PAYLOAD" "$LAUNCH_JSON" "$PLAN_JSON" \
+    | jq -cn -c \
         --arg type "$TOPIC" \
         --arg engine_label "$ENGINE_LABEL" \
         --arg sent_at "$SENT_AT" \
@@ -112,9 +119,6 @@ ENVELOPE="$(
         --arg repo_root "$REPO_ROOT" \
         --arg issue_env "${SIGNALBOX_ISSUE:-}" \
         --arg feature_env "$FEATURE" \
-        --argjson payload "$PARSED_PAYLOAD" \
-        --argjson launch "$LAUNCH_JSON" \
-        --argjson plan "$PLAN_JSON" \
         '
         def integer_or_null($value):
             if (($value | type) == "number") and (($value | floor) == $value)
@@ -124,7 +128,17 @@ ENVELOPE="$(
         def string_or_null($value):
             if ($value | type) == "string" then $value else null end;
 
-        (integer_or_null($launch.issue)) as $launch_issue
+        ([inputs]) as $documents
+        | (
+            if ($documents | length) == 3
+            then $documents
+            else error("expected payload, launch, and plan documents")
+            end
+        ) as $stdin
+        | $stdin[0] as $payload
+        | $stdin[1] as $launch
+        | $stdin[2] as $plan
+        | (integer_or_null($launch.issue)) as $launch_issue
         | (integer_or_null($plan.issue)) as $plan_issue
         | {
             type: $type,
@@ -175,11 +189,15 @@ if [ -z "$ENVELOPE" ]; then
 fi
 
 SINK_PORT="${SIGNALBOX_SINK_PORT:-8099}"
-curl -sS -X POST \
-    --connect-timeout 1 \
-    --max-time 2 \
-    -H "Content-Type: application/json" \
-    --data-binary "$ENVELOPE" \
-    "http://127.0.0.1:$SINK_PORT/ingest" >/dev/null || true
+# The envelope reaches curl on stdin (--data-binary @-) for the same reason it
+# reaches jq that way: as an argv element, a large envelope would exceed the
+# per-argument size limit and the POST would never run.
+printf '%s' "$ENVELOPE" \
+    | curl -sS -X POST \
+        --connect-timeout 1 \
+        --max-time 2 \
+        -H "Content-Type: application/json" \
+        --data-binary @- \
+        "http://127.0.0.1:$SINK_PORT/ingest" >/dev/null || true
 
 exit 0

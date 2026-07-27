@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Promotion executor: stdin = phase.request {issue, phase: "promote", correlation_id}
-# stdout = phase.done (input + {outcome, log, provenance})
+# stdout = phase.done (input + {outcome, log, provenance?})
 #
 # Headless Fable performs the outward-facing promotion — push, PR, CI watch,
 # squash merge, cleanup — under its own judgment (prompts/promote.md). This
 # is the delegation boundary the human chose: PR-and-merge after green CI is
 # the workflow's job; releases stay human. NO_GO leaves everything in a safe
 # state for one human look.
+#
+# Docs sync now runs in parallel with the CR terminal (see emergent.toml), so
+# this executor enforces "no PR without a recorded docs-sync": it blocks on
+# fresh, status "OK", correlation-matched evidence and returns NO_GO rather
+# than promoting on unchecked vault docs.
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
@@ -20,6 +25,20 @@ FEATURE="$(jq -r '.feature // "unknown"' "$RUN_DIR/plan.json" 2>/dev/null || ech
 
 mkdir -p "$RUN_DIR/logs"
 LOG="$RUN_DIR/logs/promote-$ISSUE.md"
+
+if ! WAIT_REASON="$("$(dirname "${BASH_SOURCE[0]}")/docs-sync-wait.sh" "$RUN_DIR" 900)"; then
+    printf '%s\n' "$WAIT_REASON" >"$LOG"
+    printf '[pipeline] promotion blocked: %s\n' "$WAIT_REASON" >&2
+    jq -c \
+        --arg outcome "NO_GO" \
+        --arg log "$LOG" \
+        'del(.provenance) | . + {
+            outcome: $outcome,
+            log: $log
+        }' <<<"$PAYLOAD"
+    exit 0
+fi
+printf '[pipeline] promotion precondition: %s\n' "$WAIT_REASON" >&2
 
 PROMPT="$(cat "$ROOT/prompts/promote.md")
 

@@ -35,6 +35,7 @@ STATE="${SIGNALBOX_SINK_STATE:-$HOME/.local/share/signalbox/instances.json}"
 IDLE="${SIGNALBOX_SINK_IDLE:-900}"
 
 exec python3 - "$PORT" "$STATE" "$IDLE" <<'PYEOF'
+import calendar
 import errno
 import json
 import math
@@ -94,6 +95,25 @@ ARTIFACTS = [
     "state/pipeline-review.stamp",
 ]
 
+PIPELINE_STAMPS = (
+    "state/pipeline-plan.stamp",
+    "state/pipeline-implement.stamp",
+    "state/pipeline-review.stamp",
+)
+
+# bin/run.sh writes this record before it spawns any engine, for pipeline and
+# --phase launches alike, so it dates the launch that owns the run directory.
+LAUNCH_RECORD = "launch.json"
+
+ARTIFACT_GATES = {
+    "plan.json": "state/pipeline-plan.stamp",
+    "state/run.json": "state/pipeline-implement.stamp",
+    "state/gate.json": "state/pipeline-implement.stamp",
+    "results/CR.md": "state/pipeline-review.stamp",
+    "state/pending.json": "state/pipeline-review.stamp",
+    "state/docs-sync.json": "state/pipeline-review.stamp",
+}
+
 IDENTITY_FIELDS = (
     "repo",
     "repo_root",
@@ -141,6 +161,149 @@ def artifact_info(run_dir, rel):
             except (OSError, ValueError, RecursionError):
                 info["json"] = None
     return info
+
+
+def parse_started(value):
+    """Epoch seconds for an ISO-8601 UTC instant as bin/run.sh records it."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def launch_boundary(run_dir):
+    """Epoch seconds at which the run directory's current launch began.
+
+    Nothing the current launch produces can predate its launch record, so the
+    record dates the boundary between this launch's artifacts and whatever an
+    earlier launch of the same run directory left behind. The recorded start
+    instant is preferred over the record's own mtime because bin/run.sh
+    rewrites the record moments after the spawn to add the engine identity;
+    the recorded instant is truncated to the second and therefore never lands
+    after the launch. Returns None when a run directory carries no readable
+    launch record, which leaves stale detection with only the producer-phase
+    gate to go on.
+    """
+    if not isinstance(run_dir, str) or not run_dir or "\x00" in run_dir:
+        return None
+    path = os.path.join(run_dir, LAUNCH_RECORD)
+    if not os.path.isfile(path):
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    fallback = st.st_mtime if math.isfinite(st.st_mtime) else None
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(MAX_ARTIFACT_JSON)
+            if len(raw) >= MAX_ARTIFACT_JSON or fh.read(1):
+                return fallback
+        record = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=reject_constant,
+            parse_float=finite_float,
+        )
+    except (OSError, ValueError, RecursionError):
+        return fallback
+    if not isinstance(record, dict):
+        return fallback
+    started = parse_started(record.get("started"))
+    return fallback if started is None else started
+
+
+def mark_stale(artifacts, boundary=None):
+    """Mark run artifacts that the current launch did not produce.
+
+    An artifact is current when it is at least as new as the launch boundary
+    AND at least as new as the stamp of the phase that produces it, counting
+    only a stamp the current launch itself wrote. Both halves are needed: a
+    rerun under a harness that does not archive keeps the previous launch's
+    artifacts and its stamps together, so the producer-phase gate alone reads
+    them as current, while a bin/run.sh --phase launch writes no pipeline
+    stamp at all, so the gate alone reads its fresh output as stale. Without
+    a boundary — a run directory whose launch record is missing or unreadable
+    — the producer-phase gate is all that is left and is applied alone.
+    """
+    if not isinstance(artifacts, dict):
+        return artifacts
+
+    def mtime(entry):
+        if not isinstance(entry, dict):
+            return None
+        value = entry.get("mtime")
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        try:
+            return value if math.isfinite(value) else None
+        except (OverflowError, TypeError, ValueError):
+            return None
+
+    for stamp in PIPELINE_STAMPS:
+        entry = artifacts.get(stamp)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("exists") is not True or boundary is None:
+            entry["stale"] = False
+            continue
+        stamp_mtime = mtime(entry)
+        entry["stale"] = stamp_mtime is None or stamp_mtime < boundary
+
+    newest_stamp = None
+    newest_clock_valid = True
+    for stamp in PIPELINE_STAMPS:
+        entry = artifacts.get(stamp)
+        if not isinstance(entry, dict) or entry.get("exists") is not True:
+            continue
+        stamp_mtime = mtime(entry)
+        if stamp_mtime is None:
+            newest_clock_valid = False
+            break
+        if boundary is not None and stamp_mtime < boundary:
+            continue  # a stamp the previous launch left behind
+        newest_stamp = (stamp_mtime if newest_stamp is None
+                        else max(newest_stamp, stamp_mtime))
+
+    for artifact, stamp in ARTIFACT_GATES.items():
+        entry = artifacts.get(artifact)
+        if not isinstance(entry, dict) or entry.get("exists") is not True:
+            continue
+        gate = artifacts.get(stamp)
+        gate_exists = isinstance(gate, dict) and gate.get("exists") is True
+        gate_mtime = mtime(gate) if gate_exists else None
+        entry_mtime = mtime(entry)
+        if entry_mtime is None:
+            entry["stale"] = True
+        elif boundary is None:
+            entry["stale"] = gate_mtime is None or entry_mtime < gate_mtime
+        elif entry_mtime < boundary:
+            entry["stale"] = True
+        elif gate_exists and gate_mtime is None:
+            entry["stale"] = True  # unreadable phase clock: fail conservative
+        elif gate_mtime is not None and gate_mtime >= boundary:
+            entry["stale"] = entry_mtime < gate_mtime
+        else:
+            # Produced by the current launch, which wrote no stamp for the
+            # producing phase: a bin/run.sh --phase launch. It is current.
+            entry["stale"] = False
+
+    escalated = artifacts.get("state/escalated.json")
+    if isinstance(escalated, dict) and escalated.get("exists") is True:
+        escalated_mtime = mtime(escalated)
+        if escalated_mtime is None or not newest_clock_valid:
+            escalated["stale"] = True
+        elif boundary is not None and escalated_mtime < boundary:
+            escalated["stale"] = True
+        elif boundary is None:
+            escalated["stale"] = (newest_stamp is None
+                                  or escalated_mtime < newest_stamp)
+        else:
+            escalated["stale"] = (newest_stamp is not None
+                                  and escalated_mtime < newest_stamp)
+
+    return artifacts
 
 
 def log_info(run_dir):
@@ -470,6 +633,7 @@ def status():
             entry = provenance.get(artifact)
             if entry is not None:
                 info["provenance"] = entry
+        mark_stale(artifacts, launch_boundary(run_dir))
         logs = log_info(run_dir)
         for info in logs:
             entry = provenance.get("logs/" + info["file"])
@@ -606,83 +770,231 @@ PAGE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>signalbox sink</title>
+<title>signalbox</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-:root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e;
-        --green:#3fb950; --red:#f85149; --amber:#d29922; --blue:#58a6ff; --purple:#bc8cff; }
+:root {
+  --enamel:#10151d;      /* page ground: blue-black stove enamel */
+  --casing:#171e28;      /* panel casing */
+  --casing-2:#1d2632;    /* raised fittings */
+  --seam:#2a3542;        /* casing seams */
+  --paint:#d3dce4;       /* diagram paint: primary text, track lines */
+  --dim:#7d8894;
+  --faint:#4a5560;
+  --green:#46c25a;       /* clear */
+  --amber:#e6a23c;       /* occupied / caution */
+  --red:#e15a5f;         /* danger */
+  --white-lamp:#eef4fa;  /* route set */
+  --violet:#a78bfa;      /* waiting on a human */
+  --blue:#5aa7e8;
+}
 * { box-sizing:border-box; margin:0; }
-body { background:var(--bg); color:var(--fg); font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; padding:16px; }
-h1 { font-size:16px; letter-spacing:.06em; }
-.meta { color:var(--dim); font-size:12px; margin-top:2px; }
-.run { margin-top:16px; border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:12px; }
-.run-head { color:var(--blue); font-size:14px; font-weight:600; }
-.run-meta { color:var(--dim); font-size:11px; margin-top:2px; word-break:break-word; }
-.rail { display:flex; gap:8px; margin:16px 0; flex-wrap:wrap; }
-.phase { flex:1; min-width:130px; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--panel); }
-.phase .name { text-transform:uppercase; font-size:11px; letter-spacing:.1em; color:var(--dim); }
-.phase .st { font-size:13px; margin-top:4px; font-weight:600; }
-.phase.pending .st { color:var(--dim); }
-.phase.active .st { color:var(--amber); }
-.phase.active { border-color:var(--amber); }
-.phase.done .st { color:var(--green); }
-.phase.failed .st, .phase.escalated .st { color:var(--red); }
-.phase.failed, .phase.escalated { border-color:var(--red); }
-.phase.parked .st { color:var(--purple); }
-.cols { display:grid; grid-template-columns: 340px 1fr; gap:16px; align-items:start; }
-@media (max-width:900px){ .cols { grid-template-columns:1fr; } }
-.panel { border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:12px; }
-.panel h2 { font-size:11px; text-transform:uppercase; letter-spacing:.1em; color:var(--dim); margin-bottom:8px; }
-table { width:100%; border-collapse:collapse; font-size:12px; }
-td { padding:3px 6px 3px 0; vertical-align:top; }
-td.age, td.size { color:var(--dim); white-space:nowrap; text-align:right; }
-.miss { color:#484f58; }
+html { scrollbar-color:var(--seam) var(--enamel); }
+body { background:var(--enamel); color:var(--paint);
+  font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+button { font:inherit; }
+:focus-visible { outline:2px solid var(--amber); outline-offset:2px; }
+
+/* ── enamel plate labels: the page's lettering identity ── */
+.plate { display:inline-block; text-transform:uppercase; letter-spacing:.22em;
+  font-size:10px; font-weight:700; color:var(--dim);
+  border:1px solid var(--seam); border-radius:2px; padding:3px 8px 2px 10px;
+  background:linear-gradient(180deg, var(--casing-2), var(--casing)); }
+
+/* ── header strip ── */
+header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  padding:14px 18px 12px; border-bottom:1px solid var(--seam);
+  background:linear-gradient(180deg,#131924,var(--enamel)); }
+.wordmark { font-size:15px; font-weight:700; letter-spacing:.34em;
+  text-transform:uppercase; color:var(--white-lamp); padding-left:2px; }
+.wordmark .box { color:var(--amber); }
+#meta { color:var(--dim); font-size:11px; letter-spacing:.05em; display:flex;
+  align-items:center; gap:8px; flex-wrap:wrap; }
+.lamp { display:inline-block; width:9px; height:9px; border-radius:50%;
+  background:var(--faint); vertical-align:-1px; flex:none; }
+.lamp.on-green { background:var(--green); box-shadow:0 0 6px 1px rgba(70,194,90,.55); }
+.lamp.on-amber { background:var(--amber); box-shadow:0 0 6px 1px rgba(230,162,60,.55); }
+.lamp.on-red { background:var(--red); box-shadow:0 0 6px 1px rgba(225,90,95,.55); }
+.lamp.on-violet { background:var(--violet); box-shadow:0 0 6px 1px rgba(167,139,250,.55); }
+.lamp.on-white { background:var(--white-lamp); box-shadow:0 0 6px 1px rgba(238,244,250,.45); }
+
+/* ── two columns: board + register ── */
+.deck { display:grid; grid-template-columns:minmax(0,1fr) 420px; gap:0; }
+@media (max-width:1100px){ .deck { grid-template-columns:1fr; } }
+.board { padding:16px 18px 40px; min-width:0; }
+.board section { margin-bottom:22px; }
+.board summary { list-style:none; cursor:pointer; }
+.board summary::-webkit-details-marker { display:none; }
+.board details > summary .plate::before { content:"+\00a0"; letter-spacing:0; }
+.board details[open] > summary .plate::before { content:"\2212\00a0"; letter-spacing:0; }
+.section-head { display:flex; align-items:baseline; gap:10px; margin-bottom:10px; }
+.section-head .count { color:var(--faint); font-size:11px; }
+.empty { color:var(--faint); font-size:12px; padding:14px 2px; }
+
+/* ── run cards ── */
+.run { border:1px solid var(--seam); border-radius:4px; background:var(--casing);
+  margin-bottom:12px; overflow:hidden; }
+.run.selected { border-color:var(--dim); box-shadow:0 0 0 1px var(--dim); }
+.run.attention { border-color:color-mix(in srgb, var(--red) 45%, var(--seam)); }
+.run-head { display:flex; align-items:center; gap:10px; width:100%;
+  background:none; border:0; color:inherit; text-align:left; cursor:pointer;
+  padding:10px 12px 8px; }
+.run-title { font-size:13px; font-weight:600; color:var(--white-lamp);
+  min-width:0; overflow-wrap:anywhere; }
+.run-title .repo { color:var(--dim); font-weight:400; }
+.run-age { margin-left:auto; color:var(--faint); font-size:11px; white-space:nowrap; }
+.livery { font-size:10px; text-transform:uppercase; letter-spacing:.14em;
+  color:var(--dim); white-space:nowrap; }
+.livery.running { color:var(--green); }
+.livery.stopped { color:var(--faint); }
+.livery.stale { color:var(--amber); }
+
+/* ── the block diagram: four track sections, one lamp each ── */
+.track { display:grid; grid-template-columns:repeat(4,1fr); gap:0;
+  padding:2px 12px 0; }
+.block { position:relative; padding:14px 0 6px; }
+.block::before { content:""; position:absolute; left:0; right:0; top:22px;
+  height:2px; background:var(--faint); }
+.block.done::before { background:var(--green); }
+.block.active::before { background:var(--amber); }
+.block.failed::before, .block.escalated::before { background:var(--red); }
+.block.parked::before { background:var(--violet); }
+.block:not(:first-child)::after { content:""; position:absolute; left:-1px;
+  top:17px; width:2px; height:12px; background:var(--seam); }
+.block .lamp { position:absolute; top:18px; left:50%; margin-left:-5px;
+  width:10px; height:10px; border:1px solid var(--enamel); }
+.block.active .lamp { animation:pulse 2.4s ease-in-out infinite; }
+.block .bname { display:block; text-align:center; margin-top:18px;
+  font-size:10px; text-transform:uppercase; letter-spacing:.16em; color:var(--faint); }
+.block.done .bname { color:var(--dim); }
+.block.active .bname { color:var(--amber); }
+.block.failed .bname, .block.escalated .bname { color:var(--red); }
+.block.parked .bname { color:var(--violet); }
+@keyframes pulse { 50% { box-shadow:0 0 10px 3px rgba(230,162,60,.65); } }
+@media (prefers-reduced-motion: reduce) { .block.active .lamp { animation:none; } }
+
+/* ── sub-state within a track block: review rounds, shard sidings ── */
+.block .sub { display:block; text-align:center; margin-top:3px; font-size:9px;
+  letter-spacing:.08em; color:var(--dim); text-transform:none; }
+.block .sub .rounds { color:var(--blue); }
+.block .sub .fixing { color:var(--amber); }
+.sidings { display:flex; justify-content:center; align-items:center; gap:4px;
+  margin-top:4px; flex-wrap:wrap; padding:0 4px; }
+.sidings .bar { width:8px; height:2px; background:var(--seam); flex:none; }
+.shard-lamp { width:8px; height:8px; border-radius:2px; flex:none;
+  background:transparent; border:1px solid var(--faint); }
+.shard-lamp.s-building { background:var(--amber); border-color:var(--amber); }
+.shard-lamp.s-review { background:var(--blue); border-color:var(--blue); }
+.shard-lamp.s-fixing { background:var(--red); border-color:var(--red); }
+.shard-lamp.s-done { background:var(--green); border-color:var(--green); }
+.shard-lamp.s-escalated { background:var(--red); border-color:var(--red);
+  animation:pulse 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .shard-lamp.s-escalated { animation:none; } }
+
+/* ── status line: why this run is where it is ── */
+.verdict { display:flex; gap:8px; align-items:baseline; padding:8px 12px 10px;
+  font-size:12px; color:var(--dim); }
+.verdict span { overflow-wrap:anywhere; min-width:0; }
+.verdict b { font-weight:700; letter-spacing:.08em; flex:none; }
+.verdict.v-green b { color:var(--green); } .verdict.v-red b { color:var(--red); }
+.verdict.v-amber b { color:var(--amber); } .verdict.v-violet b { color:var(--violet); }
+.verdict.v-white b { color:var(--white-lamp); }
+
+/* ── per-run detail drawer ── */
+.run details.drawer { border-top:1px solid var(--seam); }
+.run details.drawer > summary { cursor:pointer; list-style:none; padding:6px 12px;
+  color:var(--faint); font-size:10px; text-transform:uppercase; letter-spacing:.18em; }
+.run details.drawer > summary::before { content:"+ "; }
+.run details.drawer[open] > summary::before { content:"− "; }
+.drawer-body { padding:2px 12px 12px; display:grid;
+  grid-template-columns:minmax(0,5fr) minmax(0,4fr); gap:16px; }
+@media (max-width:760px){ .drawer-body { grid-template-columns:1fr; } }
+.drawer-body h3 { font-size:10px; text-transform:uppercase; letter-spacing:.18em;
+  color:var(--faint); margin:8px 0 4px; font-weight:700; }
+.idline { color:var(--dim); font-size:11px; overflow-wrap:anywhere; margin-bottom:2px; }
+table { width:100%; border-collapse:collapse; font-size:11px; }
+td { padding:2px 6px 2px 0; vertical-align:top; overflow-wrap:anywhere; }
+td.age, td.size { color:var(--faint); white-space:nowrap; text-align:right; }
+.miss { color:var(--faint); }
+.stale { color:var(--faint); opacity:.65; }
+.badge-stale { margin-left:4px; padding:0 5px; border:1px solid var(--seam);
+  border-radius:8px; color:var(--faint); font-size:10px; white-space:nowrap; }
 .ok { color:var(--green); } .bad { color:var(--red); }
-.badges { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
-.badge { appearance:none; background:transparent; font:inherit; font-size:11px; padding:2px 8px; border-radius:10px; border:1px solid var(--line); color:var(--dim); cursor:pointer; }
-.badge.running { color:var(--green); border-color:var(--green); }
-.badge.stopped { color:var(--red); border-color:var(--red); }
-.badge.stale { color:var(--amber); border-color:var(--amber); }
-.badge.unknown { color:var(--purple); border-color:var(--purple); }
-.badge.selected { background:var(--line); box-shadow:0 0 0 1px currentColor; }
-.pill { display:inline-block; margin-left:4px; padding:0 6px; border:1px solid var(--line); border-radius:10px; color:var(--dim); font-size:10px; font-weight:400; line-height:16px; vertical-align:baseline; }
-.pill.agent-claude { color:var(--purple); border-color:var(--purple); }
+
+/* ── provenance pills (asserted by tests: keep class names) ── */
+.pill { display:inline-block; margin-left:4px; padding:0 6px; border:1px solid var(--seam);
+  border-radius:9px; color:var(--dim); font-size:10px; font-weight:400;
+  line-height:15px; vertical-align:baseline; }
+.pill.agent-claude { color:var(--violet); border-color:var(--violet); }
 .pill.agent-codex { color:var(--blue); border-color:var(--blue); }
 .pill.agent-other { color:var(--dim); border-color:var(--dim); }
-.pill.model { color:var(--fg); border-color:var(--line); }
+.pill.model { color:var(--paint); border-color:var(--seam); }
 .pill.effort-low { color:var(--dim); border-color:var(--dim); opacity:.7; }
 .pill.effort-medium { color:var(--green); border-color:var(--green); opacity:.8; }
 .pill.effort-high { color:var(--blue); border-color:var(--blue); opacity:.9; }
 .pill.effort-xhigh { color:var(--amber); border-color:var(--amber); }
 .pill.effort-max { color:var(--red); border-color:var(--red); font-weight:600; }
-#feed { max-height:70vh; overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
-.ev { border-left:3px solid var(--line); padding:2px 8px; font-size:12px; }
-.ev .hd { color:var(--dim); }
+
+/* ── the register: live event log, sticky right rail ── */
+.register { border-left:1px solid var(--seam); min-width:0; }
+.register-inner { position:sticky; top:0; max-height:100vh; display:flex;
+  flex-direction:column; padding:16px 16px 12px; }
+@media (max-width:1100px){ .register { border-left:0; border-top:1px solid var(--seam); }
+  .register-inner { position:static; max-height:none; } }
+.register-head { display:flex; align-items:baseline; gap:10px; margin-bottom:8px; }
+.badges { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+.badge { appearance:none; background:transparent; font-size:10px; padding:2px 8px;
+  border-radius:9px; border:1px solid var(--seam); color:var(--dim); cursor:pointer;
+  letter-spacing:.04em; }
+.badge.running { color:var(--green); border-color:var(--green); }
+.badge.stopped { color:var(--faint); }
+.badge.stale { color:var(--amber); border-color:var(--amber); }
+.badge.unknown { color:var(--violet); border-color:var(--violet); }
+.badge.selected { background:var(--casing-2); box-shadow:0 0 0 1px currentColor; }
+#feed { overflow-y:auto; display:flex; flex-direction:column; gap:5px;
+  scrollbar-width:thin; }
+.ev { border-left:3px solid var(--seam); padding:2px 8px; font-size:11px; }
+.ev .hd { color:var(--dim); overflow-wrap:anywhere; }
 .ev .topic { font-weight:600; }
-.ev pre { white-space:pre-wrap; word-break:break-word; color:var(--fg); margin-top:2px; }
-.ev details pre { max-height:240px; overflow-y:auto; }
+.ev pre { white-space:pre-wrap; word-break:break-word; color:var(--paint); margin-top:2px; }
+.ev details pre { max-height:220px; overflow-y:auto; }
+.ev details summary { cursor:pointer; color:var(--faint); }
 .ev.c0 { border-color:var(--blue); } .ev.c0 .topic { color:var(--blue); }
-.ev.c1 { border-color:var(--purple); } .ev.c1 .topic { color:var(--purple); }
+.ev.c1 { border-color:var(--violet); } .ev.c1 .topic { color:var(--violet); }
 .ev.c2 { border-color:var(--amber); } .ev.c2 .topic { color:var(--amber); }
 .ev.c3 { border-color:var(--green); } .ev.c3 .topic { color:var(--green); }
 .ev.c4 { border-color:var(--dim); }
-.ev.err { border-color:var(--red); } .ev.err .topic { color:var(--red); }
+.ev.err { border-color:var(--red); background:rgba(225,90,95,.06); }
+.ev.err .topic { color:var(--red); }
 </style>
 </head>
 <body>
-<h1>signalbox sink</h1>
-<div class="meta" id="meta">connecting…</div>
-<div class="panel" style="margin-top:16px">
-  <h2>Merged live events</h2>
-  <div class="badges" id="badges"></div>
-  <div id="feed"></div>
+<header>
+  <div class="wordmark">Signal<span class="box">box</span></div>
+  <div id="meta"><span class="lamp" id="stream-lamp"></span><span id="meta-text">connecting…</span></div>
+</header>
+<div class="deck">
+  <main class="board" id="board" aria-label="runs"></main>
+  <aside class="register" aria-label="event register">
+    <div class="register-inner">
+      <div class="register-head"><span class="plate">Register</span></div>
+      <div class="badges" id="badges"></div>
+      <div id="feed"><div class="empty" id="feed-empty">Waiting for events…</div></div>
+    </div>
+  </aside>
 </div>
-<div id="runs"></div>
 <script>
 const PHASES = ["plan","implement","review","promote"];
 const promoteStates = Object.create(null);
+const haltInfo = Object.create(null);      // key -> {phase, reason} from pipeline.halted
+const completeInfo = Object.create(null);  // key -> {parked, reason} from pipeline.complete
+const reviewLoop = Object.create(null);    // key -> {mode, round} from the review-phase cycle
+const shardYard = Object.create(null);     // key -> stage -> shard -> {state, round}
 const instanceColours = Object.create(null);
+const openDrawers = new Set();             // run keys whose detail drawer is open
+let stoppedOpen = false;                   // the collapsed STOPPED section
 let selectedKey = "all";
+let lastStatus = null;
 const $ = id => document.getElementById(id);
 
 function age(now, m) {
@@ -742,26 +1054,35 @@ function appendProvenancePills(parent, value) {
   }
 }
 
+// Phase state is derived from the current launch only. A stamp or artifact
+// /status marked stale belongs to an earlier launch of the same run
+// directory, so it is dropped here rather than read as this launch's
+// progress. An artifact that is live while its producing phase has no live
+// stamp is a bin/run.sh --phase launch: the phase produced it, so it counts
+// as done. A live state/escalated.json is already newer than every live
+// stamp — /status marks it stale otherwise — so no stamp comparison is left
+// to make.
 function derive(run) {
   const a = run.artifacts;
-  const stamp = p => a["state/pipeline-" + p + ".stamp"];
+  const live = x => (x && x.exists === true && x.stale !== true) ? x : null;
+  const stamp = p => live(a["state/pipeline-" + p + ".stamp"]);
   const out = {};
-  const ps = stamp("plan"), pj = a["plan.json"];
-  out.plan = !ps.exists ? "pending" : (pj.exists && pj.mtime >= ps.mtime ? "done" : "active");
-  const is = stamp("implement"), gj = a["state/gate.json"];
-  if (!is.exists) out.implement = "pending";
-  else if (gj.exists && gj.mtime >= is.mtime)
-    out.implement = (gj.json && gj.json.verdict === "GREEN") ? "done" : "failed";
+  const ps = stamp("plan"), pj = live(a["plan.json"]);
+  if (!ps) out.plan = pj ? "done" : "pending";
+  else out.plan = (pj && pj.mtime >= ps.mtime) ? "done" : "active";
+  const is = stamp("implement"), gj = live(a["state/gate.json"]);
+  const verdictState = () => (gj.json && gj.json.verdict === "GREEN") ? "done" : "failed";
+  if (!is) out.implement = gj ? verdictState() : "pending";
+  else if (gj && gj.mtime >= is.mtime) out.implement = verdictState();
   else out.implement = "active";
-  const rs = stamp("review"), cr = a["results/CR.md"], pend = a["state/pending.json"];
-  if (!rs.exists) out.review = "pending";
-  else if (cr.exists && cr.mtime >= rs.mtime) out.review = "done";
-  else if (pend.exists && pend.mtime >= rs.mtime) out.review = "parked";
+  const rs = stamp("review"), cr = live(a["results/CR.md"]), pend = live(a["state/pending.json"]);
+  if (!rs) out.review = cr ? "done" : (pend ? "parked" : "pending");
+  else if (cr && cr.mtime >= rs.mtime) out.review = "done";
+  else if (pend && pend.mtime >= rs.mtime) out.review = "parked";
   else out.review = "active";
   out.promote = promoteStates[run.key] || "pending";
-  const esc = a["state/escalated.json"];
-  const stamps = PHASES.map(p => stamp(p)).filter(x => x && x.exists).map(x => x.mtime);
-  if (esc.exists && esc.json && stamps.length && esc.mtime >= Math.max(...stamps)) {
+  const esc = live(a["state/escalated.json"]);
+  if (esc && esc.json) {
     const p = esc.json.escalated_phase === "shard" ? "implement" : esc.json.escalated_phase;
     if (out[p]) out[p] = "escalated";
   }
@@ -771,12 +1092,17 @@ function derive(run) {
 function artifactRows(run, now) {
   return Object.values(run.artifacts).map(x => {
     let extra = "";
+    const stale = x.exists && x.stale === true;
+    if (stale) {
+      extra = ' <span class="badge-stale">' + esc("previous run") + "</span>";
+    }
     if (x.exists && x.json && x.json.verdict) {
       const verdictClass = x.json.verdict === "GREEN" ? "ok" : "bad";
-      extra = ' <span class="' + verdictClass + '">' + esc(x.json.verdict) + "</span>";
+      extra += ' <span class="' + verdictClass + '">' + esc(x.json.verdict) + "</span>";
     }
     extra += provenancePills(x.provenance);
-    return "<tr><td class='" + (x.exists ? "" : "miss") + "'>" + esc(x.file) + extra + "</td>" +
+    return "<tr class='" + (stale ? "stale" : "") + "'><td class='" +
+      (x.exists ? "" : "miss") + "'>" + esc(x.file) + extra + "</td>" +
       "<td class='age'>" + (x.exists ? age(now, x.mtime) : "—") + "</td>" +
       "<td class='size'>" + (x.exists ? x.size + "b" : "") + "</td></tr>";
   }).join("");
@@ -803,34 +1129,292 @@ function colourFor(key) {
   return instanceColours[key];
 }
 
-function renderRun(run, now) {
-  const states = derive(run);
-  const feature = run.feature || "feature unknown";
-  const issue = run.issue === null || run.issue === undefined ? "issue unknown" : "issue #" + run.issue;
-  const pid = run.pid === null || run.pid === undefined ? "pid unknown" : "pid " + run.pid;
+// One line that answers "why is this run where it is". Precedence: terminal
+// outcomes, then human-gated states, then the derived active phase.
+function verdictFor(run, states) {
+  const finished = completeInfo[run.key];
+  if (finished) {
+    return finished.parked
+      ? { cls:"v-violet", label:"PARKED", text:finished.reason || "awaiting human approval" }
+      : { cls:"v-green", label:"COMPLETE", text:finished.reason || "merged; release is the human's" };
+  }
+  const halted = haltInfo[run.key];
+  if (halted) {
+    return { cls:"v-red", label:"HALTED AT " + (halted.phase || "?").toUpperCase(),
+             text:halted.reason || "see engine log" };
+  }
+  const escArt = run.artifacts["state/escalated.json"];
+  const escPhase = PHASES.find(p => states[p] === "escalated");
+  if (escPhase) {
+    const why = escArt.exists && escArt.stale !== true && escArt.json &&
+      (escArt.json.reason || escArt.json.summary);
+    return { cls:"v-red", label:"ESCALATED IN " + escPhase.toUpperCase(),
+             text:why || "escalation recorded" };
+  }
+  if (states.review === "parked") {
+    const pend = run.artifacts["state/pending.json"];
+    const j = pend.exists && pend.stale !== true && pend.json ? pend.json : null;
+    const bits = [];
+    if (j && j.floor !== undefined) bits.push("floor R" + j.floor);
+    if (j && j.earned !== undefined) bits.push("earned R" + j.earned);
+    if (j && j.reason) bits.push(j.reason);
+    return { cls:"v-violet", label:"PARKED",
+             text:bits.join(" · ") || "state/pending.json present — approval is yours" };
+  }
+  const gate = run.artifacts["state/gate.json"];
+  const cr = run.artifacts["results/CR.md"];
+  if (gate.exists && gate.stale !== true && gate.json &&
+      gate.json.verdict && gate.json.verdict !== "GREEN") {
+    return { cls:"v-red", label:"GATE " + gate.json.verdict,
+             text:"tip " + (gate.json.tip || "?") };
+  }
+  if (cr.exists && cr.stale !== true &&
+      states.review === "done" && states.promote === "pending") {
+    return { cls:"v-white", label:"PROMOTION READY",
+             text:"CR.md written" + (gate.exists && gate.stale !== true &&
+               gate.json && gate.json.tip
+               ? " · gate GREEN at " + gate.json.tip : "") };
+  }
+  const activePhase = PHASES.find(p => states[p] === "active");
+  if (states.promote === "active") {
+    return { cls:"v-amber", label:"PROMOTING", text:"push, PR, merge in flight" };
+  }
+  if (activePhase) {
+    let text = "";
+    if (activePhase === "review" && reviewLoop[run.key]) {
+      const rl = reviewLoop[run.key];
+      text = "round " + rl.round + (rl.mode === "fixing"
+        ? " · fixer addressing feedback"
+        : rl.mode === "approved" ? " approved · gate and docs-sync"
+        : " · reviewer at work");
+    }
+    if (activePhase === "implement") {
+      const counts = yardCounts(run);
+      if (counts) text = counts.done + "/" + counts.total + " shards approved";
+    }
+    return { cls:"v-amber", label:activePhase.toUpperCase() + " IN PROGRESS", text };
+  }
+  if (PHASES.every(p => states[p] === "pending")) {
+    return { cls:"", label:"WAITING", text:"no phase started yet" };
+  }
+  return { cls:"", label:"IDLE", text:"" };
+}
+
+// Sections of the board, by claim on the operator's attention.
+function groupFor(run, states, verdict) {
+  const needsHand = verdict.cls === "v-red" || verdict.cls === "v-violet";
+  if (needsHand) return 0;
+  if (completeInfo[run.key] && !completeInfo[run.key].parked) return 3;
+  if (run.state === "running") return 1;
+  if (run.state === "stopped") return 3;
+  return 2;
+}
+
+function headLamp(run, verdict) {
+  if (verdict.cls === "v-red") return "on-red";
+  if (verdict.cls === "v-violet") return "on-violet";
+  if (run.state === "running") return "on-green";
+  if (run.state === "stale") return "on-amber";
+  return "";
+}
+
+function shardName(s) {
+  if (s && typeof s === "object") {
+    if (typeof s.shard === "string" && s.shard) return s.shard;
+    if (typeof s.id === "string" && s.id) return s.id;
+    return null;
+  }
+  return typeof s === "string" && s ? s : null;
+}
+
+function markShard(key, stage, name, state, round) {
+  if (!name) return;
+  const yard = shardYard[key] || (shardYard[key] = Object.create(null));
+  const st = yard[stage] || (yard[stage] = Object.create(null));
+  const prev = st[name];
+  st[name] = { state, round: round || (prev && prev.round) || 0 };
+}
+
+// One lamp per planned shard, in plan order, with a barrier bar between
+// stages: the fan-out and the fan-in points made visible. plan.json names
+// every shard up front; live states arrive from the implement engine's
+// shard events, so a shard with no event yet renders hollow.
+function yardCounts(run) {
+  const pj = run.artifacts["plan.json"];
+  const stages = pj.exists && pj.json && Array.isArray(pj.json.stages)
+    ? pj.json.stages : [];
+  const yard = shardYard[run.key] || {};
+  let done = 0, total = 0;
+  for (const stg of stages) {
+    if (!stg || typeof stg !== "object" || !Array.isArray(stg.shards)) continue;
+    for (const s of stg.shards) {
+      const n = shardName(s);
+      if (!n) continue;
+      total++;
+      const info = yard[stg.id] && yard[stg.id][n];
+      if (info && info.state === "done") done++;
+    }
+  }
+  return total ? { done, total } : null;
+}
+
+function sidings(run, states) {
+  if (states.implement !== "active" && states.implement !== "failed"
+      && states.implement !== "escalated") return "";
+  const pj = run.artifacts["plan.json"];
+  const stages = pj.exists && pj.json && Array.isArray(pj.json.stages)
+    ? pj.json.stages : [];
+  const yard = shardYard[run.key] || {};
+  const parts = [];
+  for (const stg of stages) {
+    if (!stg || typeof stg !== "object" || !Array.isArray(stg.shards)) continue;
+    const lamps = [];
+    for (const s of stg.shards) {
+      const n = shardName(s);
+      if (!n) continue;
+      const info = yard[stg.id] && yard[stg.id][n];
+      const state = info ? info.state : "pending";
+      const roundText = info && info.round > 1 ? " · R" + info.round : "";
+      lamps.push('<span class="shard-lamp s-' + esc(state) + '" title="' +
+        esc(n) + " · " + esc(state) + esc(roundText) + '"></span>');
+    }
+    if (!lamps.length) continue;
+    if (parts.length) parts.push('<span class="bar"></span>');
+    parts.push(lamps.join(""));
+  }
+  if (!parts.length) return "";
+  const counts = yardCounts(run);
+  return '<span class="sub">' + (counts ? counts.done + "/" + counts.total +
+      " shards" : "") + "</span>" +
+    '<div class="sidings">' + parts.join("") + "</div>";
+}
+
+// The review phase is a loop, not a line: reviewer -> fixer -> reviewer until
+// approved or escalated. Name the round and whose hands the work is in.
+function reviewSub(run, states) {
+  if (states.review !== "active") return "";
+  const rl = reviewLoop[run.key];
+  if (!rl) return "";
+  const mode = rl.mode === "fixing"
+      ? '<span class="fixing">fix in flight</span>'
+    : rl.mode === "approved" ? "approved · gate + docs"
+    : rl.mode === "escalated" ? "escalated"
+    : "reviewer at work";
+  return '<span class="sub"><span class="rounds">&#8635; R' + rl.round +
+    "</span> · " + mode + "</span>";
+}
+
+function runCard(run, now, states, verdict, attention) {
+  const feature = run.feature || run.slug || "run " + run.key;
+  const issue = run.issue === null || run.issue === undefined ? "" : " #" + run.issue;
+  const repo = run.repo || "repo unknown";
+  const track = PHASES.map(p => {
+    const extra = p === "implement" ? sidings(run, states)
+      : p === "review" ? reviewSub(run, states) : "";
+    return '<div class="block ' + states[p] + '"><span class="lamp ' +
+      ({done:"on-green", active:"on-amber", failed:"on-red", escalated:"on-red",
+        parked:"on-violet"}[states[p]] || "") + '"></span>' +
+      '<span class="bname">' + p + "</span>" + extra + "</div>";
+  }).join("");
   const engines = Object.entries(run.engines || {}).map(([label, engine]) =>
     esc(label) + "=" + esc(engine)).join(" · ") || "no engines registered";
-  const rail = PHASES.map(p =>
-    '<div class="phase ' + states[p] + '"><div class="name">' + p +
-    '</div><div class="st">' + states[p] + "</div></div>").join("");
-  return '<section class="run">' +
-    '<div class="run-head">' + esc(feature) + " · " + esc(issue) + " · " +
-      esc(run.key) + " · " + esc(pid) + " " + esc(run.state) + "</div>" +
-    '<div class="run-meta">' + engines + " · " + esc(run.run_dir || "run directory unknown") + "</div>" +
-    '<div class="rail">' + rail + "</div>" +
-    '<div class="cols"><div class="panel"><h2>Disk artifacts (the terminals that count)</h2>' +
-      '<table>' + artifactRows(run, now) + "</table></div>" +
-    '<div class="panel"><h2>Engine logs (buffered — sizes grow on flush)</h2>' +
-      '<table>' + logRows(run, now) + "</table></div></div></section>";
+  const runJson = run.artifacts["state/run.json"];
+  const correlation = runJson.exists && runJson.stale !== true &&
+    runJson.json && runJson.json.correlation_id
+    ? '<div class="idline">correlation ' + esc(runJson.json.correlation_id) + "</div>" : "";
+  const docs = run.artifacts["state/docs-sync.json"];
+  const docsLine = docs.exists && docs.stale !== true &&
+    docs.json && Array.isArray(docs.json.updated)
+    ? '<div class="idline">docs-sync: ' + esc(docs.json.updated.join(", ") || "none") + "</div>" : "";
+  return '<article class="run ' + (attention ? "attention " : "") +
+      (selectedKey === run.key ? "selected" : "") + '" data-key="' + esc(run.key) + '">' +
+    '<button type="button" class="run-head" data-select="' + esc(run.key) + '">' +
+      '<span class="lamp ' + headLamp(run, verdict) + '"></span>' +
+      '<span class="run-title"><span class="repo">' + esc(repo) + "</span> " +
+        esc(feature) + esc(issue) + "</span>" +
+      '<span class="livery ' + esc(run.state) + '">' + esc(run.state) + "</span>" +
+      '<span class="run-age">' + age(now, run.last_event) + " ago</span>" +
+    "</button>" +
+    '<div class="track">' + track + "</div>" +
+    '<div class="verdict ' + verdict.cls + '"><b>' + esc(verdict.label) + "</b>" +
+      (verdict.text ? "<span>" + esc(verdict.text) + "</span>" : "") + "</div>" +
+    '<details class="drawer"' + (openDrawers.has(run.key) ? " open" : "") +
+      ' data-drawer="' + esc(run.key) + '"><summary>Artifacts, logs, identity</summary>' +
+      '<div class="drawer-body"><div>' +
+        '<h3>Disk artifacts — the terminals that count</h3>' +
+        "<table>" + artifactRows(run, now) + "</table></div>" +
+      "<div>" +
+        '<h3>Identity</h3>' +
+        '<div class="idline">pid ' + esc(run.pid === null || run.pid === undefined ? "unknown" : run.pid) +
+          " · " + esc(run.key) + "</div>" +
+        correlation + docsLine +
+        '<div class="idline">' + engines + "</div>" +
+        '<div class="idline">' + esc(run.run_dir || "run directory unknown") + "</div>" +
+        '<h3>Engine logs — buffered, sizes grow on flush</h3>' +
+        "<table>" + logRows(run, now) + "</table></div>" +
+      "</div></details></article>";
+}
+
+const SECTIONS = [
+  { name:"Attention", hint:"needs your hand" },
+  { name:"Running", hint:"in motion" },
+  { name:"Quiet", hint:"no launch identity; going stale" },
+  { name:"Stopped", hint:"engines gone or complete" },
+];
+
+function renderBoard(instances, now) {
+  const groups = [[], [], [], []];
+  for (const run of instances) {
+    const states = derive(run);
+    const verdict = verdictFor(run, states);
+    const g = groupFor(run, states, verdict);
+    groups[g].push(runCard(run, now, states, verdict, g === 0));
+  }
+  let html = "";
+  if (!instances.length) {
+    html = '<div class="empty">No boxes registered. Launch one with bin/run.sh &lt;issue&gt;.</div>';
+  }
+  for (let g = 0; g < 4; g++) {
+    if (!groups[g].length) continue;
+    const head = '<div class="section-head"><span class="plate">' + SECTIONS[g].name +
+      '</span><span class="count">' + groups[g].length + " · " + SECTIONS[g].hint + "</span></div>";
+    if (g === 3) {
+      html += '<section><details' + (stoppedOpen ? " open" : "") + ' data-stopped>' +
+        "<summary>" + head + "</summary>" + groups[g].join("") + "</details></section>";
+    } else {
+      html += "<section>" + head + groups[g].join("") + "</section>";
+    }
+  }
+  const board = $("board");
+  board.innerHTML = html;
+  for (const btn of board.querySelectorAll("[data-select]")) {
+    btn.addEventListener("click", () => {
+      select(selectedKey === btn.dataset.select ? "all" : btn.dataset.select);
+    });
+  }
+  for (const drawer of board.querySelectorAll("[data-drawer]")) {
+    drawer.addEventListener("toggle", () => {
+      if (drawer.open) openDrawers.add(drawer.dataset.drawer);
+      else openDrawers.delete(drawer.dataset.drawer);
+    });
+  }
+  const stopped = board.querySelector("[data-stopped]");
+  if (stopped) {
+    stopped.addEventListener("toggle", () => { stoppedOpen = stopped.open; });
+  }
 }
 
 function select(key) {
   selectedKey = key;
   for (const row of $("feed").children) {
+    if (row.id === "feed-empty") continue;
     row.hidden = key !== "all" && row.dataset.key !== key;
   }
   for (const chip of $("badges").children) {
     chip.classList.toggle("selected", chip.dataset.key === key);
+  }
+  for (const card of $("board").querySelectorAll(".run")) {
+    card.classList.toggle("selected", card.dataset.key === key);
   }
 }
 
@@ -862,12 +1446,14 @@ function renderChips(instances) {
 async function poll() {
   try {
     const s = await (await fetch("/status")).json();
+    lastStatus = s;
     renderChips(s.instances);
-    $("meta").textContent = s.instances.length + " instances · " +
-      new Date(s.now * 1000).toLocaleTimeString();
-    $("runs").innerHTML = s.instances.map(run => renderRun(run, s.now)).join("");
+    const running = s.instances.filter(x => x.state === "running").length;
+    $("meta-text").textContent = s.instances.length + " boxes · " + running +
+      " running · " + new Date(s.now * 1000).toLocaleTimeString();
+    renderBoard(s.instances, s.now);
   } catch (e) {
-    $("meta").textContent = "status poll failed: " + e;
+    $("meta-text").textContent = "status poll failed: " + e;
   }
   setTimeout(poll, 4000);
 }
@@ -884,13 +1470,66 @@ function addEvent(topic, dataText) {
   const key = instance.key || "";
   const pl = obj && obj.payload !== undefined ? obj.payload : obj;
   if (t === "phase.request" && pl && pl.phase === "promote") promoteStates[key] = "active";
-  if (t === "pipeline.complete") promoteStates[key] = pl && pl.parked ? "parked" : "done";
-  if (t === "pipeline.halted" && pl && pl.phase === "promote") promoteStates[key] = "failed";
+  // A phase (re)start clears that phase's cycle state so a rerun of the same
+  // run key never wears the previous attempt's rounds or shard lamps.
+  if (t === "phase.request" && pl && pl.phase === "implement") delete shardYard[key];
+  if (t === "phase.request" && pl && pl.phase === "review") delete reviewLoop[key];
+  const round = pl && typeof pl.round === "number" ? pl.round : 1;
+  // The review phase is a cycle (review -> fix -> review), not one long state.
+  // Track whose hands the work is in and which round it is on.
+  if (obj && obj.engine_label === "review") {
+    if (t === "review.requested") reviewLoop[key] = { mode:"review", round };
+    if (t === "fix.requested") reviewLoop[key] = { mode:"fixing", round };
+    if (t === "review.approved") reviewLoop[key] = { mode:"approved", round };
+    if (t === "review.escalated") reviewLoop[key] = { mode:"escalated", round };
+  }
+  // Implement fan-out: per-shard states keyed by the plan's shard ids.
+  if (t === "stage.item" && pl && typeof pl.id === "string" && Array.isArray(pl.shards)) {
+    for (const s of pl.shards) markShard(key, pl.id, shardName(s), "building");
+  }
+  if (t === "shard.built" && pl && typeof pl.stage === "string") {
+    for (const s of (Array.isArray(pl.pending) ? pl.pending : []))
+      markShard(key, pl.stage, shardName(s), "review");
+    for (const s of (Array.isArray(pl.done) ? pl.done : []))
+      markShard(key, pl.stage, shardName(s), "done");
+  }
+  if ((t === "shard.review.raw" || t === "shard.fix.requested")
+      && pl && typeof pl.stage === "string" && pl.current) {
+    const n = shardName(pl.current);
+    if (t === "shard.review.raw" && pl.verdict === "APPROVED")
+      markShard(key, pl.stage, n, "done", round);
+    else if (pl.verdict === "REQUEST_CHANGES" && round >= 3)
+      markShard(key, pl.stage, n, "escalated", round);
+    else markShard(key, pl.stage, n, "fixing", round);
+  }
+  if (t === "shard.done" && pl && typeof pl.stage === "string") {
+    for (const s of (Array.isArray(pl.done) ? pl.done : []))
+      markShard(key, pl.stage, shardName(s), "done");
+  }
+  if (t === "pipeline.complete") {
+    promoteStates[key] = pl && pl.parked ? "parked" : "done";
+    completeInfo[key] = {
+      parked: !!(pl && pl.parked),
+      reason: pl && typeof pl.reason === "string" ? pl.reason.slice(0, 300) : ""
+    };
+  }
+  if (t === "pipeline.halted") {
+    if (pl && pl.phase === "promote") promoteStates[key] = "failed";
+    haltInfo[key] = {
+      phase: pl && typeof pl.phase === "string" ? pl.phase : "",
+      reason: pl && typeof pl.reason === "string" ? pl.reason.slice(0, 300) : ""
+    };
+  }
   const div = document.createElement("div");
   div.dataset.key = key;
   div.hidden = selectedKey !== "all" && selectedKey !== key;
+  // exec.error fires on any stderr output, even from healthy commands whose
+  // diagnostics deliberately go to stderr; only a non-zero (or absent, e.g.
+  // timeout/spawn-failure) exit code marks a genuine failure.
+  const benignExecError = t === "exec.error" && pl && pl.exit_code === 0;
   div.className = "ev " + colourFor(key) +
-    (t.includes("error") || t.includes("escalated") || t.includes("halted") ? " err" : "");
+    ((t.includes("error") && !benignExecError) ||
+      t.includes("escalated") || t.includes("halted") ? " err" : "");
   const body = obj && obj.payload !== undefined ? JSON.stringify(obj.payload, null, 1)
              : obj ? JSON.stringify(obj, null, 1) : dataText;
   const candidate = obj && obj.sent_at ? new Date(obj.sent_at) : new Date();
@@ -912,6 +1551,8 @@ function addEvent(topic, dataText) {
   );
   div.querySelector("pre").textContent = body;
   const feed = $("feed");
+  const placeholder = $("feed-empty");
+  if (placeholder) placeholder.remove();
   feed.prepend(div);
   while (feed.children.length > 300) feed.lastChild.remove();
 }
@@ -919,10 +1560,12 @@ function addEvent(topic, dataText) {
 // One merged connection replaces all per-port fan-out. Keep the proven frame
 // parser: data lines are accumulated until one complete blank-line frame.
 async function attach() {
+  const streamLamp = $("stream-lamp");
   while (true) {
     try {
       const r = await fetch("/events", {headers: {"Accept": "text/event-stream"}});
       if (!r.ok) throw new Error("stream offline");
+      streamLamp.className = "lamp on-green";
       const rd = r.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
@@ -942,6 +1585,7 @@ async function attach() {
         }
       }
     } catch (e) { /* service restarting or connection dropped */ }
+    streamLamp.className = "lamp on-red";
     await new Promise(res => setTimeout(res, 3000));
   }
 }

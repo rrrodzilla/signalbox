@@ -7,9 +7,11 @@
 # its foreground supervisor. Startup — from inspecting existing run state until
 # launch.json records the engine — holds the harness lock shared, so a
 # concurrent install.sh --reinstall cannot refresh the tree around a run its
-# liveness scan never saw. On exit it stops only that child PID, gracefully
-# with SIGTERM before bounded escalation, removes the PID file only if it wrote
-# one, and releases the run's port lease.
+# liveness scan never saw. Because the run directory is reused across launches
+# of the same issue, it also removes the previous launch's terminal evidence
+# (state/complete.json, state/halted.json) before the engine starts. On exit it
+# stops only that child PID, gracefully with SIGTERM before bounded escalation,
+# removes the PID file only if it wrote one, and releases the run's port lease.
 set -euo pipefail
 # shellcheck source=_liveness.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_liveness.sh"
@@ -220,6 +222,13 @@ if [ -f "$PID_FILE" ]; then
 fi
 
 mkdir -p "$RUN_DIR/state" "$RUN_DIR/logs" "$RUN_DIR/results"
+
+# A run directory is reused across launches of the same issue, so terminal
+# evidence from the previous launch would otherwise be read as this one's.
+# Invalidate both files here — after the "already active" check, before the
+# engine starts — so a supervisor that finds state/complete.json or
+# state/halted.json is always looking at evidence this launch produced.
+rm -f -- "$RUN_DIR/state/complete.json" "$RUN_DIR/state/halted.json"
 
 CHILD_PID=""
 CHILD_REAPED=0

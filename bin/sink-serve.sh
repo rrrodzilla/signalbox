@@ -707,9 +707,9 @@ function provenanceParts(value) {
     low:"effort-low", medium:"effort-medium", high:"effort-high",
     xhigh:"effort-xhigh", max:"effort-max"
   };
-  const effort = Object.prototype.hasOwnProperty.call(
-    effortClasses, value.effort
-  ) ? value.effort : null;
+  const effort = typeof value.effort === "string" &&
+    Object.prototype.hasOwnProperty.call(effortClasses, value.effort)
+    ? value.effort : null;
   return {
     agent:value.agent,
     agentClass,

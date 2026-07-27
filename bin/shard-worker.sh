@@ -27,16 +27,25 @@ MINE="$(jq -c --argjson me "$ME" --argjson n "$COUNT" \
 
 [ "$(jq 'length' <<<"$MINE")" -gt 0 ] || exit 0
 
-mkdir -p "$ROOT/logs"
+# The run's git namespace, derived exactly as in plan-seed.sh and
+# stage-merge.sh so the branches built here are the ones those scripts
+# clean up and merge.
+FEATURE="$(jq -r '.feature // "feature"' "$RUN_DIR/plan.json" 2>/dev/null || echo feature)"
+export FEATURE
+
+mkdir -p "$ROOT/state" "$RUN_DIR/logs"
+# Keep this lock scoped to each worktree command: concurrent runs share one
+# repository's worktree admin state.
+WORKTREE_LOCK="$ROOT/state/worktree.lock"
 PENDING="[]"
 
 for i in $(seq 0 $(($(jq 'length' <<<"$MINE") - 1))); do
     SHARD_ID="$(jq -r ".[$i].id" <<<"$MINE")"
     PROMPT="$(jq -r ".[$i].prompt" <<<"$MINE")"
-    BRANCH="shard/$STAGE_ID-$SHARD_ID"
-    WT="$WT_BASE/$STAGE_ID-$SHARD_ID"
+    BRANCH="shard/$FEATURE/$STAGE_ID-$SHARD_ID"
+    WT="$WT_BASE/$FEATURE-$STAGE_ID-$SHARD_ID"
 
-    git -C "$ROOT" worktree add -b "$BRANCH" "$WT" "$INT_BRANCH" >&2
+    ( flock -x 9; git -C "$ROOT" worktree add -b "$BRANCH" "$WT" "$INT_BRANCH" ) 9>"$WORKTREE_LOCK" >&2
     if [ -e "$REPO_ROOT/.claude" ] && [ ! -e "$WT/.claude" ]; then
         ln -s "$REPO_ROOT/.claude" "$WT/.claude"
     fi
@@ -58,11 +67,11 @@ $PROMPT"
             --color never \
             -c model="${CODEX_MODEL:-gpt-5.6-sol}" \
             -c model_reasoning_effort="${CODEX_EFFORT:-high}" \
-            -o "$ROOT/logs/shard-$STAGE_ID-$SHARD_ID.md" \
+            -o "$RUN_DIR/logs/shard-$STAGE_ID-$SHARD_ID.md" \
             "$PROMPT" \
             </dev/null \
-            >"$ROOT/logs/shard-$STAGE_ID-$SHARD_ID.jsonl" \
-            2>"$ROOT/logs/shard-$STAGE_ID-$SHARD_ID.jsonl.stderr"
+            >"$RUN_DIR/logs/shard-$STAGE_ID-$SHARD_ID.jsonl" \
+            2>"$RUN_DIR/logs/shard-$STAGE_ID-$SHARD_ID.jsonl.stderr"
 
         git add -A
         git commit -S -m "feat: $STAGE_ID/$SHARD_ID shard" >&2

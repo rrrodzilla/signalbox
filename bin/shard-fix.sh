@@ -20,9 +20,14 @@ SHARD_ID="$(jq -r '.current.shard' <<<"$PAYLOAD")"
 BRANCH="$(jq -r '.current.branch' <<<"$PAYLOAD")"
 ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 REVIEW="$(jq -r '.review' <<<"$PAYLOAD")"
-WT="$WT_BASE/${BRANCH#shard/}"
+# The run's git namespace, derived exactly as in shard-worker.sh and
+# stage-merge.sh so this resolves the worktree shard-worker.sh created:
+# branch shard/<feature>/<stage>-<shard> lives in <wt-base>/<feature>-<stage>-<shard>.
+FEATURE="$(jq -r '.feature // "feature"' "$RUN_DIR/plan.json" 2>/dev/null || echo feature)"
+export FEATURE
+WT="$WT_BASE/$FEATURE-${BRANCH##*/}"
 
-mkdir -p "$ROOT/logs"
+mkdir -p "$RUN_DIR/logs"
 
 PROMPT="You are the fix half of an automated per-shard review loop. Your scope
 is ONE shard of a larger change, on its own git branch in this worktree.
@@ -47,7 +52,7 @@ env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     claude -p "$PROMPT" \
     --model opus \
     --permission-mode acceptEdits \
-    >"$ROOT/logs/shard-fix-$STAGE_ID-$SHARD_ID-r$ROUND.log" 2>&1
+    >"$RUN_DIR/logs/shard-fix-$STAGE_ID-$SHARD_ID-r$ROUND.log" 2>&1
 
 if [ -n "$(git status --porcelain)" ]; then
     git add -A

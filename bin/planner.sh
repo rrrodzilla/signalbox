@@ -15,8 +15,8 @@ PAYLOAD="$(cat)"
 ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 FEEDBACK="$(jq -r '.feedback // ""' <<<"$PAYLOAD")"
 
-mkdir -p "$ROOT/logs"
-LOG="$ROOT/logs/plan-round-$ROUND.md"
+mkdir -p "$RUN_DIR/logs"
+LOG="$RUN_DIR/logs/plan-round-$ROUND.md"
 
 PROMPT="$(cat "$ROOT/prompts/plan.md")
 
@@ -41,10 +41,19 @@ Fix exactly what the rejection describes and output the corrected JSON object."
 fi
 
 cd "$REPO_ROOT"
+# The planner reads the vault docs first. Take the repo-scoped vault lock
+# SHARED so concurrent planners still explore in parallel, but none of them
+# reads the vault while bin/docs-sync.sh (which holds it exclusively) is
+# mid-edit — a plan built on half-synced architecture docs is worse than a
+# plan that waited for the sync to land.
+mkdir -p "$LEDGER_DIR"
+exec 9>"$LEDGER_DIR/vault.lock"
+flock -s 9
 env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     claude -p "$PROMPT" \
     --model opus \
     >"$LOG" 2>"$LOG.stderr" || true
+exec 9>&-
 
 # Extract the JSON object: whole output, or from the first '{' line onward.
 PLAN="null"

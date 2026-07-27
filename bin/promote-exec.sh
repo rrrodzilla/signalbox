@@ -15,10 +15,10 @@ PAYLOAD="$(cat)"
 [ "$(jq -r '.phase' <<<"$PAYLOAD")" = "promote" ] || exit 0
 
 ISSUE="$(jq -r '.issue' <<<"$PAYLOAD")"
-FEATURE="$(jq -r '.feature // "unknown"' "$ROOT/plan.json" 2>/dev/null || echo unknown)"
+FEATURE="$(jq -r '.feature // "unknown"' "$RUN_DIR/plan.json" 2>/dev/null || echo unknown)"
 
-mkdir -p "$ROOT/logs"
-LOG="$ROOT/logs/promote-$ISSUE.md"
+mkdir -p "$RUN_DIR/logs"
+LOG="$RUN_DIR/logs/promote-$ISSUE.md"
 
 PROMPT="$(cat "$ROOT/prompts/promote.md")
 
@@ -29,15 +29,16 @@ PROMPT="$(cat "$ROOT/prompts/promote.md")
 - base branch: $BASE_BRANCH
 - repo root: $REPO_ROOT
 - integration worktree: $INT_WT
-- harness root (plan.json, results/CR.md live here): $ROOT
+- harness root: $ROOT
+- run root (plan.json, results/CR.md live here): $RUN_DIR
 
 ## CR (already gate-approved)
 
-$(cat "$ROOT/results/CR.md" 2>/dev/null || echo "(CR.md MISSING — that is a NO_GO)")
+$(cat "$RUN_DIR/results/CR.md" 2>/dev/null || echo "(CR.md MISSING — that is a NO_GO)")
 
 ## Plan scope notes
 
-$(jq -r '.scope_notes // "(none)"' "$ROOT/plan.json" 2>/dev/null || echo "(plan.json missing)")"
+$(jq -r '.scope_notes // "(none)"' "$RUN_DIR/plan.json" 2>/dev/null || echo "(plan.json missing)")"
 
 cd "$REPO_ROOT"
 env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \

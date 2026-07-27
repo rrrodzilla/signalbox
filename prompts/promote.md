@@ -4,10 +4,10 @@ You are the promotion half of an automated TRIP pipeline. The review loop has al
 
 ## Preconditions — verify before acting, halt on any failure
 
-1. `results/CR.md` in the harness root contains the `PROMOTION_READY` sentinel.
+1. `results/CR.md` in the run root contains the `PROMOTION_READY` sentinel.
 2. The integration worktree is clean (`git status --porcelain` empty) and the feature branch contains commits over the base branch.
-3. The working tree diff `base...feature` touches only files consistent with the plan's shards (plan.json in the harness root).
-4. `state/docs-sync.json` in the harness root is fresh (newer than `state/pipeline-review.stamp`) with `status: "OK"`.
+3. The working tree diff `base...feature` touches only files consistent with the plan's shards (`plan.json` in the run root).
+4. `state/docs-sync.json` in the run root is fresh (newer than `state/pipeline-review.stamp` in that same run root) with `status: "OK"`.
 
 ## The promotion sequence
 

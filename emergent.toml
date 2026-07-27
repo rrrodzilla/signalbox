@@ -8,8 +8,12 @@
 # TRIP sentinels become topics; the round guard bounds the cycle at 3 fix
 # attempts (rounds 1-4); approval writes results/CR.md under PROMOTION_READY.
 
+# Engine names are namespaced per repo at install time and per run at launch.
+# With socket_path = "auto", two concurrent runs of the same repo get distinct
+# sockets; the name is also the event-store log directory, so their audit
+# trails stay separate.
 [engine]
-name = "signalbox-review-loop"
+name = "signalbox-review-loop__SIGNALBOX_RUN_SUFFIX__"
 socket_path = "auto"
 
 # ── Entry: one-shot seed emits the first review request ─────────────────────
@@ -195,8 +199,9 @@ args = ["-s", "exec.error", "--", "jq", "-c", "."]
 subscribes = ["exec.error"]
 
 # Live watch: stream every interesting topic to the browser (bin/watch.sh
-# proxies this port so the dashboard needs no CORS). Ports are allocated
-# per-repo at install time (__SIGNALBOX_PORT_*__, see install.sh); dev.sh renders 8100-8104.
+# proxies this port so the dashboard needs no CORS). Ports are allocated per
+# repo at install time; per-run launches render a leased port block over the
+# same __SIGNALBOX_PORT_*__ placeholders. dev.sh renders 8100-8104.
 [[sinks]]
 name = "watchtower"
 path = "~/.local/share/emergent/primitives/bin/sse-sink"

@@ -16,8 +16,10 @@ OUTCOME="$(jq -r '.outcome' <<<"$PAYLOAD")"
 ISSUE="$(jq -r '.issue' <<<"$PAYLOAD")"
 LOG="$(jq -r '.log' <<<"$PAYLOAD")"
 
-mkdir -p "$ROOT/logs"
-OUT="$ROOT/logs/operator-$PHASE.md"
+mkdir -p "$RUN_DIR/logs"
+OUT="$RUN_DIR/logs/operator-$PHASE.md"
+RUN_DISPLAY="$RUN_SLUG"
+[ -n "$RUN_DISPLAY" ] || RUN_DISPLAY="(single-run)"
 
 PROMPT="$(cat "$ROOT/prompts/operator.md")
 
@@ -27,6 +29,8 @@ PROMPT="$(cat "$ROOT/prompts/operator.md")
 - issue: #$ISSUE
 - runner-reported outcome: $OUTCOME (verify it — do not trust it)
 - harness root: $ROOT
+- run root: $RUN_DIR
+- run slug: $RUN_DISPLAY
 - repo root: $REPO_ROOT
 - base branch: $BASE_BRANCH
 - engine log: $LOG
@@ -52,7 +56,7 @@ env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
 VERDICT_LINE="$(grep -E '^\{.*"verdict".*\}[[:space:]]*$' "$OUT" | tail -1 || true)"
 
 VERDICT="HALT"
-REASON="operator output unparseable (see logs/operator-$PHASE.md) — failing safe"
+REASON="operator output unparseable (see $OUT) — failing safe"
 PARKED="false"
 if [ -n "$VERDICT_LINE" ] && jq -e . >/dev/null 2>&1 <<<"$VERDICT_LINE"; then
     V="$(jq -r '.verdict // ""' <<<"$VERDICT_LINE")"

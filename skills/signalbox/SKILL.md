@@ -20,14 +20,14 @@ Work from the current repo's root (primary checkout, not a worktree; `.claude` m
    `.claude/emergent/bin/init-run.sh`
    This runner supervises and stops the init engine itself, exiting non-zero if the three documents never land, so the launcher does not need to babysit the engine or SIGTERM it by hand for this phase. Three read-only researchers write `ARCHI.md`, `ARCHI-rules.md`, `TESTING.md`; existing docs get `.proposed.md` siblings. When adoption is delegated to you: archive originals first (`_archive/<doc>-<date>-pre-init.md`; the vault is NOT under git), and prefer merging over swapping when the existing doc holds knowledge a repo researcher cannot see (issue-tracker state, external pointers, decision history).
 3. **An issue number** (e.g. "/signalbox 54"): run the pipeline.
-   `SIGNALBOX_ISSUE=<n> emergent --config .claude/emergent/pipeline.toml`
+   `.claude/emergent/bin/run.sh <n>`
    This is the whole feature path; a headless operator verifies each phase seam and a promotion executor opens and merges the PR after green CI. The only human-gated outcomes are a situational-gate park and a release.
 
 ## Supervision discipline (non-negotiable)
 
-- Launch engines as background tasks; monitor **disk artifacts**, never notifications or engine claims: fresh `plan.json`, fresh `state/gate.json` (the gate verdict artifact), fresh `results/CR.md` or `state/pending.json`, `.proposed.md` files in the vault, `PIPELINE COMPLETE`/`HALTED` lines.
-- Before launching or stopping anything, check for OTHER live emergent engines (`pgrep -x emergent`, then `ps` the PIDs): the user may have runs of their own in flight. Never reinstall or modify a harness an engine is currently running from.
-- The engine buffers its event-store JSONL; stop engines gracefully (SIGTERM to the specific PID, never `pkill -f` patterns) so trails flush before you read them.
+- Launch the per-run supervisor as a background task; monitor **disk artifacts**, never notifications or engine claims. For issue `<n>`, the phase evidence is `.claude/emergent/runs/issue-<n>/{plan.json,state/gate.json,results/CR.md,state/pending.json}`. Init evidence remains the `.proposed.md` files in the repo-scoped vault; pipeline narration is in that run's logs.
+- Before launching or reinstalling, run `.claude/emergent/bin/run.sh --list` when the harness exists, then check for OTHER live Emergent processes (`pgrep -x emergent`, then `ps` the PIDs). The user may have multiple runs in flight. Never reinstall or modify a harness while ANY run from it is live.
+- The engine buffers its event-store JSONL. To stop issue `<n>`, read `.claude/emergent/runs/issue-<n>/state/engine.pid` and send SIGTERM to that exact PID; never use `pkill -f` or another name pattern. The launcher will reap its child, release the run's ports, and remove the PID file so the trail flushes cleanly.
 - Verify every completion first-hand from the filesystem/git/gh before reporting it. A monitor saying "done" is a claim, not evidence.
 - Feature trails: `.claude/emergent/bin/audit.sh <correlation-id>` (no args lists known ids).
 

@@ -6,7 +6,7 @@ set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 
-FEATURE="${SEED_FEATURE:-$(jq -r '.feature // "feature"' "$ROOT/plan.json" 2>/dev/null || echo feature)}"
+FEATURE="${SEED_FEATURE:-$(jq -r '.feature // "feature"' "$RUN_DIR/plan.json" 2>/dev/null || echo feature)}"
 
 jq -n --arg f "$FEATURE" --arg wd "$SEED_WORKDIR" \
     '{feature: $f, workdir: $wd, round: 1, feedback: ""}'

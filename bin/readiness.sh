@@ -16,6 +16,16 @@ ACTION="$(jq -r '.action // "promote"' <<<"$PAYLOAD")"
 
 mkdir -p "$ROOT/state"
 
+STATE="$ROOT/state/readiness.json"
+# The ladder is the ONE artifact concurrent runs share: it is earned per repo,
+# not per run. Read, compute and write are therefore one serialized
+# transaction — two runs converging at the same moment must not both read R2
+# and both write R3, and neither may observe a half-written file. The lock
+# covers the whole transaction below; the write itself is a rename, so
+# bin/readiness-get.sh (which takes no lock) can only ever see a complete file.
+exec 9>"$STATE.lock"
+flock -x 9
+
 # The ladder moves from the EFFECTIVE (decayed) level — idle track record
 # has already eroded before the next promotion builds on it.
 LEVEL="$("$ROOT/bin/readiness-get.sh" "$ACTION")"
@@ -39,11 +49,12 @@ case "$DIRECTION" in
         ;;
 esac
 
-STATE="$ROOT/state/readiness.json"
 CURRENT="{}"
 [ -f "$STATE" ] && CURRENT="$(cat "$STATE")"
+TEMP="$STATE.tmp.$$"
 jq --arg a "$ACTION" --argjson n "$NEW" --arg ts "$(date -u +%FT%TZ)" \
-    '.[$a] = {level: $n, updated: $ts}' <<<"$CURRENT" >"$STATE"
+    '.[$a] = {level: $n, updated: $ts}' <<<"$CURRENT" >"$TEMP"
+mv "$TEMP" "$STATE"
 
 if [ "$NEW" -ne "$LEVEL" ]; then
     echo "[readiness] $ACTION: R$LEVEL -> R$NEW ($DIRECTION)"

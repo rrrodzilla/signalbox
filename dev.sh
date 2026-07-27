@@ -17,6 +17,7 @@ shift || true
 mkdir -p "$ROOT/rendered"
 # Prototype runs get the default port block (install.sh allocates per-repo).
 sed -e "s|__SIGNALBOX_ROOT__|$ROOT|g" \
+    -e "s|__SIGNALBOX_RUN_SUFFIX__||g" \
     -e "s|__SIGNALBOX_PORT_PIPELINE__|8100|g" \
     -e "s|__SIGNALBOX_PORT_PLAN__|8101|g" \
     -e "s|__SIGNALBOX_PORT_IMPLEMENT__|8102|g" \

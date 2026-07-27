@@ -56,7 +56,10 @@ OUTCOME="TIMEOUT"
 TIMEOUT=2400
 SECS=0
 
-while [ "$SECS" -lt "$TIMEOUT" ]; do
+# One sweep of the three terminal artifacts; records the first form of each it
+# sees and narrates it once. Idempotent, so it is safe to call again after the
+# polling loop stops.
+scan_artifacts() {
     if [ -z "$ARCHI_PATH" ]; then
         if fresh "$VAULT/ARCHI.md"; then
             ARCHI_PATH="$VAULT/ARCHI.md"
@@ -92,9 +95,15 @@ while [ "$SECS" -lt "$TIMEOUT" ]; do
             echo "[init] TESTING.md landed: $TESTING_PATH"
         fi
     fi
+}
+
+all_landed() { [ -n "$ARCHI_PATH" ] && [ -n "$RULES_PATH" ] && [ -n "$TESTING_PATH" ]; }
+
+while [ "$SECS" -lt "$TIMEOUT" ]; do
+    scan_artifacts
 
     # Check artifacts first: the engine may exit immediately after its final write.
-    if [ -n "$ARCHI_PATH" ] && [ -n "$RULES_PATH" ] && [ -n "$TESTING_PATH" ]; then
+    if all_landed; then
         OUTCOME="ARTIFACT"
         break
     fi
@@ -103,6 +112,17 @@ while [ "$SECS" -lt "$TIMEOUT" ]; do
     sleep 5
     SECS=$((SECS + 5))
 done
+
+# The last document can land during the final polling sleep, or between the
+# engine's last write and its exit. Rescan before committing to TIMEOUT or
+# ENGINE_DIED, so a run that met the terminal condition is not reported as
+# missing artifacts just because the loop noticed the clock or the corpse first.
+if [ "$OUTCOME" != "ARTIFACT" ]; then
+    scan_artifacts
+    if all_landed; then
+        OUTCOME="ARTIFACT"
+    fi
+fi
 
 # Let in-flight sinks finish narrating, then stop ONLY our child, gracefully.
 if kill -0 "$PID" 2>/dev/null; then

@@ -102,12 +102,63 @@ path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "exec.error", "--", "jq", "-c", "."]
 subscribes = ["exec.error"]
 
-# Live watch: stream every interesting topic to the browser (bin/watch.sh
-# proxies this port so the dashboard needs no CORS). Ports are allocated per
-# repo at install time; per-run launches render a leased port block over the
-# same port placeholders. dev.sh renders 8100-8104.
+# Forward events to the one shared machine-level sink service on its fixed
+# known port (default 8099, SIGNALBOX_SINK_PORT); this topology allocates and
+# serves no port. Forwarding is fire-and-forget, so a down sink service cannot
+# stall or fail a run. exec-sink gives its child only the payload, with no topic
+# metadata, so one block per topic passes the exact label as a literal argument.
+# The wildcard lifecycle blocks have no single literal to pass, so they rebuild
+# the concrete topic from the payload's own "name" field before forwarding.
 [[sinks]]
-name = "watchtower"
-path = "~/.local/share/emergent/primitives/bin/sse-sink"
-args = ["--port", "__SIGNALBOX_PORT_PLAN__"]
-subscribes = ["plan.requested", "plan.validated", "plan.approved", "plan.written", "plan.escalated", "exec.error", "system.started.*", "system.stopped.*", "system.error.*"]
+name = "forward-plan-requested"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "plan.requested", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "plan", "plan.requested"]
+subscribes = ["plan.requested"]
+
+[[sinks]]
+name = "forward-plan-validated"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "plan.validated", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "plan", "plan.validated"]
+subscribes = ["plan.validated"]
+
+[[sinks]]
+name = "forward-plan-approved"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "plan.approved", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "plan", "plan.approved"]
+subscribes = ["plan.approved"]
+
+[[sinks]]
+name = "forward-plan-written"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "plan.written", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "plan", "plan.written"]
+subscribes = ["plan.written"]
+
+[[sinks]]
+name = "forward-plan-escalated"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "plan.escalated", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "plan", "plan.escalated"]
+subscribes = ["plan.escalated"]
+
+[[sinks]]
+name = "forward-exec-error"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "exec.error", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "plan", "exec.error"]
+subscribes = ["exec.error"]
+
+[[sinks]]
+name = "forward-system-started-any"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "system.started.*", "-t", "5000", "--", "bash", "-c", 'payload=$(cat); name=$(jq -r ".name // empty" <<<"$payload" 2>/dev/null); printf "%s" "$payload" | "$0" plan "system.started.${name:-unknown}"', "__SIGNALBOX_ROOT__/bin/sse-forward.sh"]
+subscribes = ["system.started.*"]
+
+[[sinks]]
+name = "forward-system-stopped-any"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "system.stopped.*", "-t", "5000", "--", "bash", "-c", 'payload=$(cat); name=$(jq -r ".name // empty" <<<"$payload" 2>/dev/null); printf "%s" "$payload" | "$0" plan "system.stopped.${name:-unknown}"', "__SIGNALBOX_ROOT__/bin/sse-forward.sh"]
+subscribes = ["system.stopped.*"]
+
+[[sinks]]
+name = "forward-system-error-any"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "system.error.*", "-t", "5000", "--", "bash", "-c", 'payload=$(cat); name=$(jq -r ".name // empty" <<<"$payload" 2>/dev/null); printf "%s" "$payload" | "$0" plan "system.error.${name:-unknown}"', "__SIGNALBOX_ROOT__/bin/sse-forward.sh"]
+subscribes = ["system.error.*"]

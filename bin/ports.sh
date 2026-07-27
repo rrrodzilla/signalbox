@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Per-run port lease registry.
+# Per-run approval webhook port lease registry.
 # Invocation:
 #   bin/ports.sh lease <slug>   stdout = leased base port
 #   bin/ports.sh release <slug> stdout = empty
@@ -9,6 +9,10 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+
+# A run's block is exactly one port: the approval webhook. SSE now uses one
+# shared machine-level sink service, so ports no longer scale with runs or repos.
+readonly BLOCK_SIZE=1
 
 usage() {
     echo "usage: bin/ports.sh lease <slug> | release <slug> | list" >&2
@@ -79,8 +83,8 @@ block_overlaps() {
     local BASE_VALUE="$1"
     local OTHER_BASE="$2"
 
-    [ "$BASE_VALUE" -le "$((OTHER_BASE + 5))" ] \
-        && [ "$((BASE_VALUE + 5))" -ge "$OTHER_BASE" ]
+    [ "$BASE_VALUE" -le "$((OTHER_BASE + BLOCK_SIZE - 1))" ] \
+        && [ "$((BASE_VALUE + BLOCK_SIZE - 1))" -ge "$OTHER_BASE" ]
 }
 
 reserved_block_overlaps() {
@@ -124,7 +128,7 @@ block_accepts_tcp() {
     local BASE_VALUE="$1"
     local PORT_VALUE
 
-    for ((PORT_VALUE = BASE_VALUE; PORT_VALUE <= BASE_VALUE + 5; PORT_VALUE++)); do
+    for ((PORT_VALUE = BASE_VALUE; PORT_VALUE <= BASE_VALUE + BLOCK_SIZE - 1; PORT_VALUE++)); do
         if port_accepts_tcp "$PORT_VALUE"; then
             return 0
         fi
@@ -223,7 +227,7 @@ case "$COMMAND" in
         done
 
         if [ -z "$BASE" ]; then
-            echo "error: no free port block; tried candidate bases 8200-8990 (ports through 8995)" >&2
+            echo "error: no free port block; tried candidate bases 8200-8990" >&2
             exit 1
         fi
 

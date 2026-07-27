@@ -5,7 +5,8 @@
 #
 # Launches one Emergent engine as a child, records its run metadata, and remains
 # its foreground supervisor. On exit it stops only that child PID, gracefully
-# with SIGTERM before bounded escalation, and releases the run's port lease.
+# with SIGTERM before bounded escalation, removes the PID file only if it wrote
+# one, and releases the run's port lease.
 set -euo pipefail
 
 usage() {
@@ -119,11 +120,14 @@ cleanup() {
 
     trap - EXIT INT TERM
     stop_child
+    # Remove the PID file only if this launcher wrote it, and before the lease
+    # is released: a concurrent same-issue launcher that never got the lease
+    # must not delete the active launcher's PID file.
+    if [ "${PID_FILE_OWNED:-0}" -eq 1 ]; then
+        rm -f "$PID_FILE" || true
+    fi
     if [ "$LEASED" -eq 1 ]; then
         "$ROOT/bin/ports.sh" release "$RUN_SLUG" || true
-    fi
-    if [ -n "${PID_FILE:-}" ]; then
-        rm -f "$PID_FILE" || true
     fi
     exit "$STATUS_VALUE"
 }
@@ -205,6 +209,7 @@ mkdir -p "$RUN_DIR/state" "$RUN_DIR/logs" "$RUN_DIR/results"
 CHILD_PID=""
 CHILD_REAPED=0
 LEASED=0
+PID_FILE_OWNED=0
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -298,6 +303,7 @@ SIGNALBOX_ISSUE="$ISSUE" SIGNALBOX_RUN_SLUG="$RUN_SLUG" \
     emergent --config "$RUN_DIR/$CONFIG_NAME.toml" >"$LOG" 2>&1 &
 CHILD_PID=$!
 printf '%s\n' "$CHILD_PID" >"$PID_FILE"
+PID_FILE_OWNED=1
 jq --argjson pid "$CHILD_PID" '. + {pid: $pid}' "$LAUNCH" >"$LAUNCH_TEMP"
 mv "$LAUNCH_TEMP" "$LAUNCH"
 

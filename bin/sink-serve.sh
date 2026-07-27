@@ -44,10 +44,12 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BODY = 1024 * 1024
+MAX_ARTIFACT_JSON = 262144
 RING_SIZE = 500
 CLIENT_QUEUE_SIZE = 128
 HEARTBEAT_SECONDS = 15
@@ -129,7 +131,7 @@ def artifact_info(run_dir, rel):
             return info
         info["mtime"] = st.st_mtime
         info["size"] = st.st_size
-        if rel.endswith(".json") and st.st_size < 262144:
+        if rel.endswith(".json") and st.st_size < MAX_ARTIFACT_JSON:
             try:
                 with open(p) as fh:
                     info["json"] = json.load(
@@ -160,6 +162,51 @@ def log_info(run_dir):
                     continue
                 logs.append({"file": n, "mtime": st.st_mtime, "size": st.st_size})
     return logs
+
+
+def load_provenance(run_dir):
+    """Load and sanitize one run's optional artifact provenance map."""
+    if not isinstance(run_dir, str) or not run_dir or "\x00" in run_dir:
+        return {}
+    path = os.path.join(run_dir, "state", "provenance.json")
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(MAX_ARTIFACT_JSON)
+            if len(raw) >= MAX_ARTIFACT_JSON or fh.read(1):
+                return {}
+        document = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=reject_constant,
+            parse_float=finite_float,
+        )
+        if not isinstance(document, dict):
+            return {}
+        sanitized = {}
+        for rel, entry in document.items():
+            if not isinstance(entry, dict):
+                continue
+            agent = entry.get("agent")
+            model = entry.get("model")
+            if (not valid_provenance_text(agent, 32)
+                    or not valid_provenance_text(model, 128)):
+                continue
+            clean = {"agent": agent, "model": model}
+            effort = entry.get("effort")
+            if (isinstance(effort, str)
+                    and effort in {"low", "medium", "high", "xhigh", "max"}):
+                clean["effort"] = effort
+            sanitized[rel] = clean
+        return sanitized
+    except Exception:
+        # Provenance is diagnostic metadata. A missing, torn, or hostile map
+        # must not affect this run's other status or any other registered run.
+        return {}
+
+
+def valid_provenance_text(value, limit):
+    return (isinstance(value, str)
+            and 0 < len(value) <= limit
+            and not any(unicodedata.category(char) == "Cc" for char in value))
 
 
 def proc_start_id(pid):
@@ -414,11 +461,22 @@ def status():
         run_dir = instance.get("run_dir")
         if not isinstance(run_dir, str):
             run_dir = ""
-        instance["artifacts"] = {
+        provenance = load_provenance(run_dir)
+        artifacts = {
             artifact: artifact_info(run_dir, artifact)
             for artifact in ARTIFACTS
         }
-        instance["logs"] = log_info(run_dir)
+        for artifact, info in artifacts.items():
+            entry = provenance.get(artifact)
+            if entry is not None:
+                info["provenance"] = entry
+        logs = log_info(run_dir)
+        for info in logs:
+            entry = provenance.get("logs/" + info["file"])
+            if entry is not None:
+                info["provenance"] = entry
+        instance["artifacts"] = artifacts
+        instance["logs"] = logs
     return {"now": now, "instances": instances}
 
 
@@ -587,6 +645,16 @@ td.age, td.size { color:var(--dim); white-space:nowrap; text-align:right; }
 .badge.stale { color:var(--amber); border-color:var(--amber); }
 .badge.unknown { color:var(--purple); border-color:var(--purple); }
 .badge.selected { background:var(--line); box-shadow:0 0 0 1px currentColor; }
+.pill { display:inline-block; margin-left:4px; padding:0 6px; border:1px solid var(--line); border-radius:10px; color:var(--dim); font-size:10px; font-weight:400; line-height:16px; vertical-align:baseline; }
+.pill.agent-claude { color:var(--purple); border-color:var(--purple); }
+.pill.agent-codex { color:var(--blue); border-color:var(--blue); }
+.pill.agent-other { color:var(--dim); border-color:var(--dim); }
+.pill.model { color:var(--fg); border-color:var(--line); }
+.pill.effort-low { color:var(--dim); border-color:var(--dim); opacity:.7; }
+.pill.effort-medium { color:var(--green); border-color:var(--green); opacity:.8; }
+.pill.effort-high { color:var(--blue); border-color:var(--blue); opacity:.9; }
+.pill.effort-xhigh { color:var(--amber); border-color:var(--amber); }
+.pill.effort-max { color:var(--red); border-color:var(--red); font-weight:600; }
 #feed { max-height:70vh; overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
 .ev { border-left:3px solid var(--line); padding:2px 8px; font-size:12px; }
 .ev .hd { color:var(--dim); }
@@ -628,6 +696,51 @@ function esc(value) {
     "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
   })[c]);
 }
+function provenanceParts(value) {
+  const usable = (text, limit) => typeof text === "string" && text.length > 0 &&
+    text.length <= limit && !/[\u0000-\u001f\u007f-\u009f]/.test(text);
+  if (!value || typeof value !== "object" ||
+      !usable(value.agent, 32) || !usable(value.model, 128)) return null;
+  const agentClass = value.agent === "claude" ? "agent-claude" :
+    value.agent === "codex" ? "agent-codex" : "agent-other";
+  const effortClasses = {
+    low:"effort-low", medium:"effort-medium", high:"effort-high",
+    xhigh:"effort-xhigh", max:"effort-max"
+  };
+  const effort = typeof value.effort === "string" &&
+    Object.prototype.hasOwnProperty.call(effortClasses, value.effort)
+    ? value.effort : null;
+  return {
+    agent:value.agent,
+    agentClass,
+    model:value.model,
+    effort,
+    effortClass:effort ? effortClasses[effort] : ""
+  };
+}
+function provenancePills(value) {
+  const p = provenanceParts(value);
+  if (!p) return "";
+  let pills = '<span class="pill ' + p.agentClass + '">' + esc(p.agent) + "</span>" +
+    '<span class="pill model">' + esc(p.model) + "</span>";
+  if (p.effort) {
+    pills += '<span class="pill ' + p.effortClass + '">' + esc(p.effort) + "</span>";
+  }
+  return pills;
+}
+function appendProvenancePills(parent, value) {
+  const p = provenanceParts(value);
+  if (!p) return;
+  for (const [text, className] of [
+    [p.agent, p.agentClass], [p.model, "model"],
+    ...(p.effort ? [[p.effort, p.effortClass]] : [])
+  ]) {
+    const pill = document.createElement("span");
+    pill.className = "pill " + className;
+    pill.textContent = text;
+    parent.appendChild(pill);
+  }
+}
 
 function derive(run) {
   const a = run.artifacts;
@@ -662,6 +775,7 @@ function artifactRows(run, now) {
       const verdictClass = x.json.verdict === "GREEN" ? "ok" : "bad";
       extra = ' <span class="' + verdictClass + '">' + esc(x.json.verdict) + "</span>";
     }
+    extra += provenancePills(x.provenance);
     return "<tr><td class='" + (x.exists ? "" : "miss") + "'>" + esc(x.file) + extra + "</td>" +
       "<td class='age'>" + (x.exists ? age(now, x.mtime) : "—") + "</td>" +
       "<td class='size'>" + (x.exists ? x.size + "b" : "") + "</td></tr>";
@@ -670,7 +784,8 @@ function artifactRows(run, now) {
 
 function logRows(run, now) {
   return run.logs.map(l =>
-    "<tr><td>" + esc(l.file) + "</td><td class='age'>" + age(now, l.mtime) +
+    "<tr><td>" + esc(l.file) + provenancePills(l.provenance) +
+    "</td><td class='age'>" + age(now, l.mtime) +
     "</td><td class='size'>" + l.size + "b</td></tr>").join("");
 }
 
@@ -785,12 +900,16 @@ function addEvent(topic, dataText) {
   const short = body.length > 700;
   div.innerHTML = '<div class="hd">' + when.toLocaleTimeString() +
     ' · <span class="event-instance"></span> · <span class="event-engine"></span>' +
-    ' · <span class="topic"></span></div>' +
+    ' · <span class="topic"></span><span class="event-provenance"></span></div>' +
     (short ? '<details><summary>' + body.length + ' chars</summary><pre></pre></details>'
            : '<pre></pre>');
   div.querySelector(".event-instance").textContent = label;
   div.querySelector(".event-engine").textContent = engine;
   div.querySelector(".topic").textContent = t;
+  appendProvenancePills(
+    div.querySelector(".event-provenance"),
+    pl && typeof pl === "object" ? pl.provenance : null
+  );
   div.querySelector("pre").textContent = body;
   const feed = $("feed");
   feed.prepend(div);

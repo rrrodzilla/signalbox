@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Situational assessor: stdin = review.approved payload.
-# stdout = gate.assessed payload (input + {action, readiness, floor, rationale}).
+# stdout = gate.assessed payload
+#   (input + {action, readiness, floor, rationale, provenance}).
 #
 # The LLM — not a hand-authored policy table — sets the readiness floor for
 # the action at hand. It is handed the action's mechanics (facts) and the
@@ -13,6 +14,7 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 PAYLOAD="$(cat)"
 
@@ -75,6 +77,7 @@ mkdir -p "$RUN_DIR/logs" "$LEDGER_DIR"
 RAW="$(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     claude -p "$PROMPT" --model opus \
     2>>"$RUN_DIR/logs/assess.stderr" || true)"
+stamp_provenance "logs/assess.stderr" claude opus ""
 
 VERDICT_JSON="$(printf '%s' "$RAW" | tr '\n' ' ' | grep -oE '\{[^{}]*\}' | head -1 || true)"
 FLOOR="$(jq -r '.floor | select(type == "number")' <<<"$VERDICT_JSON" 2>/dev/null || true)"
@@ -98,9 +101,11 @@ jq -nc \
     '{ts: (now | todate), action: $action, floor: $floor, rationale: $rationale, correlation_id: $cid}' \
     >>"$LEDGER_DIR/assessments.jsonl"
 
+PROVENANCE="$(provenance_object claude opus "")"
 jq -c \
     --arg action "$ACTION" \
     --argjson readiness "$LEVEL" \
     --argjson floor "$FLOOR" \
     --arg rationale "$RATIONALE" \
-    '. + {action: $action, readiness: $readiness, floor: $floor, rationale: $rationale}' <<<"$PAYLOAD"
+    --argjson provenance "$PROVENANCE" \
+    '. + {action: $action, readiness: $readiness, floor: $floor, rationale: $rationale, provenance: $provenance}' <<<"$PAYLOAD"

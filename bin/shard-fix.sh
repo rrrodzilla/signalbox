@@ -2,6 +2,7 @@
 # Per-shard fixer: bin/shard-fix.sh <worker-index>
 # stdin = shard.fix.requested payload (shard.review.raw shape, REQUEST_CHANGES)
 # stdout = shard.review.requested payload for the next round
+#   (input transformed with fixer provenance)
 #
 # Headless Claude addresses the delta review's findings inside the shard's
 # own worktree, commits the fix on the shard branch (signed), and re-emits
@@ -10,6 +11,7 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 ME="${1:?worker index}"
 PAYLOAD="$(cat)"
@@ -53,10 +55,15 @@ env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     --model opus \
     --permission-mode acceptEdits \
     >"$RUN_DIR/logs/shard-fix-$STAGE_ID-$SHARD_ID-r$ROUND.log" 2>&1
+stamp_provenance "logs/shard-fix-$STAGE_ID-$SHARD_ID-r$ROUND.log" claude opus ""
 
 if [ -n "$(git status --porcelain)" ]; then
     git add -A
     git commit -S -m "fix: $STAGE_ID/$SHARD_ID shard, address review round $ROUND" >&2
 fi
 
-jq -c 'del(.verdict) | .feedback = .review | del(.review) | .round += 1' <<<"$PAYLOAD"
+PROVENANCE="$(provenance_object claude opus "")"
+jq -c \
+    --argjson provenance "$PROVENANCE" \
+    'del(.verdict) | .feedback = .review | del(.review) | .round += 1 | . + {provenance: $provenance}' \
+    <<<"$PAYLOAD"

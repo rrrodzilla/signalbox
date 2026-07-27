@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # TRIP-1 planner: stdin = plan.requested payload {issue, title, body, labels,
 # blockers, round, feedback, correlation_id}
-# stdout = plan.candidate payload (input + {plan: <object|null>, parse_error?})
+# stdout = plan.candidate payload
+#   (input + {plan: <object|null>, parse_error?, provenance})
 #
 # Headless Claude (opus) explores the repo — vault docs first, then the actual
 # source the issue touches — and emits the stage/shard DAG. Parsing failures
@@ -10,6 +11,7 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 PAYLOAD="$(cat)"
 ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
@@ -53,6 +55,7 @@ env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     claude -p "$PROMPT" \
     --model opus \
     >"$LOG" 2>"$LOG.stderr" || true
+stamp_provenance "plan.json" claude opus ""
 exec 9>&-
 
 # Extract the JSON object: whole output, or from the first '{' line onward.
@@ -66,8 +69,10 @@ else
     PARSE_ERROR="planner output was not a single JSON object (see logs/plan-round-$ROUND.md)"
 fi
 
+PROVENANCE="$(provenance_object claude opus "")"
 jq -c \
     --argjson plan "$PLAN" \
     --arg err "$PARSE_ERROR" \
-    '. + {plan: $plan} + (if $err == "" then {} else {parse_error: $err} end)' \
+    --argjson provenance "$PROVENANCE" \
+    '. + {plan: $plan} + (if $err == "" then {} else {parse_error: $err} end) + {provenance: $provenance}' \
     <<<"$PAYLOAD"

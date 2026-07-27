@@ -3,7 +3,10 @@
 # {feature, workdir, round, verdict, review, thread_id, correlation_id,
 #  action, readiness, floor, rationale, decision}.
 # stdout = docs.synced payload (the same object plus
-# {docs_sync: {status, updated, unchanged, path}}).
+# {docs_sync: {status, updated, unchanged, path}} and, only when the model ran,
+# top-level {provenance}). On the paths that finish before the model runs the
+# upstream {provenance} is deleted rather than forwarded: keeping it would
+# attribute docs.synced to whichever producer stamped the inbound payload.
 #
 # The syncer sits before the promotion sink so every reviewed feature records
 # either a mechanically verified vault update or an explicit no-op/error.
@@ -11,6 +14,7 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 PAYLOAD="$(cat)"
 CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
@@ -31,6 +35,7 @@ STATE_PATH="$RUN_DIR/state/docs-sync.json"
 DOCS=("ARCHI.md" "ARCHI-rules.md" "TESTING.md")
 UPDATED=()
 UNCHANGED=()
+MODEL_RAN=0
 
 mkdir -p "$RUN_DIR/state" "$RUN_DIR/logs"
 
@@ -40,6 +45,7 @@ finish() {
     local UPDATED_JSON
     local UNCHANGED_JSON
     local ISSUE_JSON="null"
+    local PROVENANCE
 
     UPDATED_JSON="$(jq -nc --args '$ARGS.positional' "${UPDATED[@]}")"
     UNCHANGED_JSON="$(jq -nc --args '$ARGS.positional' "${UNCHANGED[@]}")"
@@ -68,17 +74,37 @@ finish() {
             ts: (now | todate)
         }' >"$STATE_PATH"
 
-    jq -c \
-        --arg status "$STATUS" \
-        --argjson updated "$UPDATED_JSON" \
-        --argjson unchanged "$UNCHANGED_JSON" \
-        --arg path "$STATE_PATH" \
-        '. + {docs_sync: {
-            status: $status,
-            updated: $updated,
-            unchanged: $unchanged,
-            path: $path
-        }}' <<<"$PAYLOAD"
+    if [ "$MODEL_RAN" -eq 1 ]; then
+        stamp_provenance "state/docs-sync.json" claude sonnet ""
+        PROVENANCE="$(provenance_object claude sonnet "")"
+        jq -c \
+            --arg status "$STATUS" \
+            --argjson updated "$UPDATED_JSON" \
+            --argjson unchanged "$UNCHANGED_JSON" \
+            --arg path "$STATE_PATH" \
+            --argjson provenance "$PROVENANCE" \
+            '. + {
+                docs_sync: {
+                    status: $status,
+                    updated: $updated,
+                    unchanged: $unchanged,
+                    path: $path
+                },
+                provenance: $provenance
+            }' <<<"$PAYLOAD"
+    else
+        jq -c \
+            --arg status "$STATUS" \
+            --argjson updated "$UPDATED_JSON" \
+            --argjson unchanged "$UNCHANGED_JSON" \
+            --arg path "$STATE_PATH" \
+            'del(.provenance) | . + {docs_sync: {
+                status: $status,
+                updated: $updated,
+                unchanged: $unchanged,
+                path: $path
+            }}' <<<"$PAYLOAD"
+    fi
     exit 0
 }
 
@@ -186,6 +212,7 @@ env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     --add-dir "$VAULT" \
     --allowedTools "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git status:*)" \
     >"$RUN_DIR/logs/docs-sync.md" 2>"$RUN_DIR/logs/docs-sync.md.stderr" || CLAUDE_RC=$?
+MODEL_RAN=1
 
 for DOC in "${DOCS[@]}"; do
     if [ -f "$VAULT/$DOC" ]; then

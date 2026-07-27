@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pipeline operator: stdin = phase.done {issue, phase, outcome, log, correlation_id}
-# stdout = phase.verified (input + {verdict, reason, parked})
+# stdout = phase.verified (input + {verdict, reason, parked, provenance})
 #
 # Headless Fable applies the phantom-run discipline as topology: never trust
 # the runner's outcome, verify the phase's disk artifacts first-hand, then
@@ -9,6 +9,7 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 PAYLOAD="$(cat)"
 PHASE="$(jq -r '.phase' <<<"$PAYLOAD")"
@@ -52,6 +53,7 @@ env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
         "Bash(gh issue view:*)" "Bash(gh issue list:*)" \
         "Bash(gh run view:*)" "Bash(gh run list:*)" \
     >"$OUT" 2>"$OUT.stderr" || true
+stamp_provenance "logs/operator-$PHASE.md" claude claude-fable-5 ""
 
 VERDICT_LINE="$(grep -E '^\{.*"verdict".*\}[[:space:]]*$' "$OUT" | tail -1 || true)"
 
@@ -67,8 +69,15 @@ if [ -n "$VERDICT_LINE" ] && jq -e . >/dev/null 2>&1 <<<"$VERDICT_LINE"; then
     fi
 fi
 
+PROVENANCE="$(provenance_object claude claude-fable-5 "")"
 jq -c \
     --arg verdict "$VERDICT" \
     --arg reason "$REASON" \
     --argjson parked "$PARKED" \
-    '. + {verdict: $verdict, reason: $reason, parked: $parked}' <<<"$PAYLOAD"
+    --argjson provenance "$PROVENANCE" \
+    '. + {
+        verdict: $verdict,
+        reason: $reason,
+        parked: $parked,
+        provenance: $provenance
+    }' <<<"$PAYLOAD"

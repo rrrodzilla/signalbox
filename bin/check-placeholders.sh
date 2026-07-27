@@ -6,6 +6,10 @@
 # legitimately name the placeholder tokens in their own prose; only a live
 # (non-comment) occurrence is evidence of a rendering failure.
 #
+# TOML string state is tracked while scanning so that a line beginning with #
+# inside a multiline string is treated as string content, not as a comment:
+# such a line still carries a live placeholder and is reported.
+#
 # Exits 0 when no live placeholders remain, 64 on invalid invocation, and 1
 # when the directory is unusable or a live placeholder remains.
 set -euo pipefail
@@ -32,8 +36,59 @@ fi
 
 OFFENDING="$(
     awk '
-        /^[[:space:]]*#/ { next }
-        /__SIGNALBOX_/ { print FILENAME ":" FNR ":" $0 }
+        BEGIN { DQ = "\""; SQ = "\047"; DQ3 = DQ DQ DQ; SQ3 = SQ SQ SQ }
+
+        # Skip a single-line basic string, returning the index just past it.
+        function skip_basic(s, i, n,   c) {
+            while (i <= n) {
+                c = substr(s, i, 1)
+                if (c == "\\") { i += 2; continue }
+                if (c == DQ) { return i + 1 }
+                i++
+            }
+            return n + 1
+        }
+
+        # Skip a single-line literal string, which honours no escapes.
+        function skip_literal(s, i, n) {
+            while (i <= n) {
+                if (substr(s, i, 1) == SQ) { return i + 1 }
+                i++
+            }
+            return n + 1
+        }
+
+        # Walk one line, updating STATE: 0 outside any multiline string,
+        # 1 inside a multiline basic string, 2 inside a multiline literal one.
+        function scan(s,   i, n, c) {
+            i = 1
+            n = length(s)
+            while (i <= n) {
+                c = substr(s, i, 1)
+                if (STATE == 0) {
+                    if (c == "#") { return }
+                    if (substr(s, i, 3) == DQ3) { STATE = 1; i += 3; continue }
+                    if (substr(s, i, 3) == SQ3) { STATE = 2; i += 3; continue }
+                    if (c == DQ) { i = skip_basic(s, i + 1, n); continue }
+                    if (c == SQ) { i = skip_literal(s, i + 1, n); continue }
+                    i++
+                } else if (STATE == 1) {
+                    if (c == "\\") { i += 2; continue }
+                    if (substr(s, i, 3) == DQ3) { STATE = 0; i += 3; continue }
+                    i++
+                } else {
+                    if (substr(s, i, 3) == SQ3) { STATE = 0; i += 3; continue }
+                    i++
+                }
+            }
+        }
+
+        FNR == 1 { STATE = 0 }
+        STATE == 0 && /^[[:space:]]*#/ { next }
+        {
+            scan($0)
+            if ($0 ~ /__SIGNALBOX_/) { print FILENAME ":" FNR ":" $0 }
+        }
     ' "${TOML_FILES[@]}"
 )"
 

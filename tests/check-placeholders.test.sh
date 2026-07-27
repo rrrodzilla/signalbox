@@ -117,6 +117,65 @@ else
     report_case "multiple TOML files isolate the offender" 1
 fi
 
+BASIC_BLOCK_DIR="$(mktemp -d)"
+FIXTURES+=("$BASIC_BLOCK_DIR")
+BASIC_BLOCK_FILE="$BASIC_BLOCK_DIR/pipeline.toml"
+cat >"$BASIC_BLOCK_FILE" <<'EOF'
+# Uses __SIGNALBOX_PORT_PIPELINE__ while documenting the template.
+prompt = """
+# __SIGNALBOX_PORT_PIPELINE__
+"""
+# Uses __SIGNALBOX_PORT_PIPELINE__ again after the string closes.
+args = ["--port", "8203"]
+EOF
+run_subject "$BASIC_BLOCK_DIR/stdout" "$BASIC_BLOCK_DIR/stderr" "$BASIC_BLOCK_DIR"
+BASIC_BLOCK_STDERR="$(<"$BASIC_BLOCK_DIR/stderr")"
+if [ "$RUN_STATUS" -eq 1 ] &&
+    [[ "$BASIC_BLOCK_STDERR" == *"$BASIC_BLOCK_FILE:3:"* ]] &&
+    [[ "$BASIC_BLOCK_STDERR" != *"$BASIC_BLOCK_FILE:1:"* ]] &&
+    [[ "$BASIC_BLOCK_STDERR" != *"$BASIC_BLOCK_FILE:5:"* ]]; then
+    report_case "hash line inside multiline basic string" 0
+else
+    report_case "hash line inside multiline basic string" 1
+fi
+
+LITERAL_BLOCK_DIR="$(mktemp -d)"
+FIXTURES+=("$LITERAL_BLOCK_DIR")
+LITERAL_BLOCK_FILE="$LITERAL_BLOCK_DIR/implement.toml"
+cat >"$LITERAL_BLOCK_FILE" <<'EOF'
+body = '''
+# __SIGNALBOX_PORT_IMPLEMENT__
+'''
+# Uses __SIGNALBOX_PORT_IMPLEMENT__ after the string closes.
+name = "signalbox-implement-issue-17"
+EOF
+run_subject "$LITERAL_BLOCK_DIR/stdout" "$LITERAL_BLOCK_DIR/stderr" "$LITERAL_BLOCK_DIR"
+LITERAL_BLOCK_STDERR="$(<"$LITERAL_BLOCK_DIR/stderr")"
+if [ "$RUN_STATUS" -eq 1 ] &&
+    [[ "$LITERAL_BLOCK_STDERR" == *"$LITERAL_BLOCK_FILE:2:"* ]] &&
+    [[ "$LITERAL_BLOCK_STDERR" != *"$LITERAL_BLOCK_FILE:4:"* ]]; then
+    report_case "hash line inside multiline literal string" 0
+else
+    report_case "hash line inside multiline literal string" 1
+fi
+
+QUOTED_DIR="$(mktemp -d)"
+FIXTURES+=("$QUOTED_DIR")
+cat >"$QUOTED_DIR/plan.toml" <<'EOF'
+# A comment naming __SIGNALBOX_PORT_PLAN__ and one " quote.
+label = "value with a # hash"
+# A later comment naming __SIGNALBOX_PORT_PLAN__ once more.
+args = ["--port", "8204"]
+EOF
+run_subject "$QUOTED_DIR/stdout" "$QUOTED_DIR/stderr" "$QUOTED_DIR"
+if [ "$RUN_STATUS" -eq 0 ] &&
+    [ ! -s "$QUOTED_DIR/stdout" ] &&
+    [ ! -s "$QUOTED_DIR/stderr" ]; then
+    report_case "quotes in comments and values keep comments skipped" 0
+else
+    report_case "quotes in comments and values keep comments skipped" 1
+fi
+
 ARGUMENT_DIR="$(mktemp -d)"
 FIXTURES+=("$ARGUMENT_DIR")
 run_subject "$ARGUMENT_DIR/zero.stdout" "$ARGUMENT_DIR/zero.stderr"

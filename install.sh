@@ -28,9 +28,11 @@
 # Usage: install.sh <target-repo-path> [--reinstall] [--vault <vault-root> [--folder <f>]] [--gate '<command>']
 #   --reinstall
 #             Refresh an existing harness in place after refusing when a
-#             launcher-recorded run is live. Preserves runs/ and the state/
-#             readiness ledger. On a never-installed target, acts like a
-#             plain install.
+#             launcher-recorded run is live. The refusal check and the refresh
+#             run under an exclusive state/install.lock that bin/run.sh also
+#             takes, so no run can start in between. Preserves runs/ and the
+#             state/ readiness ledger. On a never-installed target, acts like
+#             a plain install.
 #   --vault   Obsidian vault root; wires .claude/docs into it (idempotent,
 #             migrates a pre-existing real docs/ dir). Default folder:
 #             TRIP/<repo-name>. Without --vault the repo must already be
@@ -126,6 +128,14 @@ if [ -e "$DEST" ]; then
     # `emergent --config` engine remains the operator's responsibility.
     # shellcheck source=bin/_liveness.sh
     source "$SRC/bin/_liveness.sh"
+    # Take the harness lock before the scan and hold it until this process
+    # exits, which is after the refresh has completed. bin/run.sh takes the
+    # same lock shared across its startup window, so no engine can be launched
+    # into the gap between the scan below and the rebuild further down: a
+    # launcher either recorded its run before the scan, and is refused here, or
+    # blocks until the refreshed harness is whole.
+    install_lock "$DEST" exclusive || exit 1
+    trap install_unlock EXIT
     LIVE_RUNS="$(live_runs "$DEST/runs")"
     if [ -n "$LIVE_RUNS" ]; then
         echo "error: $DEST has live launcher-recorded runs; refusing to refresh in place" >&2
@@ -162,6 +172,7 @@ need gh       "plan seed and promotion use the GitHub CLI"
 need jq       "every topology transform is jq"
 need python3  "the shared sink service and dashboard are python3"
 need curl     "topology sinks POST their events to the shared sink service"
+need flock    "reinstall and bin/run.sh serialize on the harness lock"
 if [ -z "$GATE_CMD" ]; then
     GATE_CMD="$(detect_gate "$TARGET" || true)"
 fi

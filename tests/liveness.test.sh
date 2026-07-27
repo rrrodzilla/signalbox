@@ -282,5 +282,94 @@ fi
 report_case "live_runs normalises decimal and exponent pids" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 200 "$OUT") stderr=$(head -c 200 "$ERR")"
 
+# 16. An unrecognised mode is refused before any lock file is created.
+fixture
+LOCK_ROOT="$FIXTURE_PATH"
+LOCK_FILE="$LOCK_ROOT/state/install.lock"
+run_function "$OUT" "$ERR" install_lock "$LOCK_ROOT" sideways
+OK=1
+if [ "$RUN_STATUS" -eq 1 ] \
+    && [ ! -s "$OUT" ] \
+    && [ ! -e "$LOCK_FILE" ] \
+    && grep -q 'shared or exclusive' "$ERR"; then
+    OK=0
+fi
+report_case "install_lock refuses an unknown mode without creating a file" "$OK" \
+    "status=$RUN_STATUS stdout=$(head -c 200 "$OUT") stderr=$(head -c 200 "$ERR")"
+
+# 17. An exclusive hold blocks a second acquirer: this is what keeps a launcher
+# from starting an engine between a reinstall's liveness scan and its rebuild.
+run_function "$OUT" "$ERR" install_lock "$LOCK_ROOT" exclusive
+HELD_STATUS=$RUN_STATUS
+CONTENDED=0
+( flock -x -w 1 9 ) 9>>"$LOCK_FILE" || CONTENDED=1
+OK=1
+if [ "$HELD_STATUS" -eq 0 ] \
+    && [ "$CONTENDED" -eq 1 ] \
+    && [ ! -s "$OUT" ] \
+    && [ ! -s "$ERR" ]; then
+    OK=0
+fi
+report_case "install_lock exclusive excludes a second holder" "$OK" \
+    "status=$HELD_STATUS contended=$CONTENDED stderr=$(head -c 200 "$ERR")"
+
+# 18. Releasing hands the lock straight over; a stale hold would wedge every
+# later reinstall.
+run_function "$OUT" "$ERR" install_unlock
+RELEASE_STATUS=$RUN_STATUS
+ACQUIRED=0
+( flock -x -w 1 9 ) 9>>"$LOCK_FILE" && ACQUIRED=1
+OK=1
+if [ "$RELEASE_STATUS" -eq 0 ] \
+    && [ "$ACQUIRED" -eq 1 ] \
+    && [ ! -s "$OUT" ] \
+    && [ ! -s "$ERR" ]; then
+    OK=0
+fi
+report_case "install_unlock releases the lock for the next holder" "$OK" \
+    "status=$RELEASE_STATUS acquired=$ACQUIRED stderr=$(head -c 200 "$ERR")"
+
+# 19. Launchers take the lock shared, so they never serialize against each
+# other — only against a reinstall's exclusive hold.
+run_function "$OUT" "$ERR" install_lock "$LOCK_ROOT" shared
+SHARED_STATUS=$RUN_STATUS
+SECOND_SHARED=0
+( flock -s -w 1 9 ) 9>>"$LOCK_FILE" && SECOND_SHARED=1
+BLOCKED_EXCLUSIVE=0
+( flock -x -w 1 9 ) 9>>"$LOCK_FILE" || BLOCKED_EXCLUSIVE=1
+install_unlock
+OK=1
+if [ "$SHARED_STATUS" -eq 0 ] \
+    && [ "$SECOND_SHARED" -eq 1 ] \
+    && [ "$BLOCKED_EXCLUSIVE" -eq 1 ]; then
+    OK=0
+fi
+report_case "install_lock shared admits launchers and blocks a reinstall" "$OK" \
+    "status=$SHARED_STATUS second-shared=$SECOND_SHARED blocked=$BLOCKED_EXCLUSIVE"
+
+# 20. A contended acquisition gives up after SIGNALBOX_LOCK_WAIT rather than
+# hanging an operator's terminal for ever.
+HOLDER_READY="$LOCK_ROOT/holder.ready"
+( exec 9>>"$LOCK_FILE"; flock -x 9; : >"$HOLDER_READY"; sleep 60 ) &
+HOLDER_PID=$!
+CHILD_PIDS+=("$HOLDER_PID")
+for _ in $(seq 1 100); do
+    [ -e "$HOLDER_READY" ] && break
+    sleep 0.1
+done
+SIGNALBOX_LOCK_WAIT=1 run_function "$OUT" "$ERR" install_lock "$LOCK_ROOT" exclusive
+TIMEOUT_STATUS=$RUN_STATUS
+install_unlock
+OK=1
+if [ "$TIMEOUT_STATUS" -eq 1 ] \
+    && [ ! -s "$OUT" ] \
+    && grep -q 'timed out' "$ERR"; then
+    OK=0
+fi
+report_case "install_lock times out instead of waiting for ever" "$OK" \
+    "status=$TIMEOUT_STATUS stderr=$(head -c 200 "$ERR")"
+kill "$HOLDER_PID" 2>/dev/null || true
+wait "$HOLDER_PID" 2>/dev/null || true
+
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

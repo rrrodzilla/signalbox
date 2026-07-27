@@ -1,5 +1,6 @@
-# Process-liveness helpers. Sourced, not executed; this file does not change
-# shell options and has no dependency on _env.sh or its variables.
+# Process-liveness helpers and the reinstall/launch lock. Sourced, not
+# executed; this file does not change shell options and has no dependency on
+# _env.sh or its variables.
 #
 # Functions:
 #   pid_alive <pid>
@@ -16,6 +17,12 @@
 #     status: always 0; launch metadata that is unparseable, not an object, or
 #             carries a field of the wrong type or value is skipped with a
 #             warning on stderr rather than coerced
+#   install_lock <harness-root> shared|exclusive
+#     stdout: empty
+#     status: 0 once the lock is held on fd 9; 1 with a diagnostic on stderr
+#   install_unlock
+#     stdout: empty
+#     status: always 0
 # shellcheck shell=bash
 
 pid_alive() {
@@ -127,3 +134,65 @@ live_runs() (
     done
     return 0
 )
+
+# A liveness scan is only a snapshot: an engine launched after the installer
+# scanned and before it finished rebuilding would be invisible to the scan and
+# would then run under a half-refreshed bin/. Reinstall and launcher startup
+# therefore serialize on one lock file, kept under state/ because reinstall
+# preserves that directory. Launchers hold it shared — they never exclude each
+# other — for their startup window alone, from before they inspect existing run
+# state until launch.json records the new engine; the installer holds it
+# exclusively from before its liveness scan until the refresh is complete. So a
+# launcher either recorded its engine in time for the scan to refuse, or waits
+# for a finished harness. Fd 9 is this repo's lock-descriptor convention.
+SIGNALBOX_LOCK_HELD=0
+
+install_lock() {
+    local ROOT_DIR="${1:-}" MODE="${2:-}" LOCK_FILE="" MODE_FLAG=""
+    local WAIT_SECONDS="${SIGNALBOX_LOCK_WAIT:-60}"
+
+    case "$MODE" in
+        shared) MODE_FLAG="-s" ;;
+        exclusive) MODE_FLAG="-x" ;;
+        *)
+            printf 'error: install lock mode must be shared or exclusive\n' >&2
+            return 1
+            ;;
+    esac
+    if [ -z "$ROOT_DIR" ]; then
+        printf 'error: install lock needs a harness root\n' >&2
+        return 1
+    fi
+    if ! command -v flock >/dev/null 2>&1; then
+        printf 'error: flock is missing — reinstall and bin/run.sh coordinate through it\n' >&2
+        return 1
+    fi
+    [[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || WAIT_SECONDS=60
+    LOCK_FILE="$ROOT_DIR/state/install.lock"
+    # Append mode, never truncate: the file is a lock, and a concurrent holder
+    # has it open. Nothing is ever written to it.
+    if ! mkdir -p "$ROOT_DIR/state" 2>/dev/null \
+        || ! touch "$LOCK_FILE" 2>/dev/null; then
+        printf 'error: cannot create the install lock: %s\n' "$LOCK_FILE" >&2
+        return 1
+    fi
+    exec 9>>"$LOCK_FILE"
+    SIGNALBOX_LOCK_HELD=1
+    if ! flock "$MODE_FLAG" -w "$WAIT_SECONDS" 9; then
+        install_unlock
+        printf 'error: timed out after %ss waiting for the install lock %s — another reinstall or launch holds it\n' \
+            "$WAIT_SECONDS" "$LOCK_FILE" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Closing the descriptor releases the lock. Children that inherited it keep it
+# held until they close their own copy, so any long-lived child must be spawned
+# with fd 9 closed.
+install_unlock() {
+    [ "${SIGNALBOX_LOCK_HELD:-0}" -eq 1 ] || return 0
+    exec 9>&-
+    SIGNALBOX_LOCK_HELD=0
+    return 0
+}

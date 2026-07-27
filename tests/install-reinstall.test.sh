@@ -243,5 +243,41 @@ fi
 report_case "reinstall flag performs a plain install on a fresh target" "$OK" \
     "status=$RUN_STATUS stderr=$(head -c 300 "$ERR")"
 
+# 8. Launch race: a launcher inside its startup window holds the harness lock
+# shared, and reinstall must refuse without touching the tree — the run it is
+# about to record would otherwise be invisible to a scan that already ran.
+# Once the launcher releases, the refresh proceeds normally.
+LOCK_FILE="$FIXTURE_DEST/state/install.lock"
+LAUNCHER_READY="$FIXTURE_HOME/launcher.ready"
+( exec 9>>"$LOCK_FILE"; flock -s 9; : >"$LAUNCHER_READY"; sleep 60 ) &
+LAUNCHER_PID=$!
+CHILD_PIDS+=("$LAUNCHER_PID")
+for _ in $(seq 1 100); do
+    [ -e "$LAUNCHER_READY" ] && break
+    sleep 0.1
+done
+printf '\nINSTALL_LOCK_SENTINEL\n' >>"$FIXTURE_DEST/bin/run.sh"
+export SIGNALBOX_LOCK_WAIT=1
+run_subject "$OUT" "$ERR" --reinstall
+unset SIGNALBOX_LOCK_WAIT
+BLOCKED_STATUS=$RUN_STATUS
+BLOCKED_INTACT=1
+grep -q 'INSTALL_LOCK_SENTINEL' "$FIXTURE_DEST/bin/run.sh" && BLOCKED_INTACT=0
+BLOCKED_NAMED=1
+grep -q 'install.lock' "$ERR" && BLOCKED_NAMED=0
+kill "$LAUNCHER_PID" 2>/dev/null || true
+wait "$LAUNCHER_PID" 2>/dev/null || true
+run_subject "$OUT" "$ERR" --reinstall
+OK=1
+if [ "$BLOCKED_STATUS" -eq 1 ] \
+    && [ "$BLOCKED_INTACT" -eq 0 ] \
+    && [ "$BLOCKED_NAMED" -eq 0 ] \
+    && [ "$RUN_STATUS" -eq 0 ] \
+    && ! grep -q 'INSTALL_LOCK_SENTINEL' "$FIXTURE_DEST/bin/run.sh"; then
+    OK=0
+fi
+report_case "a launcher's startup lock blocks reinstall until it releases" "$OK" \
+    "blocked-status=$BLOCKED_STATUS intact=$BLOCKED_INTACT named=$BLOCKED_NAMED release-status=$RUN_STATUS"
+
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

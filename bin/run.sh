@@ -4,7 +4,10 @@
 # event contract; stdout is human narration and diagnostics go to stderr.
 #
 # Launches one Emergent engine as a child, records its run metadata, and remains
-# its foreground supervisor. On exit it stops only that child PID, gracefully
+# its foreground supervisor. Startup — from inspecting existing run state until
+# launch.json records the engine — holds the harness lock shared, so a
+# concurrent install.sh --reinstall cannot refresh the tree around a run its
+# liveness scan never saw. On exit it stops only that child PID, gracefully
 # with SIGTERM before bounded escalation, removes the PID file only if it wrote
 # one, and releases the run's port lease.
 set -euo pipefail
@@ -198,6 +201,15 @@ if [ ! -f "$DOCS/ARCHI.md" ]; then
     exit 1
 fi
 
+# Startup window: everything from here until launch.json carries this engine's
+# pid runs under the shared harness lock, which install.sh --reinstall takes
+# exclusively across its liveness scan and refresh. Holding it shared means
+# concurrent launchers still start freely, while a reinstall either sees this
+# run recorded and refuses, or waits for it to be recorded. Released as soon as
+# the metadata is on disk — a run must not block a later reinstall's lock, only
+# its liveness scan.
+install_lock "$ROOT" shared || exit 1
+
 PID_FILE="$RUN_DIR/state/engine.pid"
 if [ -f "$PID_FILE" ]; then
     EXISTING_PID="$(head -n 1 "$PID_FILE" 2>/dev/null || true)"
@@ -281,8 +293,11 @@ jq -n \
     }' >"$LAUNCH_TEMP"
 mv "$LAUNCH_TEMP" "$LAUNCH"
 
+# 9>&- keeps the harness lock out of the engine: an inherited copy would hold
+# it for the whole run, so a later reinstall would block on the lock instead of
+# refusing with the live run named.
 SIGNALBOX_ISSUE="$ISSUE" SIGNALBOX_RUN_SLUG="$RUN_SLUG" \
-    emergent --config "$RUN_DIR/$CONFIG_NAME.toml" >"$LOG" 2>&1 &
+    emergent --config "$RUN_DIR/$CONFIG_NAME.toml" >"$LOG" 2>&1 9>&- &
 CHILD_PID=$!
 printf '%s\n' "$CHILD_PID" >"$PID_FILE"
 PID_FILE_OWNED=1
@@ -292,6 +307,9 @@ CHILD_START="$(proc_identity "$CHILD_PID" || true)"
 jq --argjson pid "$CHILD_PID" --arg start "$CHILD_START" \
     '. + {pid: $pid, start_id: $start}' "$LAUNCH" >"$LAUNCH_TEMP"
 mv "$LAUNCH_TEMP" "$LAUNCH"
+# The engine is on disk with its identity: a reinstall scan can see it now, so
+# the startup window is over.
+install_unlock
 
 printf 'run:       %s\n' "$RUN_SLUG"
 printf 'issue:     %s\n' "$ISSUE"

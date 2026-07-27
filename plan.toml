@@ -89,7 +89,7 @@ subscribes = ["plan.written"]
 [[sinks]]
 name = "escalations"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "plan.escalated", "--", "jq", "-r", "\"[plan] ESCALATED issue #\\(.issue) (\\(.verdict), round \\(.round)): \\(.feedback)\""]
+args = ["-s", "plan.escalated", "--", "__SIGNALBOX_ROOT__/bin/escalate-mark.sh", "plan"]
 subscribes = ["plan.escalated"]
 
 [[sinks]]

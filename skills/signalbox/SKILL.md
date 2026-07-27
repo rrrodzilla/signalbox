@@ -25,7 +25,7 @@ Work from the current repo's root (primary checkout, not a worktree; `.claude` m
 
 ## Supervision discipline (non-negotiable)
 
-- Launch engines as background tasks; monitor **disk artifacts**, never notifications or engine claims: fresh `plan.json`, the `GATE GREEN` banner in engine stdout, fresh `results/CR.md` or `state/pending.json`, `.proposed.md` files in the vault, `PIPELINE COMPLETE`/`HALTED` lines.
+- Launch engines as background tasks; monitor **disk artifacts**, never notifications or engine claims: fresh `plan.json`, fresh `state/gate.json` (the gate verdict artifact), fresh `results/CR.md` or `state/pending.json`, `.proposed.md` files in the vault, `PIPELINE COMPLETE`/`HALTED` lines.
 - Before launching or stopping anything, check for OTHER live emergent engines (`pgrep -x emergent`, then `ps` the PIDs): the user may have runs of their own in flight. Never reinstall or modify a harness an engine is currently running from.
 - The engine buffers its event-store JSONL; stop engines gracefully (SIGTERM to the specific PID, never `pkill -f` patterns) so trails flush before you read them.
 - Verify every completion first-hand from the filesystem/git/gh before reporting it. A monitor saying "done" is a claim, not evidence.

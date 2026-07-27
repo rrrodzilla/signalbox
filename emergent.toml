@@ -172,7 +172,7 @@ subscribes = ["approval.granted"]
 [[sinks]]
 name = "escalation"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "review.escalated", "--", "jq", "-r", "\"ESCALATED after \\(.round) rounds — human review required\""]
+args = ["-s", "review.escalated", "--", "__SIGNALBOX_ROOT__/bin/escalate-mark.sh", "review"]
 subscribes = ["review.escalated"]
 
 [[sinks]]

@@ -15,9 +15,24 @@ echo "ALL STAGES MERGED — running testing gate in $GATE_DIR"
 cd "$GATE_DIR"
 
 if cargo clippy --all-targets -q 2>&1 | tail -3 && cargo nextest run 2>&1 | tail -3; then
+    VERDICT="GREEN"
     echo "GATE GREEN on $INT_BRANCH:"
     git log --oneline "$BASE_BRANCH".."$INT_BRANCH" | sed 's/^/  /'
 else
+    VERDICT="RED"
     echo "GATE RED — inspect $INT_WT"
 fi
+
+# The verdict as a DISK ARTIFACT (issue #1): engine stdout is buffered when
+# redirected, so narration can sit unflushed until shutdown — anything that
+# supervises this phase must watch state/gate.json, never the banner.
+mkdir -p "$ROOT/state"
+jq -n \
+    --arg verdict "$VERDICT" \
+    --arg branch "$INT_BRANCH" \
+    --arg tip "$(git rev-parse --short HEAD)" \
+    --arg cid "$CID" \
+    '{verdict: $verdict, branch: $branch, tip: $tip, correlation_id: $cid}' \
+    >"$ROOT/state/gate.json"
+
 [ -z "$CID" ] || echo "feature trail: bin/audit.sh $CID"

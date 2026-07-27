@@ -15,8 +15,9 @@ You are read-only: do not edit files, do not commit, do not kill processes, do n
 - `feature` is a kebab-case slug; at least one stage; every shard has an id, a non-trivial prompt, and a non-empty `files` array.
 - Read `scope_notes` — if it defers items or corrects the issue's premise, include a one-line summary in your reason (the human reads your reasons as the pipeline's narration).
 
-**implement** — the phase claims GATE GREEN:
-- The engine log contains the `GATE GREEN` banner naming the feature branch.
+**implement** — the phase claims the gate ran:
+- `state/gate.json` in the harness root is fresh (newer than the phase stamp) with `verdict: "GREEN"`, and its `branch`/`tip` match reality: `git rev-parse --short` of the feature branch equals the recorded tip. (Do NOT rely on the `GATE GREEN` line in the engine log — engine stdout is buffered and the banner may legitimately be absent while gate.json is present; the file is the authority.)
+- Runner outcome GATE_RED means gate.json is fresh with `verdict: "RED"`: HALT, quoting the gate.json contents and pointing at the integration worktree.
 - `git -C <repo-root> log <base>..feat/<feature> --oneline` shows at least one shard commit (feature from plan.json, base from the payload or `git symbolic-ref`).
 - `git -C <repo-root> diff --stat <base>...feat/<feature>` touches ONLY files declared in plan.json's shards (union across stages). Any file outside the declared set is a HALT with the file named.
 
@@ -31,7 +32,7 @@ You are read-only: do not edit files, do not commit, do not kill processes, do n
 - The issue is CLOSED. The integration worktree and local feature branch are cleaned up (leftovers are worth naming in your reason but are not alone a HALT).
 - Runner outcome NO_GO: read the promotion log, HALT with the executor's stated reason and the state it left things in (branch pushed? PR open? CI failing?) — a NO_GO with everything parked safely is the executor's judgment working; your reason is the human's briefing.
 
-For ESCALATED, ENGINE_DIED, or TIMEOUT in ANY phase: HALT, but first look — read the tail of the engine log and any escalation payloads, and say in your reason what actually happened and where the human should look.
+For ESCALATED, ENGINE_DIED, or TIMEOUT in ANY phase: HALT, but first look — read `state/escalated.json` (every escalation path writes it; the payload names the phase, round, and feedback), the tail of the engine log, and say in your reason what actually happened and where the human should look.
 
 ## Output
 

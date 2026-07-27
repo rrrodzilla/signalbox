@@ -161,7 +161,7 @@ subscribes = ["shard.review.raw"]
 [[sinks]]
 name = "escalations"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "shard.escalated", "--", "jq", "-r", "\"[shard \\(.current.branch)] ESCALATED after \\(.round) rounds; stage stalls until a human resolves the branch\""]
+args = ["-s", "shard.escalated", "--", "__SIGNALBOX_ROOT__/bin/escalate-mark.sh", "shard"]
 subscribes = ["shard.escalated"]
 
 [[sinks]]

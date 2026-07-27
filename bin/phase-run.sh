@@ -32,25 +32,32 @@ SIGNALBOX_ISSUE="$ISSUE" emergent --config "$ROOT/$CFG" >"$LOG" 2>&1 &
 PID=$!
 echo "[pipeline] $PHASE engine up (pid $PID), watching artifacts" >&2
 
+# Every terminal condition is a DISK ARTIFACT (issue #1): the engine's
+# redirected stdout is buffered, so narration lines (GATE GREEN, ESCALATED)
+# can sit unflushed until the engine exits — polling $LOG for them deadlocks
+# a successful phase into its timeout. The log is kept for humans and the
+# operator's tail; nothing here greps it.
+fresh() { [ -f "$1" ] && [ "$1" -nt "$STAMP" ]; }
+
 OUTCOME="TIMEOUT"
 SECS=0
 while [ "$SECS" -lt "$TIMEOUT" ]; do
     kill -0 "$PID" 2>/dev/null || { OUTCOME="ENGINE_DIED"; break; }
+    if fresh "$ROOT/state/escalated.json"; then OUTCOME="ESCALATED"; break; fi
     case "$PHASE" in
         plan)
-            [ "$ROOT/plan.json" -nt "$STAMP" ] && { OUTCOME="ARTIFACT"; break; }
-            grep -q "ESCALATED" "$LOG" && { OUTCOME="ESCALATED"; break; }
+            fresh "$ROOT/plan.json" && { OUTCOME="ARTIFACT"; break; }
             ;;
         implement)
-            grep -q "GATE GREEN" "$LOG" && { OUTCOME="ARTIFACT"; break; }
-            grep -qiE "escalated" "$LOG" && { OUTCOME="ESCALATED"; break; }
+            if fresh "$ROOT/state/gate.json"; then
+                V="$(jq -r '.verdict // empty' "$ROOT/state/gate.json" 2>/dev/null)"
+                if [ "$V" = "GREEN" ]; then OUTCOME="ARTIFACT"; else OUTCOME="GATE_RED"; fi
+                break
+            fi
             ;;
         review)
-            [ -f "$ROOT/results/CR.md" ] && [ "$ROOT/results/CR.md" -nt "$STAMP" ] \
-                && { OUTCOME="ARTIFACT"; break; }
-            [ -f "$ROOT/state/pending.json" ] && [ "$ROOT/state/pending.json" -nt "$STAMP" ] \
-                && { OUTCOME="PARKED"; break; }
-            grep -q "ESCALATED" "$LOG" && { OUTCOME="ESCALATED"; break; }
+            fresh "$ROOT/results/CR.md" && { OUTCOME="ARTIFACT"; break; }
+            fresh "$ROOT/state/pending.json" && { OUTCOME="PARKED"; break; }
             ;;
     esac
     sleep 5

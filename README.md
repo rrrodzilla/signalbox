@@ -28,10 +28,12 @@ seed ──> review.requested ──> reviewer (codex exec, read-only) ──> r
                  │                                    │                               │
                  │                              review.approved            review.changes_requested
                  │                                    │                               │
-                 │                            promoter sink                ┌──────────┴──────────┐
-                 │                       (PROMOTION_READY → CR.md)    round-guard         escalation-guard
-                 │                                                      (round < 4)         (round >= 4)
-                 │                                                          │                     │
+                 │                               docs-syncer                ┌──────────┴──────────┐
+                 │                                    │               round-guard         escalation-guard
+                 │                              docs.synced              (round < 4)         (round >= 4)
+                 │                                    │                     │                     │
+                 │                            promoter sink                │                     │
+                 │                       (PROMOTION_READY → CR.md)          │                     │
                  └────────────── fixer (claude -p, acceptEdits) <── fix.requested          review.escalated
 ```
 
@@ -144,9 +146,9 @@ The trail spans every engine and prints one line per event: timestamp, topic, so
 
 ## Pipeline (`pipeline.toml`): Fable operates the phase seams
 
-`SIGNALBOX_ISSUE=<n> emergent --config pipeline.toml` runs the whole per-feature path (plan → implement → review → **promote**) as one engine. The delegation boundary is explicit: a regular PR and merge after green CI is the workflow's job (headless Fable pushes the branch, opens the PR, watches checks, squash-merges on its own go/no-go judgment, cleans up; NO_GO leaves everything parked safely for one human look). Only **releases** (version bumps, tags, publishes) are gated on the human, and the promotion hands release-relevant consequences (like plan-declared breaking changes) off as a PR comment. Each phase still runs as its own engine: the phase-runner launches it as a child, watches **disk artifacts** (never engine claims) for the terminal condition (fresh `plan.json`, fresh `state/gate.json`, `CR.md`, or `pending.json`), then stops it gracefully by PID so its event trail flushes.
+`SIGNALBOX_ISSUE=<n> emergent --config pipeline.toml` runs the whole per-feature path (plan → implement → review → **promote**) as one engine. The delegation boundary is explicit: a regular PR and merge after green CI is the workflow's job (headless Fable pushes the branch, opens the PR, watches checks, squash-merges on its own go/no-go judgment, cleans up; NO_GO leaves everything parked safely for one human look). Only **releases** (version bumps, tags, publishes) are gated on the human, and the promotion hands release-relevant consequences (like plan-declared breaking changes) off as a PR comment. Vault-doc maintenance is no longer part of that handoff: the review pipeline has already done it before the PR. Each phase still runs as its own engine: the phase-runner launches it as a child, watches **disk artifacts** (never engine claims) for the terminal condition (fresh `plan.json`, fresh `state/gate.json`, `CR.md`, or `pending.json`; an unparked review also records `state/docs-sync.json` before `CR.md` can land), then stops it gracefully by PID so its event trail flushes.
 
-Between phases sits the operator: headless Fable, applying the phantom-run discipline as topology. It never trusts the runner's reported outcome. It re-verifies first-hand (plan.json shape and scope notes; branch commits exist and the diff touches *only* the shard-declared files; CR.md carries the sentinel) and emits `PROCEED` or `HALT` with a reason that doubles as the pipeline's narration. Only `PROCEED` re-enters the phase loop, so the advance gate is topological; an unparseable operator verdict fails safe to `HALT`. Terminals: `PIPELINE COMPLETE` (merged, or parked at the situational gate with the approval command in the reason; the gate parking is the system working, not a failure) or `PIPELINE HALTED` naming the phase, the runner outcome, and what the operator actually found.
+Between phases sits the operator: headless Fable, applying the phantom-run discipline as topology. It never trusts the runner's reported outcome. It re-verifies first-hand (plan.json shape and scope notes; branch commits exist and the diff touches *only* the shard-declared files; CR.md carries the sentinel; `state/docs-sync.json` is fresh and has `status: "OK"` before promote) and emits `PROCEED` or `HALT` with a reason that doubles as the pipeline's narration. A docs no-op is still evidence, not absence: `updated: []` is valid when the artifact records it. Only `PROCEED` re-enters the phase loop, so the advance gate is topological; an unparseable operator verdict fails safe to `HALT`. Terminals: `PIPELINE COMPLETE` (merged, or parked at the situational gate with the approval command in the reason; the gate parking is the system working, not a failure) or `PIPELINE HALTED` naming the phase, the runner outcome, and what the operator actually found.
 
 ## Watching a run (`bin/watch.sh`)
 
@@ -164,6 +166,8 @@ Planning is part of the workflow, not a manual step before it. `SIGNALBOX_ISSUE=
 ## Init (`init.toml`): the vault is the shared memory
 
 How the harness knows a repo's architecture: it doesn't. The **vault does**. TRIP-init's contract is that `.claude/docs` symlinks into the user's Obsidian vault, and `ARCHI.md` / `ARCHI-rules.md` / `TESTING.md` are the repo's accumulated architectural memory. The init topology fills that vault: a one-shot seed fans out one read-only Codex researcher per document (architecture, rules, testing, each producing the complete file), and a dumb writer lands them. Non-destructive: TRIP-init gates `ARCHI.md` on explicit human approval, so an existing doc is never clobbered. The research arrives as a `.proposed.md` sibling to diff and adopt.
+
+Init seeds the memory; each feature now maintains it. After approval and before the promoter can write `CR.md`, `docs-syncer` reads the feature diff plus all three vault docs and rewrites in place only what that diff made stale. It always records the outcome in `state/docs-sync.json` — `updated`, `unchanged`, `status: "OK" | "ERROR"`, and the run identity — so a no-op is explicit and an error cannot masquerade as silence. The vault is git-excluded, so none of this leaks into the feature PR. This timing matters: the next `SIGNALBOX_ISSUE=<n>` run's planner reads the vault before any human release step happens. If the feature leaves stale architecture behind, the very next plan compounds it immediately; waiting for release is already too late.
 
 The topology has no terminal condition of its own because Emergent engines are daemons. `bin/init-run.sh` supervises it the same way `bin/phase-run.sh` supervises every pipeline phase: it watches the disk artifacts, never the engine's narration, then SIGTERMs the specific child PID so its trail flushes. A re-init's `.proposed.md` siblings count as landed, so the second run terminates too.
 

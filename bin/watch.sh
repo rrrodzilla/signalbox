@@ -49,6 +49,7 @@ ARTIFACTS = [
     "state/gate.json",
     "state/escalated.json",
     "state/pending.json",
+    "state/docs-sync.json",
     "results/CR.md",
     "state/pipeline-plan.stamp",
     "state/pipeline-implement.stamp",

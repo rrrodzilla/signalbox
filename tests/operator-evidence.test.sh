@@ -914,5 +914,53 @@ fi
 report_case "a changed gitlink is present evidence without blob claims" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
 
+# 19. Git imposes no encoding on a pathname, but JSON is UTF-8 and jq's --arg
+# substitutes U+FFFD for every byte that is not part of a valid sequence. Two
+# paths differing only in those bytes would then publish as one identical
+# string: one real file described twice, the other not at all, under an
+# exact-path claim. Each must instead stay reversible to its own exact bytes.
+setup_harness
+seed_plan "fixture-feature"
+BYTES_PATH_A=$'invalid-\xff.txt'
+BYTES_PATH_B=$'invalid-\xfe.txt'
+EXPECTED_B64_A="$(printf '%s' "$BYTES_PATH_A" | base64 | tr -d '\n')"
+EXPECTED_B64_B="$(printf '%s' "$BYTES_PATH_B" | base64 | tr -d '\n')"
+git_fixture "$REPO_ROOT_PATH" init -q -b main
+printf '%s\n' base >"$REPO_ROOT_PATH/base.txt"
+git_fixture "$REPO_ROOT_PATH" add base.txt
+git_fixture "$REPO_ROOT_PATH" commit -q -m base
+git_fixture "$REPO_ROOT_PATH" checkout -q -b feat/fixture-feature
+printf '%s\n' a >"$REPO_ROOT_PATH/$BYTES_PATH_A"
+printf '%s\n' b >"$REPO_ROOT_PATH/$BYTES_PATH_B"
+git_fixture "$REPO_ROOT_PATH" add -- "$BYTES_PATH_A" "$BYTES_PATH_B"
+git_fixture "$REPO_ROOT_PATH" commit -q -m "add non-utf8 paths"
+run_operator "implement" "$PROCEED_OUTPUT"
+BRANCH_EVIDENCE="$(branch_evidence_line)"
+OK=1
+if jq -e \
+        --arg a "$EXPECTED_B64_A" \
+        --arg b "$EXPECTED_B64_B" \
+        '([.files[] | .path_base64] | sort) == ([$a, $b] | sort)
+            and all(
+                .files[];
+                .path_encoding == "base64" and (has("path") | not)
+            )
+            and ([.tip_files[] | .path_base64] | sort) == ([$a, $b] | sort)
+            and all(
+                .tip_files[];
+                .present == true
+                    and .path_encoding == "base64"
+                    and (has("path") | not)
+                    and (has("pinned_read") | not)
+            )' \
+        <<<"$BRANCH_EVIDENCE" >/dev/null \
+    && read_only_git_rules \
+        "$ARGV_CAPTURE" "$INT_WT_PATH" "main" "feat/fixture-feature" 0 3 0 \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "paths JSON cannot carry stay distinct and byte-reversible" \
+    "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
+
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

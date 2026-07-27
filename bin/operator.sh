@@ -147,6 +147,38 @@ plain_path_token() {
     esac
 }
 
+# Git imposes no encoding on a pathname — any byte but NUL and `/` is legal —
+# while jq speaks UTF-8 and its --arg replaces every byte that is not part of a
+# valid sequence with U+FFFD. Two distinct paths differing only in such bytes
+# would therefore publish as one identical string, so the evidence's exact-path
+# claim would be false precisely where it matters: one real file would be
+# described twice and the other not at all. This emits the path fields for one
+# entry, so every published path stays reversible to the bytes git holds.
+#
+# The test is a round trip through jq itself rather than any separate notion of
+# validity: jq is the encoder whose fidelity is in question, so nothing else can
+# be authoritative about what survives it. The sentinel is what makes the
+# comparison exact — command substitution strips trailing newlines, and a path
+# may end in one — so only a genuine substitution reads as a mismatch. A path
+# that survives is published literally under `path`; one that does not is
+# published as base64 of its exact bytes under `path_base64`, marked by
+# `path_encoding` so a reader knows which field it is holding and can invert it.
+# Both forms are published output only: every git lookup uses the raw value.
+path_fields() {
+    local RAW="$1"
+    local ROUND_TRIP=""
+
+    ROUND_TRIP="$(jq -nr --arg path "$RAW" '$path + "."' 2>/dev/null || true)"
+    if [ "$ROUND_TRIP" = "$RAW." ]; then
+        jq -nc --arg path "$RAW" '{path: $path}'
+        return 0
+    fi
+    jq -nc \
+        --arg path_base64 "$(printf '%s' "$RAW" | base64 | tr -d '\n')" \
+        --arg path_encoding "base64" \
+        '{path_base64: $path_base64, path_encoding: $path_encoding}'
+}
+
 # The implement terminal's two mandatory checks — at least one shard commit,
 # and a diff confined to plan.json's declared files — are both ref-bearing, and
 # a rule is one exact command string. A base branch spelled with `;`, `&`, or
@@ -172,6 +204,7 @@ branch_evidence() {
     local DIFFSTAT=""
     local FILE_COUNT=0
     local FILE_PATH=""
+    local PATH_FIELDS=""
     local ENTRY_META=""
     local ENTRY_TYPE=""
     local ENTRY_OID=""
@@ -248,8 +281,14 @@ branch_evidence() {
     for FILE_PATH in ${CHANGED_PATHS[@]+"${CHANGED_PATHS[@]}"}; do
         [ -n "$FILE_PATH" ] || continue
         # The published list is encoded from the exact delimited value rather
-        # than re-split out of a rendering, so it stays the tree's own paths.
-        FILE_PATH_OBJECTS+=("$(jq -nc --arg path "$FILE_PATH" '$path')")
+        # than re-split out of a rendering, so it stays the tree's own paths. A
+        # path jq can carry verbatim stays a bare string here, as the file set
+        # has always read; one it cannot becomes the same marked object the tip
+        # entries use, which is what keeps two such paths distinguishable.
+        PATH_FIELDS="$(path_fields "$FILE_PATH")"
+        FILE_PATH_OBJECTS+=("$(
+            jq -c 'if has("path") then .path else . end' <<<"$PATH_FIELDS"
+        )")
         FILE_COUNT=$((FILE_COUNT + 1))
         if [ "$FILE_COUNT" -gt "$TIP_FILES_LIMIT" ]; then
             continue
@@ -270,9 +309,9 @@ branch_evidence() {
         )" || [ -z "$ENTRY_META" ]; then
             TIP_FILE_OBJECTS+=("$(
                 jq -nc \
-                    --arg path "$FILE_PATH" \
+                    --argjson path_fields "$PATH_FIELDS" \
                     --argjson present false \
-                    '{path: $path, present: $present}'
+                    '$path_fields + {present: $present}'
             )")
             continue
         fi
@@ -287,12 +326,11 @@ branch_evidence() {
             commit)
                 TIP_FILE_OBJECTS+=("$(
                     jq -nc \
-                        --arg path "$FILE_PATH" \
+                        --argjson path_fields "$PATH_FIELDS" \
                         --argjson present true \
                         --arg type "gitlink" \
                         --arg commit "$ENTRY_OID" \
-                        '{
-                            path: $path,
+                        '$path_fields + {
                             present: $present,
                             type: $type,
                             commit: $commit
@@ -303,10 +341,10 @@ branch_evidence() {
             *)
                 TIP_FILE_OBJECTS+=("$(
                     jq -nc \
-                        --arg path "$FILE_PATH" \
+                        --argjson path_fields "$PATH_FIELDS" \
                         --argjson present true \
                         --arg type "$ENTRY_TYPE" \
-                        '{path: $path, present: $present, type: $type}'
+                        '$path_fields + {present: $present, type: $type}'
                 )")
                 continue
                 ;;
@@ -321,12 +359,11 @@ branch_evidence() {
             # database can still say about it; it simply has no measurable size.
             TIP_FILE_OBJECTS+=("$(
                 jq -nc \
-                    --arg path "$FILE_PATH" \
+                    --argjson path_fields "$PATH_FIELDS" \
                     --argjson present true \
                     --arg type "blob" \
                     --arg blob "$BLOB" \
-                    '{
-                        path: $path,
+                    '$path_fields + {
                         present: $present,
                         type: $type,
                         blob: $blob
@@ -356,15 +393,14 @@ branch_evidence() {
         fi
         ENTRY="$(
             jq -nc \
-                --arg path "$FILE_PATH" \
+                --argjson path_fields "$PATH_FIELDS" \
                 --argjson present true \
                 --arg type "blob" \
                 --arg blob "$BLOB" \
                 --argjson size "$SIZE" \
                 --argjson lines "$LINES_JSON" \
                 --arg pinned_read "$PINNED_READ" \
-                '{
-                    path: $path,
+                '$path_fields + {
                     present: $present,
                     type: $type,
                     blob: $blob,

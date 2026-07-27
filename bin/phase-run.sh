@@ -4,12 +4,16 @@
 #
 # Runs ONE phase engine from the run's config as a child process, records its
 # PID in the run's state, and watches run-scoped DISK ARTIFACTS (never engine
-# claims) for the phase's terminal condition. It then stops the child gracefully
-# (SIGTERM by PID — never pkill by name, other engines may be alive) so its event
-# trail flushes. The same shutdown runs from an EXIT/INT/TERM trap, so a runner
-# killed mid-watch still reaps its engine and clears its PID file rather than
-# orphaning both. The runner reports what it OBSERVED; judging whether the phase
-# actually succeeded is the operator's job.
+# claims) for the phase's terminal condition. It then stops the child
+# gracefully (SIGTERM by PID — never pkill by name, other engines may be alive)
+# so its event trail flushes. Exception: at a review ARTIFACT terminal with
+# docs-sync still in flight, ownership passes to bin/engine-reaper.sh so the
+# sync can finish after the pipeline advances; the reaper performs the same
+# PID-targeted graceful stop under a hard deadline. The normal shutdown also
+# runs from an EXIT/INT/TERM trap, so a runner killed mid-watch still reaps its
+# engine and clears its PID file rather than orphaning both. The runner reports
+# what it OBSERVED; judging whether the phase actually succeeded is the
+# operator's job.
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
@@ -109,12 +113,30 @@ while [ "$SECS" -lt "$TIMEOUT" ]; do
     SECS=$((SECS + 5))
 done
 
-# Let in-flight sinks finish narrating, then stop ONLY our child, gracefully.
-if kill -0 "$PID" 2>/dev/null; then
-    sleep 5
+if [ "$PHASE" = "review" ] \
+    && [ "$OUTCOME" = "ARTIFACT" ] \
+    && kill -0 "$PID" 2>/dev/null \
+    && ! fresh "$RUN_DIR/state/docs-sync.json"; then
+    # Disarm shutdown before transferring the live PID: this runner's normal
+    # exit must not terminate the engine now owned by the detached reaper.
+    trap - EXIT INT TERM
+    TRANSFERRED_PID="$PID"
+    # Both redirections are load-bearing: stdin is the event payload pipe, so a
+    # detached descendant inheriting it would hold EOF open and stall the
+    # exec-handler; all reaper narration belongs in the phase log.
+    setsid "$(dirname "${BASH_SOURCE[0]}")/engine-reaper.sh" \
+        "$PID" "$PID_FILE" "$RUN_DIR/state/docs-sync.json" "$STAMP" 960 \
+        </dev/null >>"$LOG" 2>&1 &
+    PID=""
+    echo "[pipeline] review terminal reached with docs-sync in flight; handed engine pid $TRANSFERRED_PID to deferred reaper (deadline: 960s)" >&2
+else
+    # Let in-flight sinks finish narrating, then stop ONLY our child, gracefully.
+    if kill -0 "$PID" 2>/dev/null; then
+        sleep 5
+    fi
+    stop_engine
+    echo "[pipeline] $PHASE engine stopped, outcome: $OUTCOME" >&2
 fi
-stop_engine
-echo "[pipeline] $PHASE engine stopped, outcome: $OUTCOME" >&2
 
 # The operator's mandatory review check is `git status --porcelain` in the
 # integration worktree, which lives OUTSIDE the operator session's checkout

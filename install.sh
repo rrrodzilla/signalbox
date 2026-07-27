@@ -114,6 +114,7 @@ need gh       "plan seed and promotion use the GitHub CLI"
 need jq       "every topology transform is jq"
 need python3  "the shared sink service and dashboard are python3"
 need curl     "topology sinks POST their events to the shared sink service"
+need setsid   "the phase runner detaches its deferred engine reaper with setsid"
 if [ -z "$GATE_CMD" ]; then
     GATE_CMD="$(detect_gate "$TARGET" || true)"
 fi

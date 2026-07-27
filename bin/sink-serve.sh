@@ -889,8 +889,13 @@ function addEvent(topic, dataText) {
   const div = document.createElement("div");
   div.dataset.key = key;
   div.hidden = selectedKey !== "all" && selectedKey !== key;
+  // exec.error fires on any stderr output, even from healthy commands whose
+  // diagnostics deliberately go to stderr; only a non-zero (or absent, e.g.
+  // timeout/spawn-failure) exit code marks a genuine failure.
+  const benignExecError = t === "exec.error" && pl && pl.exit_code === 0;
   div.className = "ev " + colourFor(key) +
-    (t.includes("error") || t.includes("escalated") || t.includes("halted") ? " err" : "");
+    ((t.includes("error") && !benignExecError) ||
+      t.includes("escalated") || t.includes("halted") ? " err" : "");
   const body = obj && obj.payload !== undefined ? JSON.stringify(obj.payload, null, 1)
              : obj ? JSON.stringify(obj, null, 1) : dataText;
   const candidate = obj && obj.sent_at ? new Date(obj.sent_at) : new Date();

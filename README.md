@@ -45,8 +45,9 @@ cargo install emergent-engine   # or a prebuilt binary: github.com/Govcraft/emer
 emergent marketplace install exec-source exec-handler exec-sink stream-runner
 
 # 1. install the harness (never committed to the target; --vault flags are
-#    only needed the first time on a repo that has never used TRIP)
-./install.sh ~/code/my-repo --vault ~/my-vault  # [--folder TRIP/my-repo]
+#    only needed the first time on a repo that has never used TRIP;
+#    --gate '<command>' overrides automatic gate detection)
+./install.sh ~/code/my-repo --vault ~/my-vault  # [--folder TRIP/my-repo] [--gate '<command>']
 
 # 2. fill the vault, once per repo (three researchers write ARCHI.md,
 #    ARCHI-rules.md, TESTING.md; existing docs get .proposed.md siblings)
@@ -117,7 +118,7 @@ plan.load ─> stream-runner (stages, ack-gated = sequential dependencies)
         APPROVED ─> shard moved pending → done, loops back to shard.built
    shard.done ─> collector (flock barrier: all shards arrived?) ─> stage.done
    stage.done ─> merger (rebase + ff-merge each branch, remove worktree) ─> stage.ack
-plan.done ─> finisher (clippy + nextest in the integration worktree)
+plan.done ─> finisher (configured gate in the integration worktree)
 ```
 
 - **The plan is the DAG**: `plan.json` groups shards into stages. Shards within a stage must be conflict-free (disjoint files); that's the planner's contract. Stages express the sequential dependencies. A single-shard stage is the same code path, so "sequential" is just the degenerate case of "concurrent".
@@ -167,4 +168,4 @@ Every worktree the harness creates (integration and per-shard) gets the TRIP `.c
 
 The install works on a repo that has **never used TRIP**: preflight fails fast on missing tooling (emergent + the exec/stream primitives, codex, claude, gh auth, jq, a git signing key in the target repo) instead of failing twenty minutes into a run, and `--vault <obsidian-vault-root> [--folder TRIP/<repo>]` performs TRIP-init's own vault wiring (vendored `bin/vault-setup.sh`, idempotent): it creates `<vault>/<folder>/{1-plans,2-changelog,3-code-review,4-unit-tests,6-memo}`, links `.claude/docs` there absolutely, and migrates a pre-existing real `docs/` directory if one exists. A repo already TRIP-wired needs no flags.
 
-Paths are baked, engines are namespaced by repo (`<repo>-pipeline`, `<repo>-plan`, `<repo>-implement-stream`, `<repo>-review-loop`, `<repo>-init`, so no socket or event-log collisions), and the generated `_env.sh` derives everything from location: feature branch `feat/<plan.json .feature>`, worktrees in the TRIP `<repo>-wt/` home, gate at the workspace root, fresh per-repo readiness/assessment state (autonomy re-earned from R2 per repo). Order of operations in a new repo: run `init.toml` once to fill the vault, then per feature just `SIGNALBOX_ISSUE=<n> emergent --config pipeline.toml`. The phase topologies remain individually runnable for surgical reruns.
+Paths are baked, engines are namespaced by repo (`<repo>-pipeline`, `<repo>-plan`, `<repo>-implement-stream`, `<repo>-review-loop`, `<repo>-init`, so no socket or event-log collisions), and the generated `_env.sh` derives everything from location: feature branch `feat/<plan.json .feature>`, worktrees in the TRIP `<repo>-wt/` home, gate at the workspace root, fresh per-repo readiness/assessment state (autonomy re-earned from R2 per repo). The installer also records the gate command as `GATE_CMD` in that generated `_env.sh`, where it is auditable and hand-editable. `--gate '<command>'` overrides detection; otherwise the first matching declaration wins: a `ci` task in `Taskfile.yml` or `Taskfile.yaml` (`task ci`), a root `Cargo.toml` (`cargo clippy --all-targets -q && cargo nextest run`), a `ci` recipe in `justfile` (`just ci`), a `ci:` target in `Makefile` (`make ci`), or a `test` script in `package.json` (`pnpm test`, `yarn test`, or `npm test`, selected by lockfile). If no gate can be detected, preflight fails with instructions to re-run using `--gate '<command>'`. Order of operations in a new repo: run `init.toml` once to fill the vault, then per feature just `SIGNALBOX_ISSUE=<n> emergent --config pipeline.toml`. The phase topologies remain individually runnable for surgical reruns.

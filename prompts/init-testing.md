@@ -6,10 +6,19 @@ tree is green.
 
 Cover, with concrete file paths:
 
-1. **The gate** — the exact commands that must pass before promotion
-   (check CI workflows, justfile/Makefile, CLAUDE.md). If the repo shows no
-   explicit gate, state the workspace defaults: `cargo clippy --all-targets`
-   clean and `cargo nextest run` passing.
+1. **The gate** — the repo's actual commands that must pass before promotion,
+   with file evidence from Taskfile/justfile/Makefile targets, CI workflows,
+   `package.json` scripts, `CLAUDE.md`, or the language toolchain's real
+   convention. If the repo declares no mechanical gate at all, state that
+   plainly instead of inventing one. Also record what `install.sh` detection
+   would choose, first match wins: a `ci` task in `Taskfile.yml` or
+   `Taskfile.yaml` → `task ci`; a root `Cargo.toml` → `cargo clippy
+   --all-targets -q && cargo nextest run`; a `ci` recipe in `justfile` →
+   `just ci`; a `ci:` target in `Makefile` → `make ci`; or a `test` script in
+   `package.json` → `pnpm test`, `yarn test`, or `npm test`, selected by
+   lockfile. Explicitly flag any mismatch between that detected command and
+   the repo's real gate: the harness runs the detected command, so a human
+   must resolve the defect.
 2. **Test layout** — unit tests vs integration tests vs doctests: where each
    lives, with examples.
 3. **Test patterns** — fixtures, builders, helpers the tests share; how

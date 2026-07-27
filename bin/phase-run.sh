@@ -116,5 +116,18 @@ fi
 stop_engine
 echo "[pipeline] $PHASE engine stopped, outcome: $OUTCOME" >&2
 
+# The operator's mandatory review check is `git status --porcelain` in the
+# integration worktree, which lives OUTSIDE the operator session's checkout
+# (issue #12). Record it here, at the review terminal, the same way every other
+# terminal condition is a disk artifact: the operator then verifies recorded
+# evidence, and a permission regression degrades to "evidence missing -> HALT"
+# instead of halting every run. Never fatal — this runner reports what it
+# observed; judging it is the operator's job.
+if [ "$PHASE" = "review" ]; then
+    "$(dirname "${BASH_SOURCE[0]}")/worktree-evidence.sh" "$INT_WT" \
+        >"$RUN_DIR/state/worktree.json" \
+        || echo "[pipeline] worktree evidence unavailable for $INT_WT" >&2
+fi
+
 jq -c --arg outcome "$OUTCOME" --arg log "$LOG" \
     '. + {outcome: $outcome, log: $log}' <<<"$PAYLOAD"

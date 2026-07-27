@@ -99,13 +99,27 @@ subscribes = ["phase.verified"]
 [[sinks]]
 name = "completion"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "pipeline.complete", "--", "jq", "-r", "\"PIPELINE COMPLETE issue #\\(.issue)\\(if .parked then \\\" — PARKED FOR HUMAN APPROVAL\\\" else \\\" — MERGED (release step is yours)\\\" end)\\n\\(.reason)\\ntrail: bin/audit.sh \\(.correlation_id)\""]
+args = ["-s", "pipeline.complete", "--", "jq", "-r", "\"PIPELINE COMPLETE issue #\\(.issue)\\(if .parked then \" — PARKED FOR HUMAN APPROVAL\" else \" — MERGED (release step is yours)\" end)\\n\\(.reason)\\ntrail: bin/audit.sh \\(.correlation_id)\""]
 subscribes = ["pipeline.complete"]
 
 [[sinks]]
 name = "halts"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "pipeline.halted", "--", "jq", "-r", "\"PIPELINE HALTED at \\(.phase) (runner outcome: \\(.outcome)) issue #\\(.issue)\\n\\(.reason)\""]
+subscribes = ["pipeline.halted"]
+
+# Buffered engine stdout can hide terminal narration, so supervisors also verify
+# completion and halt state from a disk artifact.
+[[sinks]]
+name = "record-complete"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "pipeline.complete", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/terminal-record.sh", "complete"]
+subscribes = ["pipeline.complete"]
+
+[[sinks]]
+name = "record-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "pipeline.halted", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/terminal-record.sh", "halted"]
 subscribes = ["pipeline.halted"]
 
 [[sinks]]

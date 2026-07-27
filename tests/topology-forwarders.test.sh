@@ -320,6 +320,36 @@ elif check == "unique":
             errors.append(f"{name} duplicate sink names={duplicates!r}")
     fail(errors)
 
+elif check == "jq":
+    errors = []
+    programs_found = 0
+    for name in topology_names:
+        topology = load(name)
+        for node_type in ("sources", "handlers", "sinks"):
+            for node in topology.get(node_type, []):
+                args = node.get("args", [])
+                if "--" not in args:
+                    continue
+                separator = args.index("--")
+                if separator + 1 >= len(args) or args[separator + 1] != "jq":
+                    continue
+                programs_found += 1
+                program = args[-1]
+                result = subprocess.run(
+                    ["jq", "-r", program],
+                    input="{}",
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 3:
+                    first_stderr_line = result.stderr.splitlines()[0]
+                    errors.append(
+                        f"{name}:{node.get('name')}: {first_stderr_line}"
+                    )
+    if programs_found == 0:
+        errors.append("no jq programs found")
+    fail(errors)
+
 else:
     raise SystemExit(f"unknown check: {check}")
 PYEOF
@@ -371,6 +401,12 @@ run_check unique
 OK=1
 [ "$RUN_STATUS" -eq 0 ] && OK=0
 report_case "every sink name is unique within its topology" "$OK" \
+    "status=$RUN_STATUS $(head -c 300 "$CHECK_STDERR")"
+
+run_check jq
+OK=1
+[ "$RUN_STATUS" -eq 0 ] && OK=0
+report_case "every topology jq program compiles" "$OK" \
     "status=$RUN_STATUS $(head -c 300 "$CHECK_STDERR")"
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"

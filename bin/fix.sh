@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fixer handler: stdin = fix.requested payload {verdict, review, round, workdir, thread_id}
-# stdout = review.requested payload for the next round {workdir, round+1, feedback, thread_id}
+# stdout = review.requested payload for the next round
+#   {workdir, round+1, feedback, thread_id, correlation_id, provenance}
 #
 # Runs headless Claude in $workdir to address the reviewer's feedback, then
 # re-emits a review request carrying that feedback so the re-review can
@@ -8,6 +9,7 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 PAYLOAD="$(cat)"
 
@@ -57,6 +59,7 @@ env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     --model opus \
     --permission-mode acceptEdits \
     >"$RUN_DIR/logs/fix-round-$ROUND.log" 2>&1
+stamp_provenance "logs/fix-round-$ROUND.log" claude opus ""
 
 # Target mode ($WORKDIR = the integration worktree): fix edits must become
 # commits on the feature branch — uncommitted worktree state is invisible to
@@ -68,10 +71,12 @@ if [ "$(git rev-parse --show-toplevel 2>/dev/null || true)" = "$INT_WT" ] \
 fi
 
 NEXT=$((ROUND + 1))
+PROVENANCE="$(provenance_object claude opus "")"
 jq -n \
     --arg workdir "$WORKDIR" \
     --argjson round "$NEXT" \
     --arg feedback "$REVIEW" \
     --arg thread_id "$THREAD_ID" \
     --arg cid "$CID" \
-    '{workdir: $workdir, round: $round, feedback: $feedback, thread_id: $thread_id, correlation_id: $cid}'
+    --argjson provenance "$PROVENANCE" \
+    '{workdir: $workdir, round: $round, feedback: $feedback, thread_id: $thread_id, correlation_id: $cid, provenance: $provenance}'

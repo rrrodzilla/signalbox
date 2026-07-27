@@ -19,7 +19,8 @@
 #             warning on stderr rather than coerced
 #   install_lock <harness-root> shared|exclusive
 #     stdout: empty
-#     status: 0 once the lock is held on fd 9; 1 with a diagnostic on stderr
+#     status: 0 once <harness-root>/.install.lock is held on fd 9; 1 with a
+#             diagnostic on stderr. Creates nothing under state/.
 #   install_unlock
 #     stdout: empty
 #     status: always 0
@@ -138,13 +139,17 @@ live_runs() (
 # A liveness scan is only a snapshot: an engine launched after the installer
 # scanned and before it finished rebuilding would be invisible to the scan and
 # would then run under a half-refreshed bin/. Reinstall and launcher startup
-# therefore serialize on one lock file, kept under state/ because reinstall
-# preserves that directory. Launchers hold it shared — they never exclude each
-# other — for their startup window alone, from before they inspect existing run
-# state until launch.json records the new engine; the installer holds it
-# exclusively from before its liveness scan until the refresh is complete. So a
-# launcher either recorded its engine in time for the scan to refuse, or waits
-# for a finished harness. Fd 9 is this repo's lock-descriptor convention.
+# therefore serialize on one lock file. It sits at the harness root, not under
+# state/: reinstall must not touch runs/, state/, logs/ or results/ at all, and
+# coordination metadata is the installer's, not the repo's earned ledger. The
+# root itself survives a refresh — only bin/, prompts/ and templates/ are
+# rebuilt — so the lock keeps its identity across reinstalls. Launchers hold it
+# shared — they never exclude each other — for their startup window alone, from
+# before they inspect existing run state until launch.json records the new
+# engine; the installer holds it exclusively from before its liveness scan
+# until the refresh is complete. So a launcher either recorded its engine in
+# time for the scan to refuse, or waits for a finished harness. Fd 9 is this
+# repo's lock-descriptor convention.
 SIGNALBOX_LOCK_HELD=0
 
 install_lock() {
@@ -168,10 +173,11 @@ install_lock() {
         return 1
     fi
     [[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || WAIT_SECONDS=60
-    LOCK_FILE="$ROOT_DIR/state/install.lock"
+    LOCK_FILE="$ROOT_DIR/.install.lock"
     # Append mode, never truncate: the file is a lock, and a concurrent holder
-    # has it open. Nothing is ever written to it.
-    if ! mkdir -p "$ROOT_DIR/state" 2>/dev/null \
+    # has it open. Nothing is ever written to it. Only the harness root is
+    # created — never state/, which this feature must leave alone.
+    if ! mkdir -p "$ROOT_DIR" 2>/dev/null \
         || ! touch "$LOCK_FILE" 2>/dev/null; then
         printf 'error: cannot create the install lock: %s\n' "$LOCK_FILE" >&2
         return 1

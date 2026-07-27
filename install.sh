@@ -29,10 +29,12 @@
 #   --reinstall
 #             Refresh an existing harness in place after refusing when a
 #             launcher-recorded run is live. The refusal check and the refresh
-#             run under an exclusive state/install.lock that bin/run.sh also
-#             takes, so no run can start in between. Preserves runs/ and the
-#             state/ readiness ledger. On a never-installed target, acts like
-#             a plain install.
+#             run under an exclusive <dest>/.install.lock that bin/run.sh also
+#             takes, and the installed bin/ is withdrawn and rescanned before
+#             anything is destroyed, so no run can start in between — including
+#             from a harness installed before the lock existed. Preserves runs/
+#             and the state/ readiness ledger. On a never-installed target,
+#             acts like a plain install.
 #   --vault   Obsidian vault root; wires .claude/docs into it (idempotent,
 #             migrates a pre-existing real docs/ dir). Default folder:
 #             TRIP/<repo-name>. Without --vault the repo must already be
@@ -111,6 +113,19 @@ REPO="$(basename "$TARGET")"
 DEST="$TARGET/.claude/emergent"
 REINSTALL_ACTIVE=0
 
+refuse_live_runs() {
+    local LIVE_LIST="$1" LIVE_SLUG LIVE_PID LIVE_PHASE
+
+    echo "error: $DEST has live launcher-recorded runs; refusing to refresh in place" >&2
+    while IFS=$'\t' read -r LIVE_SLUG LIVE_PID LIVE_PHASE; do
+        printf '       live run: slug=%s pid=%s phase=%s\n' \
+            "$LIVE_SLUG" "$LIVE_PID" "$LIVE_PHASE" >&2
+        printf '       stop this run with: kill -TERM %s\n' "$LIVE_PID" >&2
+    done <<<"$LIVE_LIST"
+    echo "       inspect all runs with: $DEST/bin/run.sh --list" >&2
+    exit 1
+}
+
 # Resolve install mode before preflight or vault wiring: vault-setup.sh can
 # migrate a real docs/ directory, so no mutation may precede this decision.
 if [ -e "$DEST" ]; then
@@ -133,19 +148,15 @@ if [ -e "$DEST" ]; then
     # same lock shared across its startup window, so no engine can be launched
     # into the gap between the scan below and the rebuild further down: a
     # launcher either recorded its run before the scan, and is refused here, or
-    # blocks until the refreshed harness is whole.
+    # blocks until the refreshed harness is whole. The lock binds only launchers
+    # that take it, so the harness already installed here — which on the first
+    # upgrade predates the lock entirely — is excluded separately, by
+    # withdrawing its entry point before the rebuild (see below).
     install_lock "$DEST" exclusive || exit 1
     trap install_unlock EXIT
     LIVE_RUNS="$(live_runs "$DEST/runs")"
     if [ -n "$LIVE_RUNS" ]; then
-        echo "error: $DEST has live launcher-recorded runs; refusing to refresh in place" >&2
-        while IFS=$'\t' read -r LIVE_SLUG LIVE_PID LIVE_PHASE; do
-            printf '       live run: slug=%s pid=%s phase=%s\n' \
-                "$LIVE_SLUG" "$LIVE_PID" "$LIVE_PHASE" >&2
-            printf '       stop this run with: kill -TERM %s\n' "$LIVE_PID" >&2
-        done <<<"$LIVE_RUNS"
-        echo "       inspect all runs with: $DEST/bin/run.sh --list" >&2
-        exit 1
+        refuse_live_runs "$LIVE_RUNS"
     fi
 
     # The generated assignment is printf %q output. Evaluate only that single
@@ -204,7 +215,32 @@ elif [ ! -e "$TARGET/.claude/docs" ]; then
 fi
 
 if [ "$REINSTALL_ACTIVE" -eq 1 ]; then
-    rm -rf -- "$DEST/bin" "$DEST/prompts" "$DEST/templates"
+    # Withdraw the launcher before destroying anything. The lock above only
+    # binds launchers that take it, and the harness installed here may well be
+    # an older one that does not — every first upgrade is such a harness. So
+    # the entry point is removed from its path in a single rename: after it,
+    # `<dest>/bin/run.sh` cannot be started at all, and a stale launcher
+    # already inside its startup window cannot reach an engine either, because
+    # it still has to exec bin/ports.sh and bin/check-placeholders.sh from the
+    # directory that just vanished — both run before it spawns emergent.
+    # Then rescan, since a stale launcher may have recorded its run after the
+    # first scan: if it did, bin/ goes straight back and the refusal names it,
+    # leaving the harness exactly as it was found. What no installer-side
+    # mechanism can cover is a pre-lock launcher that had already passed its
+    # last bin/ exec when the rename landed and records launch.json after this
+    # rescan reads it; a lock-aware launcher has no such window.
+    STAGED_BIN="$DEST/.bin.reinstalling.$$"
+    if [ -d "$DEST/bin" ]; then
+        mv -- "$DEST/bin" "$STAGED_BIN"
+        LIVE_RUNS="$(live_runs "$DEST/runs")"
+        if [ -n "$LIVE_RUNS" ]; then
+            mv -- "$STAGED_BIN" "$DEST/bin"
+            refuse_live_runs "$LIVE_RUNS"
+        fi
+    fi
+    # Any other staged directory is the debris of an installer that died
+    # holding the lock this one now holds; bin/ is rebuilt from source anyway.
+    rm -rf -- "$DEST"/.bin.reinstalling.* "$DEST/bin" "$DEST/prompts" "$DEST/templates"
 fi
 
 mkdir -p "$DEST/bin" "$DEST/prompts" "$DEST/state" "$DEST/logs" "$DEST/results" \

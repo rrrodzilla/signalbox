@@ -185,6 +185,8 @@ if [ "$RUN_STATUS" -eq 0 ] \
     && cmp -s "$FIXTURE_DEST/state/readiness.json" "$EXPECTED_READINESS" \
     && [ -s "$FIXTURE_DEST/bin/run.sh" ] \
     && [ -s "$FIXTURE_DEST/pipeline.toml" ] \
+    && [ -e "$FIXTURE_DEST/.install.lock" ] \
+    && [ ! -e "$FIXTURE_DEST/state/install.lock" ] \
     && ! grep -q 'INSTALL_REINSTALL_SENTINEL' "$FIXTURE_DEST/bin/run.sh" \
     && ! grep -q 'INSTALL_REINSTALL_SENTINEL' "$FIXTURE_DEST/pipeline.toml" \
     && grep -q '^refreshed:' "$OUT" \
@@ -247,7 +249,7 @@ report_case "reinstall flag performs a plain install on a fresh target" "$OK" \
 # shared, and reinstall must refuse without touching the tree — the run it is
 # about to record would otherwise be invisible to a scan that already ran.
 # Once the launcher releases, the refresh proceeds normally.
-LOCK_FILE="$FIXTURE_DEST/state/install.lock"
+LOCK_FILE="$FIXTURE_DEST/.install.lock"
 LAUNCHER_READY="$FIXTURE_HOME/launcher.ready"
 ( exec 9>>"$LOCK_FILE"; flock -s 9; : >"$LAUNCHER_READY"; sleep 60 ) &
 LAUNCHER_PID=$!
@@ -278,6 +280,51 @@ if [ "$BLOCKED_STATUS" -eq 1 ] \
 fi
 report_case "a launcher's startup lock blocks reinstall until it releases" "$OK" \
     "blocked-status=$BLOCKED_STATUS intact=$BLOCKED_INTACT named=$BLOCKED_NAMED release-status=$RUN_STATUS"
+
+# 9. Stale launcher: a harness installed before the lock existed starts runs
+# without taking it, so one can record an engine after the first liveness scan.
+# The gh stub stands in for that launcher — install.sh runs gh during preflight,
+# after the scan and before the entry point is withdrawn. The rescan that
+# follows the withdrawal must catch the run, refuse, and put bin/ back untouched.
+sleep 60 &
+STALE_PID=$!
+CHILD_PIDS+=("$STALE_PID")
+STALE_START="$(proc_identity "$STALE_PID")"
+mkdir -p "$FIXTURE_DEST/runs/issue-77"
+export STALE_LAUNCH_DEST="$FIXTURE_DEST/runs/issue-77/launch.json"
+export STALE_LAUNCH_SRC="$FIXTURE_HOME/stale-launch.json"
+jq -n \
+    --arg slug issue-77 \
+    --argjson pid "$STALE_PID" \
+    --arg start_id "$STALE_START" \
+    --arg phase pipeline \
+    --argjson issue 77 \
+    '{slug: $slug, pid: $pid, start_id: $start_id, phase: $phase, issue: $issue}' \
+    >"$STALE_LAUNCH_SRC"
+cat >"$FIXTURE_STUBS/gh" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${STALE_LAUNCH_SRC:-}" ] && [ -n "${STALE_LAUNCH_DEST:-}" ]; then
+    cp "$STALE_LAUNCH_SRC" "$STALE_LAUNCH_DEST"
+fi
+exit 0
+STUB
+chmod +x "$FIXTURE_STUBS/gh"
+printf '\nSTALE_LAUNCH_SENTINEL\n' >>"$FIXTURE_DEST/bin/run.sh"
+run_subject "$OUT" "$ERR" --reinstall
+STAGED_LEFT=0
+compgen -G "$FIXTURE_DEST/.bin.reinstalling.*" >/dev/null && STAGED_LEFT=1
+OK=1
+if [ "$RUN_STATUS" -eq 1 ] \
+    && grep -q 'issue-77' "$ERR" \
+    && grep -q "$STALE_PID" "$ERR" \
+    && [ "$STAGED_LEFT" -eq 0 ] \
+    && [ -d "$FIXTURE_DEST/prompts" ] \
+    && grep -q 'STALE_LAUNCH_SENTINEL' "$FIXTURE_DEST/bin/run.sh"; then
+    OK=0
+fi
+report_case "a run recorded after the first scan is refused with bin/ restored" "$OK" \
+    "status=$RUN_STATUS staged-left=$STAGED_LEFT stderr=$(head -c 300 "$ERR")"
+unset STALE_LAUNCH_SRC STALE_LAUNCH_DEST
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

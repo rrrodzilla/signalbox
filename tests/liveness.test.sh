@@ -285,7 +285,7 @@ report_case "live_runs normalises decimal and exponent pids" "$OK" \
 # 16. An unrecognised mode is refused before any lock file is created.
 fixture
 LOCK_ROOT="$FIXTURE_PATH"
-LOCK_FILE="$LOCK_ROOT/state/install.lock"
+LOCK_FILE="$LOCK_ROOT/.install.lock"
 run_function "$OUT" "$ERR" install_lock "$LOCK_ROOT" sideways
 OK=1
 if [ "$RUN_STATUS" -eq 1 ] \
@@ -299,6 +299,8 @@ report_case "install_lock refuses an unknown mode without creating a file" "$OK"
 
 # 17. An exclusive hold blocks a second acquirer: this is what keeps a launcher
 # from starting an engine between a reinstall's liveness scan and its rebuild.
+# Taking it must also leave state/ alone — reinstall preserves that directory,
+# so the installer's own coordination file may not appear inside it.
 run_function "$OUT" "$ERR" install_lock "$LOCK_ROOT" exclusive
 HELD_STATUS=$RUN_STATUS
 CONTENDED=0
@@ -306,11 +308,13 @@ CONTENDED=0
 OK=1
 if [ "$HELD_STATUS" -eq 0 ] \
     && [ "$CONTENDED" -eq 1 ] \
+    && [ -e "$LOCK_FILE" ] \
+    && [ ! -e "$LOCK_ROOT/state" ] \
     && [ ! -s "$OUT" ] \
     && [ ! -s "$ERR" ]; then
     OK=0
 fi
-report_case "install_lock exclusive excludes a second holder" "$OK" \
+report_case "install_lock exclusive excludes a second holder without touching state/" "$OK" \
     "status=$HELD_STATUS contended=$CONTENDED stderr=$(head -c 200 "$ERR")"
 
 # 18. Releasing hands the lock straight over; a stale hold would wedge every

@@ -4,7 +4,9 @@
 #  action, readiness, floor, rationale, decision}.
 # stdout = docs.synced payload (the same object plus
 # {docs_sync: {status, updated, unchanged, path}} and, only when the model ran,
-# top-level {provenance}).
+# top-level {provenance}). On the paths that finish before the model runs the
+# upstream {provenance} is deleted rather than forwarded: keeping it would
+# attribute docs.synced to whichever producer stamped the inbound payload.
 #
 # The syncer sits before the promotion sink so every reviewed feature records
 # either a mechanically verified vault update or an explicit no-op/error.
@@ -96,7 +98,7 @@ finish() {
             --argjson updated "$UPDATED_JSON" \
             --argjson unchanged "$UNCHANGED_JSON" \
             --arg path "$STATE_PATH" \
-            '. + {docs_sync: {
+            'del(.provenance) | . + {docs_sync: {
                 status: $status,
                 updated: $updated,
                 unchanged: $unchanged,

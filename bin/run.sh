@@ -280,10 +280,9 @@ for TEMPLATE_NAME in pipeline plan implement emergent init; do
         "$ROOT/templates/$TEMPLATE_NAME.toml" >"$RUN_DIR/$TEMPLATE_NAME.toml"
 done
 
-if grep -Hn '__SIGNALBOX_' "$RUN_DIR"/*.toml >&2; then
-    echo "error: unresolved __SIGNALBOX_ placeholder in rendered run config" >&2
-    exit 1
-fi
+# Comment lines in the templates legitimately name these placeholders;
+# bin/check-placeholders.sh reports only live, unrendered occurrences.
+"$ROOT/bin/check-placeholders.sh" "$RUN_DIR" || exit 1
 
 PIPELINE_ENGINE="$ENGINE_PREFIX-pipeline-$RUN_SLUG"
 PLAN_ENGINE="$ENGINE_PREFIX-plan-$RUN_SLUG"

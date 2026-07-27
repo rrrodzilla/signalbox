@@ -266,7 +266,7 @@ grep -qxF '.claude' "$GIT_COMMON/info/exclude" 2>/dev/null \
 echo "installed: $DEST"
 echo "engines:   $REPO-pipeline (+ $REPO-init, $REPO-plan, $REPO-implement-stream, $REPO-review-loop)"
 echo "gate:      $GATE_CMD"
-echo "observe:   shared dashboard http://127.0.0.1:8099/ (SIGNALBOX_SINK_PORT); unit signalbox-sink.service; status: $DEST/bin/sink-service.sh status; approval webhook port $PORT_BASE reserved in $PORT_REG"
+echo "observe:   shared dashboard http://127.0.0.1:${SIGNALBOX_SINK_PORT:-8099}/ (SIGNALBOX_SINK_PORT); unit signalbox-sink.service; status: $DEST/bin/sink-service.sh status; approval webhook port $PORT_BASE reserved in $PORT_REG"
 echo "next:      $DEST/bin/init-run.sh                                 (fill the vault once; stops itself when all three docs land)"
 echo "           $DEST/bin/run.sh <issue>                              (concurrent run; artifacts under $DEST/runs/<slug>/)"
 echo "single:    SIGNALBOX_ISSUE=<n> emergent --config $DEST/pipeline.toml"

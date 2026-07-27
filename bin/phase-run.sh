@@ -6,7 +6,9 @@
 # PID in the run's state, and watches run-scoped DISK ARTIFACTS (never engine
 # claims) for the phase's terminal condition. It then stops the child gracefully
 # (SIGTERM by PID — never pkill by name, other engines may be alive) so its event
-# trail flushes. The runner reports what it OBSERVED; judging whether the phase
+# trail flushes. The same shutdown runs from an EXIT/INT/TERM trap, so a runner
+# killed mid-watch still reaps its engine and clears its PID file rather than
+# orphaning both. The runner reports what it OBSERVED; judging whether the phase
 # actually succeeded is the operator's job.
 set -euo pipefail
 # shellcheck source=_env.sh
@@ -37,6 +39,37 @@ else
     CONFIG="$ROOT/$CFG"
     echo "[pipeline] $PHASE config: $CONFIG (run config missing; shared fallback)" >&2
 fi
+
+# Stop ONLY our child, gracefully, then reap it and drop its PID file.
+# Idempotent: the normal shutdown path and the trap both call it.
+PID=""
+stop_engine() {
+    [ -n "$PID" ] || return 0
+    if kill -0 "$PID" 2>/dev/null; then
+        kill -TERM "$PID" 2>/dev/null || true
+        for _ in $(seq 1 30); do
+            kill -0 "$PID" 2>/dev/null || break
+            sleep 2
+        done
+        { kill -0 "$PID" 2>/dev/null \
+            && kill -KILL "$PID" 2>/dev/null; } || true
+    fi
+    wait "$PID" 2>/dev/null || true
+    rm -f "$PID_FILE"
+    PID=""
+}
+
+# Termination before the normal path — operator Ctrl-C, a supervisor's SIGTERM,
+# or any set -e abort — would otherwise leave the engine running behind a stale
+# PID file that later readers mistake for a live phase.
+on_signal() {
+    trap - EXIT INT TERM
+    stop_engine
+    exit "$1"
+}
+trap stop_engine EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 SIGNALBOX_ISSUE="$ISSUE" SIGNALBOX_RUN_SLUG="$RUN_SLUG" \
     emergent --config "$CONFIG" >"$LOG" 2>&1 &
@@ -79,16 +112,8 @@ done
 # Let in-flight sinks finish narrating, then stop ONLY our child, gracefully.
 if kill -0 "$PID" 2>/dev/null; then
     sleep 5
-    kill -TERM "$PID" 2>/dev/null || true
-    for _ in $(seq 1 30); do
-        kill -0 "$PID" 2>/dev/null || break
-        sleep 2
-    done
-    { kill -0 "$PID" 2>/dev/null \
-        && kill -KILL "$PID" 2>/dev/null; } || true
 fi
-wait "$PID" 2>/dev/null || true
-rm -f "$PID_FILE"
+stop_engine
 echo "[pipeline] $PHASE engine stopped, outcome: $OUTCOME" >&2
 
 jq -c --arg outcome "$OUTCOME" --arg log "$LOG" \

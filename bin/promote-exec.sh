@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Promotion executor: stdin = phase.request {issue, phase: "promote", correlation_id}
-# stdout = phase.done (input + {outcome, log})
+# stdout = phase.done (input + {outcome, log, provenance})
 #
 # Headless Fable performs the outward-facing promotion — push, PR, CI watch,
 # squash merge, cleanup — under its own judgment (prompts/promote.md). This
@@ -10,6 +10,7 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 PAYLOAD="$(cat)"
 [ "$(jq -r '.phase' <<<"$PAYLOAD")" = "promote" ] || exit 0
@@ -46,6 +47,7 @@ env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     --model claude-fable-5 \
     --permission-mode bypassPermissions \
     >"$LOG" 2>"$LOG.stderr" || true
+stamp_provenance "logs/promote-$ISSUE.md" claude claude-fable-5 ""
 
 RESULT_LINE="$(grep -E '^\{.*"result".*\}[[:space:]]*$' "$LOG" | tail -1 || true)"
 
@@ -55,5 +57,13 @@ if [ -n "$RESULT_LINE" ] && jq -e . >/dev/null 2>&1 <<<"$RESULT_LINE"; then
     [ "$R" = "MERGED" ] && OUTCOME="ARTIFACT"
 fi
 
-jq -c --arg outcome "$OUTCOME" --arg log "$LOG" \
-    '. + {outcome: $outcome, log: $log}' <<<"$PAYLOAD"
+PROVENANCE="$(provenance_object claude claude-fable-5 "")"
+jq -c \
+    --arg outcome "$OUTCOME" \
+    --arg log "$LOG" \
+    --argjson provenance "$PROVENANCE" \
+    '. + {
+        outcome: $outcome,
+        log: $log,
+        provenance: $provenance
+    }' <<<"$PAYLOAD"

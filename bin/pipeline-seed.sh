@@ -16,7 +16,8 @@ if [ ! -d "$DOCS" ] || [ ! -f "$DOCS/ARCHI.md" ]; then
 fi
 
 CID="pipe-$ISSUE-$(date +%Y%m%d-%H%M%S)"
-echo "[pipeline] issue #$ISSUE, correlation_id: $CID" >&2
+mkdir -p "$RUN_DIR/state" "$RUN_DIR/logs" "$RUN_DIR/results"
+echo "[pipeline] issue #$ISSUE, run: $RUN_DIR, correlation_id: $CID" >&2
 
 jq -n --arg issue "$ISSUE" --arg cid "$CID" \
     '{issue: ($issue | tonumber), phase: "plan", correlation_id: $cid}'

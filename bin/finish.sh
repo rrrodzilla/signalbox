@@ -9,7 +9,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 PAYLOAD="$(cat)"
 # plan.done only carries {count}; the run manifest has the correlation id.
 CID="$(jq -r '.correlation_id // empty' <<<"$PAYLOAD" 2>/dev/null || true)"
-[ -n "$CID" ] || CID="$(jq -r '.correlation_id // empty' "$ROOT/state/run.json" 2>/dev/null || true)"
+[ -n "$CID" ] || CID="$(jq -r '.correlation_id // empty' "$RUN_DIR/state/run.json" 2>/dev/null || true)"
 
 echo "ALL STAGES MERGED — running gate in $GATE_DIR: ${GATE_CMD:-}"
 cd "$GATE_DIR"
@@ -41,14 +41,14 @@ fi
 
 # The verdict as a DISK ARTIFACT (issue #1): engine stdout is buffered when
 # redirected, so narration can sit unflushed until shutdown — anything that
-# supervises this phase must watch state/gate.json, never the banner.
-mkdir -p "$ROOT/state"
+# supervises this phase must watch the run's state/gate.json, never the banner.
+mkdir -p "$RUN_DIR/state"
 jq -n \
     --arg verdict "$VERDICT" \
     --arg branch "$INT_BRANCH" \
     --arg tip "$(git rev-parse --short HEAD)" \
     --arg cid "$CID" \
     '{verdict: $verdict, branch: $branch, tip: $tip, correlation_id: $cid}' \
-    >"$ROOT/state/gate.json"
+    >"$RUN_DIR/state/gate.json"
 
 [ -z "$CID" ] || echo "feature trail: bin/audit.sh $CID"

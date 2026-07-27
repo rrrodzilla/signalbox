@@ -13,10 +13,16 @@ source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 LABEL="${1:-escalation}"
 PAYLOAD="$(cat)"
 
-mkdir -p "$ROOT/state"
+mkdir -p "$RUN_DIR/state"
 jq -c --arg phase "$LABEL" '. + {escalated_phase: $phase}' <<<"$PAYLOAD" \
-    >"$ROOT/state/escalated.json"
+    >"$RUN_DIR/state/escalated.json"
 
-jq -r --arg phase "$LABEL" \
-    '"[\($phase)] ESCALATED (round \(.round // "?")) — human required; details: state/escalated.json"' \
+if [ -n "$RUN_SLUG" ]; then
+    ESCALATED_PATH="runs/$RUN_SLUG/state/escalated.json"
+else
+    ESCALATED_PATH="state/escalated.json"
+fi
+
+jq -r --arg phase "$LABEL" --arg path "$ESCALATED_PATH" \
+    '"[\($phase)] ESCALATED (round \(.round // "?")) — human required; details: \($path)"' \
     <<<"$PAYLOAD"

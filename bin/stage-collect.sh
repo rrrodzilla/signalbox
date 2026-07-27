@@ -11,9 +11,9 @@ PAYLOAD="$(cat)"
 STAGE_ID="$(jq -r '.stage' <<<"$PAYLOAD")"
 EXPECTED="$(jq -r '.expected' <<<"$PAYLOAD")"
 
-mkdir -p "$ROOT/state/stages"
-STATE="$ROOT/state/stages/$STAGE_ID.json"
-LOCK="$ROOT/state/stages/$STAGE_ID.lock"
+mkdir -p "$RUN_DIR/state/stages"
+STATE="$RUN_DIR/state/stages/$STAGE_ID.json"
+LOCK="$RUN_DIR/state/stages/$STAGE_ID.lock"
 
 exec 9>"$LOCK"
 flock -x 9

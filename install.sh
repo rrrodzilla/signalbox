@@ -31,13 +31,14 @@
 #             launcher-recorded run is live. The refusal check and the refresh
 #             run under an exclusive <dest>/.install.lock that bin/run.sh also
 #             takes, and the installed bin/ is withdrawn before anything is
-#             destroyed, then watched until startups quiesce, so no run can
-#             start in between — including from a harness installed before the
-#             lock existed. The quiescence window is SIGNALBOX_REINSTALL_QUIESCE
-#             seconds (default 5); any launch metadata written under runs/
-#             during it refuses the refresh. Preserves runs/ and the state/
-#             readiness ledger. On a never-installed target, acts like a plain
-#             install.
+#             destroyed, so no run can start in between — including from a
+#             harness installed before the lock existed. After the withdrawal
+#             the launch metadata under runs/ is compared against a snapshot
+#             taken before it: any launch.json created or changed since is a
+#             startup in flight and refuses the refresh deterministically —
+#             no timers, and metadata that merely predates the reinstall never
+#             blocks it. Preserves runs/ and the state/ readiness ledger. On a
+#             never-installed target, acts like a plain install.
 #   --vault   Obsidian vault root; wires .claude/docs into it (idempotent,
 #             migrates a pre-existing real docs/ dir). Default folder:
 #             TRIP/<repo-name>. Without --vault the repo must already be
@@ -130,7 +131,7 @@ refuse_live_runs() {
 }
 
 # A launcher writes launch.json before its engine exists and patches the pid in
-# afterwards, so metadata that appears while the harness is withdrawn is a
+# afterwards, so metadata created or changed while the harness is withdrawn is a
 # startup in flight whether or not it yet names a live process. Neither the
 # liveness scan nor the lock can settle it — the launcher that wrote it never
 # took the lock — so the conservative verdict is to refuse.
@@ -145,6 +146,22 @@ refuse_startup_in_flight() {
     done <<<"$PENDING_LIST"
     echo "       wait for it to finish starting, then: $DEST/bin/run.sh --list" >&2
     exit 1
+}
+
+# One line per launch metadata file under <runs-dir>: path, size, mtime —
+# sorted, so two captures compare with a plain string test and their
+# difference names exactly the files created or changed between them. Age
+# plays no part: metadata that merely predates the reinstall, however
+# recent, is indistinguishable from metadata written during it by any
+# clock-based test, and must never block a refresh (dead runs are normal
+# residents of runs/). launch.json* also catches the launcher's temp file:
+# metadata half written is a startup in flight just as much as metadata
+# renamed into place.
+snapshot_launch_metadata() {
+    local RUNS_DIR="$1"
+    [ -d "$RUNS_DIR" ] || return 0
+    find "$RUNS_DIR" -mindepth 2 -maxdepth 2 -name 'launch.json*' \
+        -printf '%p\t%s\t%T@\n' 2>/dev/null | LC_ALL=C sort
 }
 
 # Resolve install mode before preflight or vault wiring: vault-setup.sh can
@@ -244,56 +261,55 @@ if [ "$REINSTALL_ACTIVE" -eq 1 ]; then
     # already inside its startup window cannot reach an engine either, because
     # it still has to exec bin/ports.sh and bin/check-placeholders.sh from the
     # directory that just vanished — both run before it spawns emergent.
-    # Then watch, since a stale launcher may have recorded its run after the
-    # first scan: if it did, bin/ goes straight back and the refusal names it,
-    # leaving the harness exactly as it was found. The withdrawal binds only
-    # launchers that still have a bin/ exec ahead of them; one that had already
-    # passed its last one when the rename landed is mid startup right now and
-    # will write launch.json in the next moments. So a single rescan is not
-    # enough — the tree is watched for a quiescence window, and anything that
-    # touches launch metadata during it is refused, live pid or not. Startups
-    # cannot begin during the window (bin/ is gone), so the window only has to
-    # outlast the tail of one already in flight: the jq that writes launch.json
-    # and the spawn that follows it.
+    # A stale launcher may still have recorded its run after the first scan,
+    # or be writing its metadata right now: the launch metadata under runs/ is
+    # snapshotted before the rename and compared after it, and the refresh is
+    # refused — bin/ restored, harness exactly as found — when the rescan sees
+    # a live run or the comparison sees any launch.json created or changed
+    # since the snapshot. The verdict is deterministic: it is a property of
+    # the metadata tree, not of how long anything was watched, and preexisting
+    # metadata never trips it however recent its timestamps (dead runs are
+    # normal residents of runs/, and runs/ itself is never touched either
+    # way). One tail remains open on principle: a launcher that had already
+    # passed its last bin/ exec AND writes launch.json only after the rescan
+    # below is invisible to every observation this side of its own write. Its
+    # run directory survives (runs/ is preserved), but its engine runs
+    # old-harness code — which is why --reinstall is never a licence to skip
+    # `bin/run.sh --list` first.
     STAGED_BIN="$DEST/.bin.reinstalling.$$"
-    QUIESCE_MARKER="$DEST/.reinstall.quiesce.$$"
-    QUIESCE_SECONDS="${SIGNALBOX_REINSTALL_QUIESCE:-5}"
-    [[ "$QUIESCE_SECONDS" =~ ^[0-9]+$ ]] || QUIESCE_SECONDS=5
     if [ -d "$DEST/bin" ]; then
-        # The marker dates the withdrawal, and find -newer compares against it.
-        # It is backdated a second so a filesystem with coarse timestamps cannot
-        # round a launch.json written just after the rename back onto the
-        # marker's own second and hide it; erring early only ever adds refusals.
-        : >"$QUIESCE_MARKER"
-        touch -d '1 second ago' -- "$QUIESCE_MARKER" 2>/dev/null || true
+        LAUNCH_SNAPSHOT="$(snapshot_launch_metadata "$DEST/runs")"
         mv -- "$DEST/bin" "$STAGED_BIN"
-        ELAPSED=0
-        while :; do
-            LIVE_RUNS="$(live_runs "$DEST/runs")"
-            # launch.json* also catches the launcher's temp file: metadata half
-            # written is a startup in flight just as much as metadata renamed
-            # into place. Older debris keeps its old mtime and is ignored.
-            PENDING_LAUNCHES="$(find "$DEST/runs" -mindepth 2 -maxdepth 2 \
-                -name 'launch.json*' -newer "$QUIESCE_MARKER" 2>/dev/null || true)"
-            if [ -n "$LIVE_RUNS" ] || [ -n "$PENDING_LAUNCHES" ]; then
-                mv -- "$STAGED_BIN" "$DEST/bin"
-                rm -f -- "$QUIESCE_MARKER"
-                if [ -n "$LIVE_RUNS" ]; then
-                    refuse_live_runs "$LIVE_RUNS"
-                fi
+        # Test seam: deterministic reproduction of the stale-launcher race.
+        # Runs once, immediately after the withdrawal rename; empty outside
+        # the test suite.
+        if [ -n "${SIGNALBOX_REINSTALL_POST_WITHDRAW_HOOK:-}" ]; then
+            eval "$SIGNALBOX_REINSTALL_POST_WITHDRAW_HOOK" || true
+        fi
+        LIVE_RUNS="$(live_runs "$DEST/runs")"
+        LAUNCH_RESCAN="$(snapshot_launch_metadata "$DEST/runs")"
+        if [ -n "$LIVE_RUNS" ] || [ "$LAUNCH_RESCAN" != "$LAUNCH_SNAPSHOT" ]; then
+            mv -- "$STAGED_BIN" "$DEST/bin"
+            if [ -n "$LIVE_RUNS" ]; then
+                refuse_live_runs "$LIVE_RUNS"
+            fi
+            # Lines only in the rescan are the files created or changed since
+            # the snapshot (size or mtime moves a line); deletions are a run
+            # being cleaned up, not a startup, and do not reach here on their
+            # own because the branch above already compared for any change.
+            PENDING_LAUNCHES="$(LC_ALL=C comm -13 \
+                <(printf '%s\n' "$LAUNCH_SNAPSHOT") \
+                <(printf '%s\n' "$LAUNCH_RESCAN") | cut -f1)"
+            if [ -n "$PENDING_LAUNCHES" ]; then
                 refuse_startup_in_flight "$PENDING_LAUNCHES"
             fi
-            if [ "$ELAPSED" -ge "$QUIESCE_SECONDS" ]; then
-                break
-            fi
-            sleep 1
-            ELAPSED=$((ELAPSED + 1))
-        done
+            echo "error: launch metadata under $DEST/runs was removed while the harness was withdrawn — refusing to refresh; inspect $DEST/runs and re-run" >&2
+            exit 1
+        fi
     fi
-    # Any other staged directory or marker is the debris of an installer that
-    # died holding the lock this one now holds; bin/ is rebuilt from source
-    # anyway, and a stale marker dates a withdrawal that is long over.
-    rm -rf -- "$DEST"/.bin.reinstalling.* "$DEST"/.reinstall.quiesce.* \
+    # Any other staged directory is the debris of an installer that died
+    # holding the lock this one now holds; bin/ is rebuilt from source anyway.
+    rm -rf -- "$DEST"/.bin.reinstalling.* \
         "$DEST/bin" "$DEST/prompts" "$DEST/templates"
 fi
 

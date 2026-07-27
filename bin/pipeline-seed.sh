@@ -11,7 +11,7 @@ ISSUE="${SIGNALBOX_ISSUE:?set SIGNALBOX_ISSUE=<issue-number> when launching the 
 
 DOCS="$REPO_ROOT/.claude/docs"
 if [ ! -d "$DOCS" ] || [ ! -f "$DOCS/ARCHI.md" ]; then
-    echo "error: vault docs missing at $DOCS — run init.toml first" >&2
+    echo "error: vault docs missing at $DOCS — run bin/init-run.sh first" >&2
     exit 1
 fi
 

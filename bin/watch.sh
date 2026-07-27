@@ -13,9 +13,9 @@
 #                         covers every engine
 #
 # Nothing here assumes port numbers: the watchtower ports are discovered
-# by parsing the harness's rendered TOMLs (install.sh allocates a per-repo
-# block), and the page port is WATCH_PORT if set, else 8099, else an
-# ephemeral port — the URL actually bound is always printed.
+# by parsing every run's rendered TOMLs, plus the harness-root TOMLs used by
+# single-run/prototype launches. The page port is WATCH_PORT if set, else
+# 8099, else an ephemeral port — the URL actually bound is always printed.
 #
 # The artifact poll works even for engines started before the watchtower
 # sinks existed; the SSE streams light up whenever an engine with a
@@ -61,12 +61,11 @@ TOML_LABELS = [("pipeline.toml", "pipeline"), ("plan.toml", "plan"),
                ("implement.toml", "implement"), ("emergent.toml", "review"),
                ("init.toml", "init")]
 
-def discover_streams():
-    """Watchtower ports come from the harness's rendered TOMLs — never assumed.
-    Re-parsed per call so a harness reinstall shows up without a restart."""
+def discover_streams(run_dir, slug):
+    """Return this run's watchtower streams from its rendered TOMLs."""
     streams = []
     for fn, label in TOML_LABELS:
-        p = os.path.join(HARNESS, fn)
+        p = os.path.join(run_dir, fn)
         if not os.path.isfile(p):
             continue
         try:
@@ -79,16 +78,24 @@ def discover_streams():
                 continue
             args = sink.get("args", [])
             try:
-                streams.append({"name": label, "port": int(args[args.index("--port") + 1])})
-            except (ValueError, IndexError):
+                streams.append({
+                    "run": slug,
+                    "name": label,
+                    "port": int(args[args.index("--port") + 1]),
+                })
+            except (TypeError, ValueError, IndexError):
                 pass
     return streams
 
-def artifact_info(rel):
-    p = os.path.join(HARNESS, rel)
+def artifact_info(run_dir, rel):
+    p = os.path.join(run_dir, rel)
     info = {"file": rel, "exists": os.path.isfile(p)}
     if info["exists"]:
-        st = os.stat(p)
+        try:
+            st = os.stat(p)
+        except OSError:
+            info["exists"] = False
+            return info
         info["mtime"] = st.st_mtime
         info["size"] = st.st_size
         if rel.endswith(".json") and st.st_size < 262144:
@@ -99,19 +106,99 @@ def artifact_info(rel):
                 info["json"] = None
     return info
 
-def status():
+def load_launch(run_dir):
+    p = os.path.join(run_dir, "launch.json")
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p) as fh:
+            launch = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return launch if isinstance(launch, dict) else None
+
+def pid_state(pid):
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return "unknown"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "dead"
+    except PermissionError:
+        return "alive"
+    except OSError:
+        return "unknown"
+    return "alive"
+
+def log_info(run_dir):
     logs = []
-    logdir = os.path.join(HARNESS, "logs")
+    logdir = os.path.join(run_dir, "logs")
     if os.path.isdir(logdir):
-        for n in sorted(os.listdir(logdir)):
+        try:
+            names = sorted(os.listdir(logdir))
+        except OSError:
+            names = []
+        for n in names:
             p = os.path.join(logdir, n)
             if os.path.isfile(p):
-                st = os.stat(p)
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    continue
                 logs.append({"file": n, "mtime": st.st_mtime, "size": st.st_size})
-    return {"now": time.time(), "harness": HARNESS,
-            "streams": discover_streams(),
-            "artifacts": {a: artifact_info(a) for a in ARTIFACTS},
-            "logs": logs}
+    return logs
+
+def run_info(run_dir, fallback_slug):
+    launch = load_launch(run_dir)
+    slug = fallback_slug
+    if fallback_slug != "single-run" and launch:
+        launch_slug = launch.get("slug")
+        if isinstance(launch_slug, str) and launch_slug:
+            slug = launch_slug
+    artifacts = {a: artifact_info(run_dir, a) for a in ARTIFACTS}
+    logs = log_info(run_dir)
+    plan = artifacts["plan.json"].get("json")
+    feature = plan.get("feature") if isinstance(plan, dict) else None
+    issue = launch.get("issue") if launch else None
+    if issue is None and isinstance(plan, dict):
+        issue = plan.get("issue")
+    return {
+        "slug": slug,
+        "issue": issue,
+        "feature": feature,
+        "launch": launch,
+        "pid_state": pid_state(launch.get("pid") if launch else None),
+        "artifacts": artifacts,
+        "logs": logs,
+        "streams": discover_streams(run_dir, slug),
+    }
+
+def discover_runs():
+    """Re-scan run directories and TOMLs for every request."""
+    runs = []
+    runs_dir = os.path.join(HARNESS, "runs")
+    if os.path.isdir(runs_dir):
+        try:
+            names = sorted(os.listdir(runs_dir))
+        except OSError:
+            names = []
+        for name in names:
+            run_dir = os.path.join(runs_dir, name)
+            if os.path.isdir(run_dir):
+                runs.append(run_info(run_dir, name))
+
+    root = run_info(HARNESS, "single-run")
+    root_has_artifacts = (
+        root["launch"] is not None
+        or bool(root["logs"])
+        or any(a["exists"] for a in root["artifacts"].values())
+    )
+    if root_has_artifacts:
+        runs.append(root)
+    return runs
+
+def status():
+    return {"now": time.time(), "harness": HARNESS, "runs": discover_runs()}
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -139,7 +226,12 @@ class Handler(BaseHTTPRequestHandler):
             except (IndexError, ValueError):
                 self._body(400, "text/plain", b"bad stream path")
                 return
-            if port not in {s["port"] for s in discover_streams()}:
+            allowed = {
+                stream["port"]
+                for run in discover_runs()
+                for stream in run["streams"]
+            }
+            if port not in allowed:
                 self._body(404, "text/plain", b"unknown stream port")
                 return
             self.proxy_sse(port)
@@ -189,8 +281,10 @@ PAGE = r"""<!doctype html>
 * { box-sizing:border-box; margin:0; }
 body { background:var(--bg); color:var(--fg); font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; padding:16px; }
 h1 { font-size:16px; letter-spacing:.06em; }
-h1 .feature { color:var(--blue); }
 .meta { color:var(--dim); font-size:12px; margin-top:2px; }
+.run { margin-top:16px; border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:12px; }
+.run-head { color:var(--blue); font-size:14px; font-weight:600; }
+.run-meta { color:var(--dim); font-size:11px; margin-top:2px; }
 .rail { display:flex; gap:8px; margin:16px 0; flex-wrap:wrap; }
 .phase { flex:1; min-width:130px; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--panel); }
 .phase .name { text-transform:uppercase; font-size:11px; letter-spacing:.1em; color:var(--dim); }
@@ -230,52 +324,41 @@ td.age, td.size { color:var(--dim); white-space:nowrap; text-align:right; }
 </style>
 </head>
 <body>
-<h1>signalbox watch <span class="feature" id="feature"></span></h1>
+<h1>signalbox watch</h1>
 <div class="meta" id="meta">connecting…</div>
-<div class="rail" id="rail"></div>
-<div class="cols">
-  <div>
-    <div class="panel">
-      <h2>Disk artifacts (the terminals that count)</h2>
-      <table id="artifacts"></table>
-    </div>
-    <div class="panel" style="margin-top:16px">
-      <h2>Engine logs (buffered — sizes grow on flush)</h2>
-      <table id="logs"></table>
-    </div>
-  </div>
-  <div class="panel">
-    <h2>Live events</h2>
-    <div class="badges" id="badges"></div>
-    <div id="feed"></div>
-  </div>
+<div class="panel" style="margin-top:16px">
+  <h2>Merged live events</h2>
+  <div class="badges" id="badges"></div>
+  <div id="feed"></div>
 </div>
+<div id="runs"></div>
 <script>
 // Streams are discovered server-side from the harness TOMLs and delivered
 // via /status — the page assumes no port numbers.
 const STREAMS = [];
 const PHASES = ["plan","implement","review","promote"];
-let promoteState = "pending";
+const promoteStates = {};
 const $ = id => document.getElementById(id);
 
 function ensureStreams(list) {
   for (const s of list || []) {
-    if (STREAMS.some(x => x.port === s.port)) continue;
-    s.cls = "c" + (STREAMS.length % 5);
-    STREAMS.push(s);
+    const existing = STREAMS.find(x => x.port === s.port);
+    if (existing) {
+      existing.run = s.run;
+      existing.name = s.name;
+      const oldBadge = $("badge-" + s.port);
+      if (oldBadge) oldBadge.textContent = s.run + "/" + s.name + " :" + s.port;
+      continue;
+    }
+    const stream = Object.assign({}, s, {cls: "c" + (STREAMS.length % 5)});
+    STREAMS.push(stream);
     const b = document.createElement("span");
-    b.className = "badge"; b.id = "badge-" + s.port;
-    b.textContent = s.name + " :" + s.port;
+    b.className = "badge"; b.id = "badge-" + stream.port;
+    b.textContent = stream.run + "/" + stream.name + " :" + stream.port;
     $("badges").appendChild(b);
-    attach(s);
+    attach(stream);
   }
 }
-PHASES.forEach(p => {
-  const d = document.createElement("div");
-  d.className = "phase pending"; d.id = "phase-" + p;
-  d.innerHTML = '<div class="name">' + p + '</div><div class="st">pending</div>';
-  $("rail").appendChild(d);
-});
 
 function age(now, m) {
   const s = Math.max(0, Math.round(now - m));
@@ -283,14 +366,14 @@ function age(now, m) {
   if (s < 3600) return Math.round(s/60) + "m";
   return (s/3600).toFixed(1) + "h";
 }
-function setPhase(p, st) {
-  const d = $("phase-" + p);
-  d.className = "phase " + st;
-  d.querySelector(".st").textContent = st;
+function esc(value) {
+  return String(value).replace(/[&<>"']/g, c => ({
+    "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+  })[c]);
 }
 
-function derive(s) {
-  const a = s.artifacts;
+function derive(run) {
+  const a = run.artifacts;
   const stamp = p => a["state/pipeline-" + p + ".stamp"];
   const out = {};
   const ps = stamp("plan"), pj = a["plan.json"];
@@ -305,7 +388,7 @@ function derive(s) {
   else if (cr.exists && cr.mtime >= rs.mtime) out.review = "done";
   else if (pend.exists && pend.mtime >= rs.mtime) out.review = "parked";
   else out.review = "active";
-  out.promote = promoteState;
+  out.promote = promoteStates[run.slug] || "pending";
   const esc = a["state/escalated.json"];
   const stamps = PHASES.map(p => stamp(p)).filter(x => x && x.exists).map(x => x.mtime);
   if (esc.exists && esc.json && stamps.length && esc.mtime >= Math.max(...stamps)) {
@@ -315,27 +398,55 @@ function derive(s) {
   return out;
 }
 
+function artifactRows(run, now) {
+  return Object.values(run.artifacts).map(x => {
+    let extra = "";
+    if (x.exists && x.json && x.json.verdict) {
+      const verdictClass = x.json.verdict === "GREEN" ? "ok" : "bad";
+      extra = ' <span class="' + verdictClass + '">' + esc(x.json.verdict) + "</span>";
+    }
+    return "<tr><td class='" + (x.exists ? "" : "miss") + "'>" + esc(x.file) + extra + "</td>" +
+      "<td class='age'>" + (x.exists ? age(now, x.mtime) : "—") + "</td>" +
+      "<td class='size'>" + (x.exists ? x.size + "b" : "") + "</td></tr>";
+  }).join("");
+}
+
+function logRows(run, now) {
+  return run.logs.map(l =>
+    "<tr><td>" + esc(l.file) + "</td><td class='age'>" + age(now, l.mtime) +
+    "</td><td class='size'>" + l.size + "b</td></tr>").join("");
+}
+
+function renderRun(run, now) {
+  const states = derive(run);
+  const launch = run.launch || {};
+  const feature = run.feature || "feature unknown";
+  const issue = run.issue === null || run.issue === undefined ? "issue unknown" : "issue #" + run.issue;
+  const pid = launch.pid === null || launch.pid === undefined ? "pid unknown" : "pid " + launch.pid;
+  const phase = launch.phase ? " · launch phase " + esc(launch.phase) : "";
+  const started = launch.started ? " · started " + esc(launch.started) : "";
+  const rail = PHASES.map(p =>
+    '<div class="phase ' + states[p] + '"><div class="name">' + p +
+    '</div><div class="st">' + states[p] + "</div></div>").join("");
+  return '<section class="run">' +
+    '<div class="run-head">' + esc(feature) + " · " + esc(issue) + " · " +
+      esc(run.slug) + " · " + esc(pid) + " " + esc(run.pid_state) + "</div>" +
+    '<div class="run-meta">' + esc(run.streams.length) + " streams" + phase + started + "</div>" +
+    '<div class="rail">' + rail + "</div>" +
+    '<div class="cols"><div class="panel"><h2>Disk artifacts (the terminals that count)</h2>' +
+      '<table>' + artifactRows(run, now) + "</table></div>" +
+    '<div class="panel"><h2>Engine logs (buffered — sizes grow on flush)</h2>' +
+      '<table>' + logRows(run, now) + "</table></div></div></section>";
+}
+
 async function poll() {
   try {
     const s = await (await fetch("/status")).json();
-    ensureStreams(s.streams);
-    const a = s.artifacts, pj = a["plan.json"];
-    if (pj.exists && pj.json)
-      $("feature").textContent = pj.json.feature + " · issue #" + pj.json.issue;
-    $("meta").textContent = s.harness + " · " + new Date(s.now * 1000).toLocaleTimeString();
-    const st = derive(s);
-    PHASES.forEach(p => setPhase(p, st[p]));
-    $("artifacts").innerHTML = Object.values(a).map(x => {
-      let extra = "";
-      if (x.exists && x.json && x.json.verdict)
-        extra = ' <span class="' + (x.json.verdict === "GREEN" ? "ok" : "bad") + '">' + x.json.verdict + "</span>";
-      return "<tr><td class='" + (x.exists ? "" : "miss") + "'>" + x.file + extra + "</td>" +
-        "<td class='age'>" + (x.exists ? age(s.now, x.mtime) : "—") + "</td>" +
-        "<td class='size'>" + (x.exists ? x.size + "b" : "") + "</td></tr>";
-    }).join("");
-    $("logs").innerHTML = s.logs.map(l =>
-      "<tr><td>" + l.file + "</td><td class='age'>" + age(s.now, l.mtime) +
-      "</td><td class='size'>" + l.size + "b</td></tr>").join("");
+    const streams = s.runs.flatMap(run => run.streams || []);
+    ensureStreams(streams);
+    $("meta").textContent = s.harness + " · " + s.runs.length + " runs · " +
+      new Date(s.now * 1000).toLocaleTimeString();
+    $("runs").innerHTML = s.runs.map(run => renderRun(run, s.now)).join("");
   } catch (e) {
     $("meta").textContent = "status poll failed: " + e;
   }
@@ -357,9 +468,9 @@ function addEvent(stream, topic, dataText) {
     return;
   }
   const pl = obj && obj.payload !== undefined ? obj.payload : obj;
-  if (t === "phase.request" && pl && pl.phase === "promote") promoteState = "active";
-  if (t === "pipeline.complete") promoteState = pl && pl.parked ? "parked" : "done";
-  if (t === "pipeline.halted") { if (pl && pl.phase === "promote") promoteState = "failed"; }
+  if (t === "phase.request" && pl && pl.phase === "promote") promoteStates[stream.run] = "active";
+  if (t === "pipeline.complete") promoteStates[stream.run] = pl && pl.parked ? "parked" : "done";
+  if (t === "pipeline.halted" && pl && pl.phase === "promote") promoteStates[stream.run] = "failed";
   const div = document.createElement("div");
   div.className = "ev " + stream.cls + (t.includes("error") || t.includes("escalated") || t.includes("halted") ? " err" : "");
   // sse-sink envelope: {id, type, source, timestamp, payload}
@@ -369,9 +480,10 @@ function addEvent(stream, topic, dataText) {
   const src = obj && obj.source ? " · " + obj.source : "";
   const short = body.length > 700;
   div.innerHTML = '<div class="hd">' + when.toLocaleTimeString() +
-    ' · ' + stream.name + src + ' · <span class="topic"></span></div>' +
+    ' · <span class="event-stream"></span>' + src + ' · <span class="topic"></span></div>' +
     (short ? '<details><summary>' + body.length + ' chars</summary><pre></pre></details>'
            : '<pre></pre>');
+  div.querySelector(".event-stream").textContent = stream.run + " · " + stream.name;
   div.querySelector(".topic").textContent = t;
   div.querySelector("pre").textContent = body;
   const feed = $("feed");
@@ -427,7 +539,11 @@ except OSError as e:
     # Default port busy (another repo's dashboard?) — take an ephemeral one.
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 srv.daemon_threads = True
-ports = ", ".join(f"{s['name']}:{s['port']}" for s in discover_streams()) or "none found"
+ports = ", ".join(
+    f"{stream['run']}/{stream['name']}:{stream['port']}"
+    for run in discover_runs()
+    for stream in run["streams"]
+) or "none found"
 print(f"signalbox watch: http://localhost:{srv.server_address[1]}")
 print(f"streams: {ports}")
 srv.serve_forever()

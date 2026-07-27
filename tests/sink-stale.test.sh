@@ -120,8 +120,9 @@ fi
 start_service
 READY_STATUS=$?
 
-# 1. Old artifacts and artifacts whose producing phase has not started are
-# marked stale, while every phase stamp remains a reference clock.
+# 1. Without a launch record the producer-phase gate applies alone: old
+# artifacts and artifacts whose producing phase has not started are marked
+# stale, while every phase stamp remains a reference clock.
 LEFTOVERS_DIR="$RUN_ROOT/leftovers"
 mkdir -p "$LEFTOVERS_DIR/state" "$LEFTOVERS_DIR/results"
 jq -n '{feature: "old-plan", stages: []}' >"$LEFTOVERS_DIR/plan.json"
@@ -159,16 +160,20 @@ if [ "$READY_STATUS" -eq 0 ] \
     ' "$FIXTURE_ROOT/leftovers-status.json" >/dev/null 2>&1; then
     OK=0
 fi
-report_case "leftovers are stale and pipeline stamps are reference clocks" "$OK" \
+report_case "leftovers without a launch record are stale by producing phase" "$OK" \
     "ready=$READY_STATUS post=$LEFTOVERS_POST fetch=$LEFTOVERS_FETCH"
 
-# 2. Artifacts at least as new as their producing phase stamp are current.
+# 2. Artifacts newer than both the current launch and their producing phase
+# stamp are current.
 CURRENT_DIR="$RUN_ROOT/current"
 mkdir -p "$CURRENT_DIR/state"
 jq -n '{feature: "current-plan", stages: []}' >"$CURRENT_DIR/plan.json"
 jq -n '{verdict: "GREEN"}' >"$CURRENT_DIR/state/gate.json"
+jq -n '{issue: 1, phase: "pipeline", started: "1970-01-01T00:31:40Z"}' \
+    >"$CURRENT_DIR/launch.json"
 : >"$CURRENT_DIR/state/pipeline-plan.stamp"
 : >"$CURRENT_DIR/state/pipeline-implement.stamp"
+touch -d "@1900" "$CURRENT_DIR/launch.json"
 touch -d "@2000" \
     "$CURRENT_DIR/state/pipeline-plan.stamp" \
     "$CURRENT_DIR/state/pipeline-implement.stamp"
@@ -254,6 +259,95 @@ if [ "$ABSENT_POST" -eq 0 ] \
 fi
 report_case "missing phase clocks and empty run directories stay well formed" "$OK" \
     "absent-post=$ABSENT_POST empty-post=$EMPTY_POST fetch=$EMPTY_FETCH"
+
+# 5. A rerun under a harness that does not archive keeps the previous launch's
+# artifacts AND its stamps, so each artifact still leads its own producing
+# stamp. The launch boundary is what makes them stale — stamps included.
+RETAINED_DIR="$RUN_ROOT/retained"
+mkdir -p "$RETAINED_DIR/state" "$RETAINED_DIR/results"
+jq -n '{feature: "prior-plan", stages: []}' >"$RETAINED_DIR/plan.json"
+jq -n '{verdict: "RED", tip: "prior"}' >"$RETAINED_DIR/state/gate.json"
+printf '%s\n' "PROMOTION_READY" >"$RETAINED_DIR/results/CR.md"
+jq -n '{issue: 1, phase: "pipeline", started: "1970-01-01T01:23:20Z"}' \
+    >"$RETAINED_DIR/launch.json"
+: >"$RETAINED_DIR/state/pipeline-plan.stamp"
+: >"$RETAINED_DIR/state/pipeline-implement.stamp"
+: >"$RETAINED_DIR/state/pipeline-review.stamp"
+touch -d "@4000" \
+    "$RETAINED_DIR/state/pipeline-plan.stamp" \
+    "$RETAINED_DIR/state/pipeline-implement.stamp" \
+    "$RETAINED_DIR/state/pipeline-review.stamp"
+touch -d "@4100" "$RETAINED_DIR/plan.json" "$RETAINED_DIR/state/gate.json" \
+    "$RETAINED_DIR/results/CR.md"
+touch -d "@5000" "$RETAINED_DIR/launch.json"
+if [ "$READY_STATUS" -eq 0 ]; then
+    register_instance "fixture/retained@one" "$RETAINED_DIR"
+    RETAINED_POST=$?
+    fetch_status >"$FIXTURE_ROOT/retained-status.json"
+    RETAINED_FETCH=$?
+else
+    RETAINED_POST=1
+    RETAINED_FETCH=1
+fi
+OK=1
+if [ "$RETAINED_POST" -eq 0 ] \
+    && [ "$RETAINED_FETCH" -eq 0 ] \
+    && jq -e '
+        .instances[]
+        | select(.key == "fixture/retained@one")
+        | .artifacts as $a
+        | $a["plan.json"].stale == true
+          and $a["state/gate.json"].stale == true
+          and $a["results/CR.md"].stale == true
+          and ([
+            $a["state/pipeline-plan.stamp"],
+            $a["state/pipeline-implement.stamp"],
+            $a["state/pipeline-review.stamp"]
+          ] | all(.stale == true))
+    ' "$FIXTURE_ROOT/retained-status.json" >/dev/null 2>&1; then
+    OK=0
+fi
+report_case "retained prior stamps do not make prior artifacts current" "$OK" \
+    "post=$RETAINED_POST fetch=$RETAINED_FETCH"
+
+# 6. A bin/run.sh --phase launch writes no pipeline stamp: its own output is
+# current and only what predates the launch is stale. The launch record's
+# mtime is deliberately later than the instant it records, proving the
+# recorded start — not the rewritten file — sets the boundary.
+PHASE_ONLY_DIR="$RUN_ROOT/phase-only"
+mkdir -p "$PHASE_ONLY_DIR/state" "$PHASE_ONLY_DIR/results"
+jq -n '{feature: "prior-plan", stages: []}' >"$PHASE_ONLY_DIR/plan.json"
+jq -n '{verdict: "GREEN", tip: "fresh"}' >"$PHASE_ONLY_DIR/state/gate.json"
+printf '%s\n' "PROMOTION_READY" >"$PHASE_ONLY_DIR/results/CR.md"
+jq -n '{issue: 1, phase: "review", started: "1970-01-01T01:23:20Z"}' \
+    >"$PHASE_ONLY_DIR/launch.json"
+touch -d "@1000" "$PHASE_ONLY_DIR/plan.json"
+touch -d "@5100" "$PHASE_ONLY_DIR/state/gate.json" "$PHASE_ONLY_DIR/results/CR.md"
+touch -d "@9000" "$PHASE_ONLY_DIR/launch.json"
+if [ "$READY_STATUS" -eq 0 ]; then
+    register_instance "fixture/phase-only@one" "$PHASE_ONLY_DIR"
+    PHASE_ONLY_POST=$?
+    fetch_status >"$FIXTURE_ROOT/phase-only-status.json"
+    PHASE_ONLY_FETCH=$?
+else
+    PHASE_ONLY_POST=1
+    PHASE_ONLY_FETCH=1
+fi
+OK=1
+if [ "$PHASE_ONLY_POST" -eq 0 ] \
+    && [ "$PHASE_ONLY_FETCH" -eq 0 ] \
+    && jq -e '
+        .instances[]
+        | select(.key == "fixture/phase-only@one")
+        | .artifacts as $a
+        | $a["state/gate.json"].stale == false
+          and $a["results/CR.md"].stale == false
+          and $a["plan.json"].stale == true
+    ' "$FIXTURE_ROOT/phase-only-status.json" >/dev/null 2>&1; then
+    OK=0
+fi
+report_case "phase-only launches keep their stampless output current" "$OK" \
+    "post=$PHASE_ONLY_POST fetch=$PHASE_ONLY_FETCH"
 
 stop_service
 

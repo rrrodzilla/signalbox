@@ -35,6 +35,7 @@ STATE="${SIGNALBOX_SINK_STATE:-$HOME/.local/share/signalbox/instances.json}"
 IDLE="${SIGNALBOX_SINK_IDLE:-900}"
 
 exec python3 - "$PORT" "$STATE" "$IDLE" <<'PYEOF'
+import calendar
 import errno
 import json
 import math
@@ -100,6 +101,10 @@ PIPELINE_STAMPS = (
     "state/pipeline-review.stamp",
 )
 
+# bin/run.sh writes this record before it spawns any engine, for pipeline and
+# --phase launches alike, so it dates the launch that owns the run directory.
+LAUNCH_RECORD = "launch.json"
+
 ARTIFACT_GATES = {
     "plan.json": "state/pipeline-plan.stamp",
     "state/run.json": "state/pipeline-implement.stamp",
@@ -158,8 +163,70 @@ def artifact_info(run_dir, rel):
     return info
 
 
-def mark_stale(artifacts):
-    """Mark existing run artifacts older than their producing phase."""
+def parse_started(value):
+    """Epoch seconds for an ISO-8601 UTC instant as bin/run.sh records it."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def launch_boundary(run_dir):
+    """Epoch seconds at which the run directory's current launch began.
+
+    Nothing the current launch produces can predate its launch record, so the
+    record dates the boundary between this launch's artifacts and whatever an
+    earlier launch of the same run directory left behind. The recorded start
+    instant is preferred over the record's own mtime because bin/run.sh
+    rewrites the record moments after the spawn to add the engine identity;
+    the recorded instant is truncated to the second and therefore never lands
+    after the launch. Returns None when a run directory carries no readable
+    launch record, which leaves stale detection with only the producer-phase
+    gate to go on.
+    """
+    if not isinstance(run_dir, str) or not run_dir or "\x00" in run_dir:
+        return None
+    path = os.path.join(run_dir, LAUNCH_RECORD)
+    if not os.path.isfile(path):
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    fallback = st.st_mtime if math.isfinite(st.st_mtime) else None
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(MAX_ARTIFACT_JSON)
+            if len(raw) >= MAX_ARTIFACT_JSON or fh.read(1):
+                return fallback
+        record = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=reject_constant,
+            parse_float=finite_float,
+        )
+    except (OSError, ValueError, RecursionError):
+        return fallback
+    if not isinstance(record, dict):
+        return fallback
+    started = parse_started(record.get("started"))
+    return fallback if started is None else started
+
+
+def mark_stale(artifacts, boundary=None):
+    """Mark run artifacts that the current launch did not produce.
+
+    An artifact is current when it is at least as new as the launch boundary
+    AND at least as new as the stamp of the phase that produces it, counting
+    only a stamp the current launch itself wrote. Both halves are needed: a
+    rerun under a harness that does not archive keeps the previous launch's
+    artifacts and its stamps together, so the producer-phase gate alone reads
+    them as current, while a bin/run.sh --phase launch writes no pipeline
+    stamp at all, so the gate alone reads its fresh output as stale. Without
+    a boundary — a run directory whose launch record is missing or unreadable
+    — the producer-phase gate is all that is left and is applied alone.
+    """
     if not isinstance(artifacts, dict):
         return artifacts
 
@@ -176,8 +243,13 @@ def mark_stale(artifacts):
 
     for stamp in PIPELINE_STAMPS:
         entry = artifacts.get(stamp)
-        if isinstance(entry, dict):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("exists") is not True or boundary is None:
             entry["stale"] = False
+            continue
+        stamp_mtime = mtime(entry)
+        entry["stale"] = stamp_mtime is None or stamp_mtime < boundary
 
     newest_stamp = None
     newest_clock_valid = True
@@ -189,6 +261,8 @@ def mark_stale(artifacts):
         if stamp_mtime is None:
             newest_clock_valid = False
             break
+        if boundary is not None and stamp_mtime < boundary:
+            continue  # a stamp the previous launch left behind
         newest_stamp = (stamp_mtime if newest_stamp is None
                         else max(newest_stamp, stamp_mtime))
 
@@ -197,24 +271,37 @@ def mark_stale(artifacts):
         if not isinstance(entry, dict) or entry.get("exists") is not True:
             continue
         gate = artifacts.get(stamp)
+        gate_exists = isinstance(gate, dict) and gate.get("exists") is True
+        gate_mtime = mtime(gate) if gate_exists else None
         entry_mtime = mtime(entry)
-        gate_mtime = (mtime(gate) if isinstance(gate, dict)
-                      and gate.get("exists") is True else None)
-        entry["stale"] = (
-            entry_mtime is None
-            or gate_mtime is None
-            or entry_mtime < gate_mtime
-        )
+        if entry_mtime is None:
+            entry["stale"] = True
+        elif boundary is None:
+            entry["stale"] = gate_mtime is None or entry_mtime < gate_mtime
+        elif entry_mtime < boundary:
+            entry["stale"] = True
+        elif gate_exists and gate_mtime is None:
+            entry["stale"] = True  # unreadable phase clock: fail conservative
+        elif gate_mtime is not None and gate_mtime >= boundary:
+            entry["stale"] = entry_mtime < gate_mtime
+        else:
+            # Produced by the current launch, which wrote no stamp for the
+            # producing phase: a bin/run.sh --phase launch. It is current.
+            entry["stale"] = False
 
     escalated = artifacts.get("state/escalated.json")
     if isinstance(escalated, dict) and escalated.get("exists") is True:
         escalated_mtime = mtime(escalated)
-        escalated["stale"] = (
-            escalated_mtime is None
-            or not newest_clock_valid
-            or newest_stamp is None
-            or escalated_mtime < newest_stamp
-        )
+        if escalated_mtime is None or not newest_clock_valid:
+            escalated["stale"] = True
+        elif boundary is not None and escalated_mtime < boundary:
+            escalated["stale"] = True
+        elif boundary is None:
+            escalated["stale"] = (newest_stamp is None
+                                  or escalated_mtime < newest_stamp)
+        else:
+            escalated["stale"] = (newest_stamp is not None
+                                  and escalated_mtime < newest_stamp)
 
     return artifacts
 
@@ -546,7 +633,7 @@ def status():
             entry = provenance.get(artifact)
             if entry is not None:
                 info["provenance"] = entry
-        mark_stale(artifacts)
+        mark_stale(artifacts, launch_boundary(run_dir))
         logs = log_info(run_dir)
         for info in logs:
             entry = provenance.get("logs/" + info["file"])

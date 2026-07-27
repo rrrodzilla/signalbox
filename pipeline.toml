@@ -1,0 +1,111 @@
+# The end-to-end feature pipeline: plan -> implement -> review as ONE
+# engine, with Fable as the operator at every phase seam.
+#
+# Each phase still runs as its own engine (the phase-runner launches it as
+# a child, watches DISK ARTIFACTS for the terminal condition, and stops it
+# gracefully so its event trail flushes). Between phases, a headless Fable
+# operator applies the phantom-run discipline as topology: never trust the
+# runner's reported outcome, verify the artifacts first-hand (plan.json
+# shape, GATE GREEN + branch commits + diff ⊆ declared shard files, fresh
+# CR.md / pending.json), then PROCEED or HALT. Only PROCEED re-enters the
+# phase loop — the advance gate is topological, and the operator's reasons
+# are the pipeline's narration.
+#
+#   pipeline-seed ─> phase.request ─> phase-runner (child engine + artifact watch)
+#        ▲                                   │
+#        │                              phase.done
+#        │                                   │
+#        │                          operator (claude -p, Fable)
+#        │                                   │
+#        │                            phase.verified
+#        │                ┌──────────────────┼──────────────────┐
+#        │            advance             complete            halted
+#        │      (PROCEED, not review)  (PROCEED, review)      (HALT)
+#        │                │                  │                  │
+#        └── next phase ──┘           pipeline.complete   pipeline.halted
+#
+# Launch: SIGNALBOX_ISSUE=<n> emergent --config pipeline.toml
+# (init.toml must have filled the vault first — once per repo.)
+
+[engine]
+name = "signalbox-pipeline"
+socket_path = "auto"
+
+[[sources]]
+name = "pipeline-seed"
+path = "~/.local/share/emergent/primitives/bin/exec-source"
+args = ["--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/pipeline-seed.sh"]
+publishes = ["exec.output"]
+
+[[handlers]]
+name = "unwrap-seed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "exec.output", "--publish-as", "phase.request", "--", "jq", "-c", ".stdout | fromjson"]
+subscribes = ["exec.output"]
+publishes = ["phase.request"]
+
+[[handlers]]
+name = "phase-runner"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "phase.request", "--publish-as", "phase.done", "-t", "7200000", "--", "__SIGNALBOX_ROOT__/bin/phase-run.sh"]
+subscribes = ["phase.request"]
+publishes = ["phase.done"]
+
+[[handlers]]
+name = "operator"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "phase.done", "--publish-as", "phase.verified", "-t", "900000", "--", "__SIGNALBOX_ROOT__/bin/operator.sh"]
+subscribes = ["phase.done"]
+publishes = ["phase.verified"]
+
+[[handlers]]
+name = "promoter"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "phase.request", "--publish-as", "phase.done", "-t", "2700000", "--", "__SIGNALBOX_ROOT__/bin/promote-exec.sh"]
+subscribes = ["phase.request"]
+publishes = ["phase.done"]
+
+[[handlers]]
+name = "advance"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "phase.verified", "--publish-as", "phase.request", "--", "jq", "-c", "select(.verdict == \"PROCEED\" and (.phase == \"plan\" or .phase == \"implement\" or (.phase == \"review\" and .parked != true))) | {issue, correlation_id, phase: ({plan: \"implement\", implement: \"review\", review: \"promote\"}[.phase])}"]
+subscribes = ["phase.verified"]
+publishes = ["phase.request"]
+
+[[handlers]]
+name = "complete"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "phase.verified", "--publish-as", "pipeline.complete", "--", "jq", "-c", "select(.verdict == \"PROCEED\" and (.phase == \"promote\" or (.phase == \"review\" and .parked == true))) | {issue, phase, parked: (.parked // false), reason, correlation_id}"]
+subscribes = ["phase.verified"]
+publishes = ["pipeline.complete"]
+
+[[handlers]]
+name = "halt-guard"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "phase.verified", "--publish-as", "pipeline.halted", "--", "jq", "-c", "select(.verdict == \"HALT\") | {issue, phase, outcome, reason, correlation_id}"]
+subscribes = ["phase.verified"]
+publishes = ["pipeline.halted"]
+
+[[sinks]]
+name = "seam-narrator"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "phase.verified", "--", "jq", "-r", "\"[operator] \\(.phase): \\(.verdict) — \\(.reason)\""]
+subscribes = ["phase.verified"]
+
+[[sinks]]
+name = "completion"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "pipeline.complete", "--", "jq", "-r", "\"PIPELINE COMPLETE issue #\\(.issue)\\(if .parked then \\\" — PARKED FOR HUMAN APPROVAL\\\" else \\\" — MERGED (release step is yours)\\\" end)\\n\\(.reason)\\ntrail: bin/audit.sh \\(.correlation_id)\""]
+subscribes = ["pipeline.complete"]
+
+[[sinks]]
+name = "halts"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "pipeline.halted", "--", "jq", "-r", "\"PIPELINE HALTED at \\(.phase) (runner outcome: \\(.outcome)) issue #\\(.issue)\\n\\(.reason)\""]
+subscribes = ["pipeline.halted"]
+
+[[sinks]]
+name = "errors"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "exec.error", "--", "jq", "-c", "."]
+subscribes = ["exec.error"]

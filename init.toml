@@ -1,0 +1,69 @@
+# TRIP-init's research phase as an Emergent topology: fan out one researcher
+# per vault document, write the results into the Obsidian vault that
+# .claude/docs points at. Non-destructive: existing docs (which TRIP-init
+# gates on human approval) get a .proposed.md sibling instead.
+#
+#   init-seed ─> init.requested ── fan-out by subscription ──> researcher-architecture ┐
+#                                 ├─────────────────────────> researcher-rules         ├─> doc.researched
+#                                 └─────────────────────────> researcher-testing       ┘
+#   doc.researched ─> vault-writer ─> doc.written ─> narrator
+
+[engine]
+name = "signalbox-init"
+socket_path = "auto"
+
+[[sources]]
+name = "init-seed"
+path = "~/.local/share/emergent/primitives/bin/exec-source"
+args = ["--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/init-seed.sh"]
+publishes = ["exec.output"]
+
+[[handlers]]
+name = "unwrap-init"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "exec.output", "--publish-as", "init.requested", "--", "jq", "-c", ".stdout | fromjson"]
+subscribes = ["exec.output"]
+publishes = ["init.requested"]
+
+[[handlers]]
+name = "researcher-architecture"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "init.requested", "--publish-as", "doc.researched", "-t", "1800000", "--", "__SIGNALBOX_ROOT__/bin/research.sh", "architecture"]
+subscribes = ["init.requested"]
+publishes = ["doc.researched"]
+env = { CODEX_MODEL = "gpt-5.6-sol", CODEX_EFFORT = "high" }
+
+[[handlers]]
+name = "researcher-rules"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "init.requested", "--publish-as", "doc.researched", "-t", "1800000", "--", "__SIGNALBOX_ROOT__/bin/research.sh", "rules"]
+subscribes = ["init.requested"]
+publishes = ["doc.researched"]
+env = { CODEX_MODEL = "gpt-5.6-sol", CODEX_EFFORT = "high" }
+
+[[handlers]]
+name = "researcher-testing"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "init.requested", "--publish-as", "doc.researched", "-t", "1800000", "--", "__SIGNALBOX_ROOT__/bin/research.sh", "testing"]
+subscribes = ["init.requested"]
+publishes = ["doc.researched"]
+env = { CODEX_MODEL = "gpt-5.6-sol", CODEX_EFFORT = "high" }
+
+[[handlers]]
+name = "vault-writer"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "doc.researched", "--publish-as", "doc.written", "--", "__SIGNALBOX_ROOT__/bin/vault-write.sh"]
+subscribes = ["doc.researched"]
+publishes = ["doc.written"]
+
+[[sinks]]
+name = "init-narrator"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "doc.written", "--", "jq", "-r", "\"[init] \\(.doc) -> \\(.path) (\\(.bytes) bytes)\""]
+subscribes = ["doc.written"]
+
+[[sinks]]
+name = "errors"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "exec.error", "--", "jq", "-c", "."]
+subscribes = ["exec.error"]

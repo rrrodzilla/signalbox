@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Reviewer handler: stdin = review.requested payload {workdir, round, feedback, thread_id?}
+# stdout = review.raw payload {verdict, review, round, workdir, thread_id}
+#
+# Round 1 (no thread_id): fresh non-interactive Codex review of $workdir in a
+# read-only sandbox; the thread id is captured from the thread.started event.
+# Rounds 2+ (thread_id present): `codex exec resume` continues the SAME review
+# thread, so the re-review has full context of its own prior findings — the
+# thread id travels in the event payload, not in a state file.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PAYLOAD="$(cat)"
+
+WORKDIR="$(jq -r '.workdir' <<<"$PAYLOAD")"
+ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
+FEEDBACK="$(jq -r '.feedback // ""' <<<"$PAYLOAD")"
+THREAD_ID="$(jq -r '.thread_id // ""' <<<"$PAYLOAD")"
+CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
+
+mkdir -p "$ROOT/logs"
+
+LAST="$ROOT/logs/review-round-$ROUND.md"
+EVENTS="$ROOT/logs/review-round-$ROUND.jsonl"
+
+cd "$WORKDIR"
+
+if [ -z "$THREAD_ID" ]; then
+    # Fresh session. If feedback is present (thread was lost), embed it so the
+    # reviewer can still verify prior issues were addressed.
+    PROMPT="$(cat "$ROOT/prompts/review.md")"
+    # Target mode: the validated plan's intent is authoritative context —
+    # without it, deliberate API removals read as compatibility defects.
+    if [ -f "$ROOT/plan.json" ]; then
+        PROMPT="$PROMPT
+
+## Feature intent (from the validated plan — authoritative)
+
+Issue #$(jq -r '.issue' "$ROOT/plan.json"): feature \`$(jq -r '.feature' "$ROOT/plan.json")\`
+
+$(jq -r '.scope_notes // "(no scope notes)"' "$ROOT/plan.json")"
+    fi
+    if [ -n "$FEEDBACK" ]; then
+        PROMPT="$PROMPT
+
+## Previous round feedback (verify these were addressed)
+
+$FEEDBACK"
+    fi
+
+    codex exec \
+        --json \
+        --skip-git-repo-check \
+        --sandbox read-only \
+        --color never \
+        -c model="${CODEX_MODEL:-gpt-5.6-sol}" \
+        -c model_reasoning_effort="${CODEX_EFFORT:-high}" \
+        -o "$LAST" \
+        "$PROMPT" \
+        </dev/null \
+        >"$EVENTS" \
+        2>"$EVENTS.stderr"
+
+    THREAD_ID="$(jq -r 'select(.type == "thread.started") | .thread_id' "$EVENTS" 2>/dev/null | head -1)"
+    [ "$THREAD_ID" != "null" ] || THREAD_ID=""
+else
+    # Resume: the thread already holds the prior review, so the prompt only
+    # asks to verify. --sandbox / --color are not accepted here (inherited).
+    PROMPT="$(cat "$ROOT/prompts/re-review.md")"
+
+    codex exec resume "$THREAD_ID" \
+        --json \
+        --skip-git-repo-check \
+        -c model="${CODEX_MODEL:-gpt-5.6-sol}" \
+        -c model_reasoning_effort="${CODEX_EFFORT:-high}" \
+        -o "$LAST" \
+        "$PROMPT" \
+        </dev/null \
+        >"$EVENTS" \
+        2>"$EVENTS.stderr"
+fi
+
+VERDICT="$(grep -oE '^(APPROVED|REQUEST_CHANGES)[[:space:]]*$' "$LAST" | tail -1 | tr -d '[:space:]' || true)"
+[ -n "$VERDICT" ] || VERDICT="UNKNOWN"
+
+jq -n \
+    --arg verdict "$VERDICT" \
+    --rawfile review "$LAST" \
+    --argjson round "$ROUND" \
+    --arg workdir "$WORKDIR" \
+    --arg thread_id "$THREAD_ID" \
+    --arg cid "$CID" \
+    '{verdict: $verdict, review: $review, round: $round, workdir: $workdir, thread_id: $thread_id, correlation_id: $cid}'

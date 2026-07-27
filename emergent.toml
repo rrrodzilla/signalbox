@@ -1,0 +1,182 @@
+# TRIP code-review loop as an Emergent topology.
+#
+# Cycle:  review.requested -> reviewer (codex) -> review.raw
+#         review.raw -> verdict parsers -> review.approved | review.changes_requested
+#         review.changes_requested -> round guard -> fix.requested | review.escalated
+#         fix.requested -> fixer (claude -p) -> review.requested   <- the loop edge
+#
+# TRIP sentinels become topics; the round guard bounds the cycle at 3 fix
+# attempts (rounds 1-4); approval writes results/CR.md under PROMOTION_READY.
+
+[engine]
+name = "signalbox-review-loop"
+socket_path = "auto"
+
+# ── Entry: one-shot seed emits the first review request ─────────────────────
+
+[[sources]]
+name = "seed"
+path = "~/.local/share/emergent/primitives/bin/exec-source"
+args = ["--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/seed.sh"]
+publishes = ["exec.output"]
+
+[[handlers]]
+name = "unwrap-seed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "exec.output", "--publish-as", "review.requested", "--", "jq", "-c", ".stdout | fromjson | . + {correlation_id: (.feature + \"-\" + (now | strftime(\"%Y%m%d-%H%M%S\")))}"]
+subscribes = ["exec.output"]
+publishes = ["review.requested"]
+
+# ── Reviewer: fresh Codex review per round, read-only sandbox ────────────────
+
+[[handlers]]
+name = "reviewer"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.requested", "--publish-as", "review.raw", "-t", "1800000", "--", "__SIGNALBOX_ROOT__/bin/review.sh"]
+subscribes = ["review.requested"]
+publishes = ["review.raw"]
+env = { CODEX_MODEL = "gpt-5.6-sol", CODEX_EFFORT = "high" }
+
+# ── Verdict parsing: sentinel string -> topic (jq silent-filter split) ───────
+
+[[handlers]]
+name = "verdict-approved"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.raw", "--publish-as", "review.approved", "--", "jq", "-c", "select(.verdict == \"APPROVED\")"]
+subscribes = ["review.raw"]
+publishes = ["review.approved"]
+
+[[handlers]]
+name = "verdict-changes"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.raw", "--publish-as", "review.changes_requested", "--", "jq", "-c", "select(.verdict == \"REQUEST_CHANGES\")"]
+subscribes = ["review.raw"]
+publishes = ["review.changes_requested"]
+
+# ── Round guard: bound the cycle; round >= 4 escalates to a human ────────────
+
+[[handlers]]
+name = "round-guard"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.changes_requested", "--publish-as", "fix.requested", "--", "jq", "-c", "select(.round < 4)"]
+subscribes = ["review.changes_requested"]
+publishes = ["fix.requested"]
+
+[[handlers]]
+name = "escalation-guard"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.changes_requested", "--publish-as", "review.escalated", "--", "jq", "-c", "select(.round >= 4)"]
+subscribes = ["review.changes_requested"]
+publishes = ["review.escalated"]
+
+# ── Fixer: headless Claude addresses feedback, closes the loop ───────────────
+
+[[handlers]]
+name = "fixer"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "fix.requested", "--publish-as", "review.requested", "-t", "1800000", "--", "__SIGNALBOX_ROOT__/bin/fix.sh"]
+subscribes = ["fix.requested"]
+publishes = ["review.requested"]
+
+# ── Situational gate: the LLM sets the floor for the action at hand ──────────
+# No policy table. The assessor (an LLM) is handed the action's mechanics and
+# the live context and determines the readiness floor for THIS instance, with
+# its rationale in the payload — so the event trail records not just what was
+# decided but why. The gate itself is then a pure comparison: earned
+# per-action readiness vs the assessed floor.
+
+[[handlers]]
+name = "assessor"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.approved", "--publish-as", "gate.assessed", "-t", "120000", "--", "__SIGNALBOX_ROOT__/bin/assess.sh"]
+subscribes = ["review.approved"]
+publishes = ["gate.assessed"]
+
+[[handlers]]
+name = "gate"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "gate.assessed", "--publish-as", "gate.decided", "--", "jq", "-c", ". + {decision: (if .readiness >= .floor then \"auto\" else \"human\" end)}"]
+subscribes = ["gate.assessed"]
+publishes = ["gate.decided"]
+
+[[handlers]]
+name = "route-auto"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "gate.decided", "--publish-as", "approval.granted", "--", "jq", "-c", "select(.decision == \"auto\")"]
+subscribes = ["gate.decided"]
+publishes = ["approval.granted"]
+
+[[handlers]]
+name = "route-human"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "gate.decided", "--publish-as", "approval.requested", "--", "jq", "-c", "select(.decision == \"human\")"]
+subscribes = ["gate.decided"]
+publishes = ["approval.requested"]
+
+# Leader-directed return path: the human's webhook POST re-enters the fabric
+# as approval.granted. No handler shortcuts this — the gate is topological.
+
+[[sources]]
+name = "approval-webhook"
+path = "~/.local/share/emergent/primitives/bin/http-source"
+args = ["--port", "8095", "--path", "/approve"]
+publishes = ["http.request"]
+
+[[handlers]]
+name = "unwrap-approval"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "http.request", "--publish-as", "approval.granted", "--", "jq", "-c", ".body"]
+subscribes = ["http.request"]
+publishes = ["approval.granted"]
+
+# ── Readiness ladder: autonomy is earned, not granted ────────────────────────
+
+[[sinks]]
+name = "readiness-up"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "approval.granted", "--", "__SIGNALBOX_ROOT__/bin/readiness.sh", "up"]
+subscribes = ["approval.granted"]
+
+[[sinks]]
+name = "readiness-down"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "review.escalated", "--", "__SIGNALBOX_ROOT__/bin/readiness.sh", "down"]
+subscribes = ["review.escalated"]
+
+# ── Sinks: narration, approval request, promotion, escalation, errors ────────
+
+[[sinks]]
+name = "narrator"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "review.raw", "--", "jq", "-r", "\"[round \\(.round)] verdict: \\(.verdict)\""]
+subscribes = ["review.raw"]
+
+[[sinks]]
+name = "gate-narrator"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "gate.decided", "--", "jq", "-r", "\"[gate] \\(.action): floor R\\(.floor) vs readiness R\\(.readiness) -> \\(.decision) (\\(.rationale))\""]
+subscribes = ["gate.decided"]
+
+[[sinks]]
+name = "approval-notify"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "approval.requested", "--", "__SIGNALBOX_ROOT__/bin/notify.sh"]
+subscribes = ["approval.requested"]
+
+[[sinks]]
+name = "promoter"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "approval.granted", "--", "__SIGNALBOX_ROOT__/bin/promote.sh"]
+subscribes = ["approval.granted"]
+
+[[sinks]]
+name = "escalation"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "review.escalated", "--", "jq", "-r", "\"ESCALATED after \\(.round) rounds — human review required\""]
+subscribes = ["review.escalated"]
+
+[[sinks]]
+name = "errors"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "exec.error", "--", "jq", "-c", "."]
+subscribes = ["exec.error"]

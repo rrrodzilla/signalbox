@@ -1,0 +1,29 @@
+{
+  "feature": "demo-greeting",
+  "stages": [
+    {
+      "id": "s1-modules",
+      "title": "Independent modules (concurrent shards)",
+      "shards": [
+        {
+          "id": "greet",
+          "prompt": "Create the file demo/src/greet.rs containing exactly: a public function `pub fn greeting(name: &str) -> String` that returns `Hello, {Name}!` where {Name} is the input with its first letter uppercased. Requirement: obtain the first character with `name.chars().next().unwrap()`. Add a `#[cfg(test)] mod tests` with one unit test asserting `greeting(\"world\") == \"Hello, World!\"`. Do NOT modify demo/src/lib.rs or any other file — the module will be wired into the crate in a later stage. Create only demo/src/greet.rs."
+        },
+        {
+          "id": "farewell",
+          "prompt": "Create the file demo/src/farewell.rs containing exactly: a public function `pub fn farewell(name: &str) -> String` that returns the string `Goodbye, {name}.`, and a `#[cfg(test)] mod tests` with one unit test asserting `farewell(\"World\") == \"Goodbye, World.\"`. Do NOT modify demo/src/lib.rs or any other file — the module will be wired into the crate in a later stage. Create only demo/src/farewell.rs."
+        }
+      ]
+    },
+    {
+      "id": "s2-wire",
+      "title": "Wire modules into the crate (sequential — depends on both shards)",
+      "shards": [
+        {
+          "id": "wire",
+          "prompt": "demo/src/greet.rs and demo/src/farewell.rs already exist. Edit demo/src/lib.rs ONLY: declare `pub mod greet;` and `pub mod farewell;` and re-export both functions with `pub use greet::greeting;` and `pub use farewell::farewell;`. Do not change parse_pairs or any other code, and do not modify any other file."
+        }
+      ]
+    }
+  ]
+}

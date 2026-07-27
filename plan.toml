@@ -1,0 +1,99 @@
+# TRIP-1's planning phase as an Emergent topology: one GitHub issue in,
+# one validated plan.json out. The planner is judgment (opus, reads the
+# vault docs, explores the source); the validator is pure mechanics (jq —
+# schema + intra-stage file-disjointness); only VALID plans reach the
+# writer, so the plan the implement stream loads is validated by wiring,
+# not by convention.
+#
+#   plan-request ─> plan.requested ─> planner (claude -p, opus) ─> plan.candidate
+#                        ▲                                              │
+#                        │                                          validator
+#                        │                                              │
+#                        │                                        plan.validated
+#                        │                       ┌──────────────┬───────┴───────┐
+#                        │                     VALID          INVALID        INVALID
+#                        │                       │           (round < 3)   (round >= 3)
+#                        │                  plan.approved         │         or BLOCKED
+#                        │                       │                │              │
+#                        │                  plan-writer           │        plan.escalated
+#                        │                 (plan.json out)        │
+#                        └────────── replan (feedback, round+1) ──┘
+#
+# Launch: SIGNALBOX_ISSUE=<n> emergent --config plan.toml
+
+[engine]
+name = "signalbox-plan"
+socket_path = "auto"
+
+[[sources]]
+name = "plan-request"
+path = "~/.local/share/emergent/primitives/bin/exec-source"
+args = ["--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/plan-request.sh"]
+publishes = ["exec.output"]
+
+[[handlers]]
+name = "unwrap-request"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "exec.output", "--publish-as", "plan.requested", "--", "jq", "-c", ".stdout | fromjson"]
+subscribes = ["exec.output"]
+publishes = ["plan.requested"]
+
+[[handlers]]
+name = "planner"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.requested", "--publish-as", "plan.candidate", "-t", "1800000", "--", "__SIGNALBOX_ROOT__/bin/planner.sh"]
+subscribes = ["plan.requested"]
+publishes = ["plan.candidate"]
+
+[[handlers]]
+name = "validator"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.candidate", "--publish-as", "plan.validated", "--", "__SIGNALBOX_ROOT__/bin/plan-validate.sh"]
+subscribes = ["plan.candidate"]
+publishes = ["plan.validated"]
+
+[[handlers]]
+name = "valid-splitter"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.validated", "--publish-as", "plan.approved", "--", "jq", "-c", "select(.verdict == \"VALID\")"]
+subscribes = ["plan.validated"]
+publishes = ["plan.approved"]
+
+[[handlers]]
+name = "replan-guard"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.validated", "--publish-as", "plan.requested", "--", "jq", "-c", "select(.verdict == \"INVALID\" and .round < 3) | del(.verdict, .plan, .parse_error) | .round += 1"]
+subscribes = ["plan.validated"]
+publishes = ["plan.requested"]
+
+[[handlers]]
+name = "escalation-guard"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.validated", "--publish-as", "plan.escalated", "--", "jq", "-c", "select(.verdict == \"BLOCKED\" or (.verdict == \"INVALID\" and .round >= 3)) | {issue, verdict, feedback, round, correlation_id}"]
+subscribes = ["plan.validated"]
+publishes = ["plan.escalated"]
+
+[[handlers]]
+name = "plan-writer"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.approved", "--publish-as", "plan.written", "--", "__SIGNALBOX_ROOT__/bin/plan-write.sh"]
+subscribes = ["plan.approved"]
+publishes = ["plan.written"]
+
+[[sinks]]
+name = "plan-narrator"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "plan.written", "--", "jq", "-r", "\"[plan] issue #\\(.issue) -> feat/\\(.feature): \\(.stages) stage(s), \\(.shards) shard(s), round \\(.round) -> plan.json\\n[plan] scope: \\(.scope_notes)\\n[plan] next: emergent --config implement.toml\""]
+subscribes = ["plan.written"]
+
+[[sinks]]
+name = "escalations"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "plan.escalated", "--", "jq", "-r", "\"[plan] ESCALATED issue #\\(.issue) (\\(.verdict), round \\(.round)): \\(.feedback)\""]
+subscribes = ["plan.escalated"]
+
+[[sinks]]
+name = "errors"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "exec.error", "--", "jq", "-c", "."]
+subscribes = ["exec.error"]

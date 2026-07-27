@@ -186,12 +186,85 @@ path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "exec.error", "--", "jq", "-c", "."]
 subscribes = ["exec.error"]
 
-# Live watch: stream every interesting topic to the browser (bin/watch.sh
-# proxies this port so the dashboard needs no CORS). Ports are allocated per
-# repo at install time; per-run launches render a leased port block over the
-# same port placeholders. dev.sh renders 8100-8104.
+# Forward events to the one shared machine-level sink service on its fixed
+# known port (default 8099, SIGNALBOX_SINK_PORT); this topology allocates and
+# serves no port. Forwarding is fire-and-forget, so a down sink service cannot
+# stall or fail a run. exec-sink gives its child only the payload, with no topic
+# metadata, so one block per topic passes the exact label as a literal argument.
 [[sinks]]
-name = "watchtower"
-path = "~/.local/share/emergent/primitives/bin/sse-sink"
-args = ["--port", "__SIGNALBOX_PORT_IMPLEMENT__"]
-subscribes = ["stage.item", "shard.built", "shard.review.raw", "shard.fix.requested", "shard.done", "stage.done", "stage.ack", "shard.escalated", "plan.done", "exec.error", "system.started.*", "system.stopped.*", "system.error.*"]
+name = "forward-stage-item"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "stage.item", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "stage.item"]
+subscribes = ["stage.item"]
+
+[[sinks]]
+name = "forward-shard-built"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "shard.built", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "shard.built"]
+subscribes = ["shard.built"]
+
+[[sinks]]
+name = "forward-shard-review-raw"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "shard.review.raw", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "shard.review.raw"]
+subscribes = ["shard.review.raw"]
+
+[[sinks]]
+name = "forward-shard-fix-requested"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "shard.fix.requested", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "shard.fix.requested"]
+subscribes = ["shard.fix.requested"]
+
+[[sinks]]
+name = "forward-shard-done"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "shard.done", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "shard.done"]
+subscribes = ["shard.done"]
+
+[[sinks]]
+name = "forward-stage-done"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "stage.done", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "stage.done"]
+subscribes = ["stage.done"]
+
+[[sinks]]
+name = "forward-stage-ack"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "stage.ack", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "stage.ack"]
+subscribes = ["stage.ack"]
+
+[[sinks]]
+name = "forward-shard-escalated"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "shard.escalated", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "shard.escalated"]
+subscribes = ["shard.escalated"]
+
+[[sinks]]
+name = "forward-plan-done"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "plan.done", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "plan.done"]
+subscribes = ["plan.done"]
+
+[[sinks]]
+name = "forward-exec-error"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "exec.error", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "exec.error"]
+subscribes = ["exec.error"]
+
+[[sinks]]
+name = "forward-system-started-any"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "system.started.*", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "system.started.*"]
+subscribes = ["system.started.*"]
+
+[[sinks]]
+name = "forward-system-stopped-any"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "system.stopped.*", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "system.stopped.*"]
+subscribes = ["system.stopped.*"]
+
+[[sinks]]
+name = "forward-system-error-any"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "system.error.*", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "implement", "system.error.*"]
+subscribes = ["system.error.*"]

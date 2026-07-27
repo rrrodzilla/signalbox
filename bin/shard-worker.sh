@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Shard worker: bin/shard-worker.sh <worker-index> <worker-count>
 # stdin = stage.item payload {id, title, shards: [...]}
-# stdout = shard.built payload {stage, expected, worker, pending: [...], done: [], branches: []}
+# stdout = shard.built payload
+#   {stage, expected, worker, pending: [...], done: [], branches: [],
+#    correlation_id, provenance}
 # Built shards enter as a PENDING queue — nothing reaches the collector until
 # the per-shard delta review has approved each one.
 #
@@ -14,6 +16,7 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 ME="${1:?worker index}"
 COUNT="${2:?worker count}"
@@ -22,6 +25,8 @@ PAYLOAD="$(cat)"
 STAGE_ID="$(jq -r '.id' <<<"$PAYLOAD")"
 EXPECTED="$(jq -r '.shards | length' <<<"$PAYLOAD")"
 CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
+CODEX_MODEL_RESOLVED="${CODEX_MODEL:-gpt-5.6-sol}"
+CODEX_EFFORT_RESOLVED="${CODEX_EFFORT:-high}"
 MINE="$(jq -c --argjson me "$ME" --argjson n "$COUNT" \
     '[.shards | to_entries[] | select(.key % $n == $me) | .value]' <<<"$PAYLOAD")"
 
@@ -65,8 +70,8 @@ $PROMPT"
             --skip-git-repo-check \
             --sandbox workspace-write \
             --color never \
-            -c model="${CODEX_MODEL:-gpt-5.6-sol}" \
-            -c model_reasoning_effort="${CODEX_EFFORT:-high}" \
+            -c model="$CODEX_MODEL_RESOLVED" \
+            -c model_reasoning_effort="$CODEX_EFFORT_RESOLVED" \
             -o "$RUN_DIR/logs/shard-$STAGE_ID-$SHARD_ID.md" \
             "$PROMPT" \
             </dev/null \
@@ -77,9 +82,13 @@ $PROMPT"
         git commit -S -m "feat: $STAGE_ID/$SHARD_ID shard" >&2
     )
 
+    stamp_provenance "logs/shard-$STAGE_ID-$SHARD_ID.md" codex "$CODEX_MODEL_RESOLVED" "$CODEX_EFFORT_RESOLVED"
+
     PENDING="$(jq -c --arg s "$SHARD_ID" --arg b "$BRANCH" \
         '. + [{shard: $s, branch: $b}]' <<<"$PENDING")"
 done
+
+PROVENANCE="$(provenance_object codex "$CODEX_MODEL_RESOLVED" "$CODEX_EFFORT_RESOLVED")"
 
 jq -n \
     --arg stage "$STAGE_ID" \
@@ -87,4 +96,5 @@ jq -n \
     --argjson worker "$ME" \
     --argjson pending "$PENDING" \
     --arg cid "$CID" \
-    '{stage: $stage, expected: $expected, worker: $worker, pending: $pending, done: [], branches: [], correlation_id: $cid}'
+    --argjson provenance "$PROVENANCE" \
+    '{stage: $stage, expected: $expected, worker: $worker, pending: $pending, done: [], branches: [], correlation_id: $cid, provenance: $provenance}'

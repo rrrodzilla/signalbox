@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Reviewer handler: stdin = review.requested payload {workdir, round, feedback, thread_id?}
-# stdout = review.raw payload {verdict, review, round, workdir, thread_id}
+# stdout = review.raw payload
+#   {verdict, review, round, workdir, thread_id, correlation_id, provenance}
 #
 # Round 1 (no thread_id): fresh non-interactive Codex review of $workdir in a
 # read-only sandbox; the thread id is captured from the thread.started event.
@@ -10,6 +11,7 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 PAYLOAD="$(cat)"
 
@@ -18,6 +20,8 @@ ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 FEEDBACK="$(jq -r '.feedback // ""' <<<"$PAYLOAD")"
 THREAD_ID="$(jq -r '.thread_id // ""' <<<"$PAYLOAD")"
 CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
+CODEX_MODEL_RESOLVED="${CODEX_MODEL:-gpt-5.6-sol}"
+CODEX_EFFORT_RESOLVED="${CODEX_EFFORT:-high}"
 
 mkdir -p "$RUN_DIR/logs"
 
@@ -54,8 +58,8 @@ $FEEDBACK"
         --skip-git-repo-check \
         --sandbox read-only \
         --color never \
-        -c model="${CODEX_MODEL:-gpt-5.6-sol}" \
-        -c model_reasoning_effort="${CODEX_EFFORT:-high}" \
+        -c model="$CODEX_MODEL_RESOLVED" \
+        -c model_reasoning_effort="$CODEX_EFFORT_RESOLVED" \
         -o "$LAST" \
         "$PROMPT" \
         </dev/null \
@@ -72,14 +76,18 @@ else
     codex exec resume "$THREAD_ID" \
         --json \
         --skip-git-repo-check \
-        -c model="${CODEX_MODEL:-gpt-5.6-sol}" \
-        -c model_reasoning_effort="${CODEX_EFFORT:-high}" \
+        -c model="$CODEX_MODEL_RESOLVED" \
+        -c model_reasoning_effort="$CODEX_EFFORT_RESOLVED" \
         -o "$LAST" \
         "$PROMPT" \
         </dev/null \
         >"$EVENTS" \
         2>"$EVENTS.stderr"
 fi
+
+stamp_provenance "logs/review-round-$ROUND.md" codex "$CODEX_MODEL_RESOLVED" "$CODEX_EFFORT_RESOLVED"
+stamp_provenance "results/CR.md" codex "$CODEX_MODEL_RESOLVED" "$CODEX_EFFORT_RESOLVED"
+PROVENANCE="$(provenance_object codex "$CODEX_MODEL_RESOLVED" "$CODEX_EFFORT_RESOLVED")"
 
 VERDICT="$(grep -oE '^(APPROVED|REQUEST_CHANGES)[[:space:]]*$' "$LAST" | tail -1 | tr -d '[:space:]' || true)"
 [ -n "$VERDICT" ] || VERDICT="UNKNOWN"
@@ -91,4 +99,5 @@ jq -n \
     --arg workdir "$WORKDIR" \
     --arg thread_id "$THREAD_ID" \
     --arg cid "$CID" \
-    '{verdict: $verdict, review: $review, round: $round, workdir: $workdir, thread_id: $thread_id, correlation_id: $cid}'
+    --argjson provenance "$PROVENANCE" \
+    '{verdict: $verdict, review: $review, round: $round, workdir: $workdir, thread_id: $thread_id, correlation_id: $cid, provenance: $provenance}'

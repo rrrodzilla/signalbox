@@ -3,7 +3,8 @@
 # stdin = shard.review.requested payload
 #   {stage, expected, worker, pending, done, branches,
 #    current: {shard, branch}, round, thread_id, feedback}
-# stdout = shard.review.raw payload (input + {verdict, review, thread_id})
+# stdout = shard.review.raw payload
+#   (input + {verdict, review, thread_id, provenance})
 #
 # Reviews ONLY this shard's delta — the diff of its branch against the
 # integration tip — with the same thread continuity as the code-review loop:
@@ -14,6 +15,7 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 ME="${1:?worker index}"
 PAYLOAD="$(cat)"
@@ -24,6 +26,8 @@ SHARD_ID="$(jq -r '.current.shard' <<<"$PAYLOAD")"
 BRANCH="$(jq -r '.current.branch' <<<"$PAYLOAD")"
 ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 THREAD_ID="$(jq -r '.thread_id // ""' <<<"$PAYLOAD")"
+CODEX_MODEL_RESOLVED="${CODEX_MODEL:-gpt-5.6-sol}"
+CODEX_EFFORT_RESOLVED="${CODEX_EFFORT:-high}"
 # The run's git namespace, derived exactly as in shard-worker.sh and
 # stage-merge.sh so this resolves the worktree shard-worker.sh created:
 # branch shard/<feature>/<stage>-<shard> lives in <wt-base>/<feature>-<stage>-<shard>.
@@ -53,8 +57,8 @@ $DIFF
         --skip-git-repo-check \
         --sandbox read-only \
         --color never \
-        -c model="${CODEX_MODEL:-gpt-5.6-sol}" \
-        -c model_reasoning_effort="${CODEX_EFFORT:-high}" \
+        -c model="$CODEX_MODEL_RESOLVED" \
+        -c model_reasoning_effort="$CODEX_EFFORT_RESOLVED" \
         -o "$LAST" \
         "$PROMPT" \
         </dev/null \
@@ -77,14 +81,17 @@ $DIFF
     codex exec resume "$THREAD_ID" \
         --json \
         --skip-git-repo-check \
-        -c model="${CODEX_MODEL:-gpt-5.6-sol}" \
-        -c model_reasoning_effort="${CODEX_EFFORT:-high}" \
+        -c model="$CODEX_MODEL_RESOLVED" \
+        -c model_reasoning_effort="$CODEX_EFFORT_RESOLVED" \
         -o "$LAST" \
         "$PROMPT" \
         </dev/null \
         >"$EVENTS" \
         2>"$EVENTS.stderr"
 fi
+
+stamp_provenance "logs/shard-review-$STAGE_ID-$SHARD_ID-r$ROUND.md" codex "$CODEX_MODEL_RESOLVED" "$CODEX_EFFORT_RESOLVED"
+PROVENANCE="$(provenance_object codex "$CODEX_MODEL_RESOLVED" "$CODEX_EFFORT_RESOLVED")"
 
 VERDICT="$(grep -oE '^(APPROVED|REQUEST_CHANGES)[[:space:]]*$' "$LAST" | tail -1 | tr -d '[:space:]' || true)"
 [ -n "$VERDICT" ] || VERDICT="UNKNOWN"
@@ -93,4 +100,5 @@ jq -c \
     --arg verdict "$VERDICT" \
     --rawfile review "$LAST" \
     --arg thread_id "$THREAD_ID" \
-    '. + {verdict: $verdict, review: $review, thread_id: $thread_id}' <<<"$PAYLOAD"
+    --argjson provenance "$PROVENANCE" \
+    '. + {verdict: $verdict, review: $review, thread_id: $thread_id, provenance: $provenance}' <<<"$PAYLOAD"

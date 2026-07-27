@@ -14,9 +14,43 @@ usage() {
     echo "usage: bin/ports.sh lease <slug> | release <slug> | list" >&2
 }
 
-pid_alive() {
-    local PID_VALUE="$1"
-    [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] && kill -0 "$PID_VALUE" 2>/dev/null
+# Exact process start identity: "<boot epoch>:<start time in clock ticks>",
+# both read from /proc. A PID is not an identity — the kernel recycles it, so
+# after a crash or a reboot an unrelated process can inherit a dead lease
+# owner's PID and keep that lease alive forever. The start time distinguishes
+# them; pairing it with btime keeps it exact across reboots, which reset both
+# the boot epoch and the tick origin. Fails (returns 1, prints nothing) when
+# /proc cannot answer.
+proc_identity() {
+    local PID_VALUE="$1" STAT_LINE BTIME
+    local -a FIELDS
+
+    [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] || return 1
+    STAT_LINE="$(cat "/proc/$PID_VALUE/stat" 2>/dev/null)" || return 1
+    # comm (field 2) may hold spaces and parens; fields 3+ follow the LAST ')',
+    # so starttime (field 22) is the 20th field of the remainder.
+    read -ra FIELDS <<<"${STAT_LINE##*)}"
+    [ "${#FIELDS[@]}" -ge 20 ] || return 1
+    [[ "${FIELDS[19]}" =~ ^[0-9]+$ ]] || return 1
+    BTIME="$(awk '/^btime /{print $2; exit}' /proc/stat 2>/dev/null)" || return 1
+    [[ "$BTIME" =~ ^[0-9]+$ ]] || return 1
+    printf '%s:%s\n' "$BTIME" "${FIELDS[19]}"
+}
+
+# A lease is held only while the ORIGINAL owning process is still running:
+# alive by kill(0) AND the same process by start identity.
+lease_owner_live() {
+    local PID_VALUE="$1" RECORDED="$2" CURRENT
+
+    [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 "$PID_VALUE" 2>/dev/null || return 1
+    # No recorded identity (a lease from before this field existed) or no
+    # readable /proc (non-Linux, torn read) leaves liveness as the only
+    # evidence there is; holding the lease is then the conservative verdict.
+    [ -n "$RECORDED" ] || return 0
+    CURRENT="$(proc_identity "$PID_VALUE" || true)"
+    [ -n "$CURRENT" ] || return 0
+    [ "$CURRENT" = "$RECORDED" ]
 }
 
 write_registry() {
@@ -29,12 +63,13 @@ write_registry() {
 }
 
 reap_dead() {
-    local ENTRY KEY PID_VALUE
+    local ENTRY KEY PID_VALUE START_VALUE
 
     while IFS= read -r ENTRY; do
         KEY="$(jq -r '.key' <<<"$ENTRY")"
         PID_VALUE="$(jq -r '.value.pid // empty' <<<"$ENTRY")"
-        if ! pid_alive "$PID_VALUE"; then
+        START_VALUE="$(jq -r '.value.start // empty' <<<"$ENTRY")"
+        if ! lease_owner_live "$PID_VALUE" "$START_VALUE"; then
             write_registry 'del(.[$key])' --arg key "$KEY"
         fi
     done < <(jq -c 'to_entries[]' "$REGISTRY")
@@ -144,10 +179,17 @@ case "$COMMAND" in
             exit 1
         fi
 
+        CALLER_START="$(proc_identity "$CALLER_PID" || true)"
+
         reap_dead
         HELD_PID="$(jq -r --arg key "$KEY" '.[$key].pid // empty' "$REGISTRY")"
+        HELD_START="$(jq -r --arg key "$KEY" '.[$key].start // empty' "$REGISTRY")"
         if [ -n "$HELD_PID" ]; then
-            if [ "$HELD_PID" != "$CALLER_PID" ]; then
+            # Survived reap_dead, so the entry names a live process. It is
+            # THIS caller re-leasing only if the start identity matches too.
+            if [ "$HELD_PID" != "$CALLER_PID" ] \
+                || { [ -n "$HELD_START" ] && [ -n "$CALLER_START" ] \
+                    && [ "$HELD_START" != "$CALLER_START" ]; }; then
                 echo "error: run $KEY is already held by live pid $HELD_PID" >&2
                 exit 1
             fi
@@ -155,10 +197,11 @@ case "$COMMAND" in
             BASE="$(jq -r --arg key "$KEY" '.[$key].base' "$REGISTRY")"
             STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             write_registry \
-                '.[$key] = {base: $base, pid: $pid, ts: $ts}' \
+                '.[$key] = {base: $base, pid: $pid, start: $start, ts: $ts}' \
                 --arg key "$KEY" \
                 --argjson base "$BASE" \
                 --argjson pid "$CALLER_PID" \
+                --arg start "$CALLER_START" \
                 --arg ts "$STARTED"
             printf '%s\n' "$BASE"
             exit 0
@@ -186,10 +229,11 @@ case "$COMMAND" in
 
         STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         write_registry \
-            '.[$key] = {base: $base, pid: $pid, ts: $ts}' \
+            '.[$key] = {base: $base, pid: $pid, start: $start, ts: $ts}' \
             --arg key "$KEY" \
             --argjson base "$BASE" \
             --argjson pid "$CALLER_PID" \
+            --arg start "$CALLER_START" \
             --arg ts "$STARTED"
         printf '%s\n' "$BASE"
         ;;
@@ -202,7 +246,8 @@ case "$COMMAND" in
             KEY="$(jq -r '.key' <<<"$ENTRY")"
             BASE="$(jq -r '.value.base' <<<"$ENTRY")"
             HELD_PID="$(jq -r '.value.pid' <<<"$ENTRY")"
-            if pid_alive "$HELD_PID"; then
+            HELD_START="$(jq -r '.value.start // empty' <<<"$ENTRY")"
+            if lease_owner_live "$HELD_PID" "$HELD_START"; then
                 STATUS="alive"
             else
                 STATUS="dead"

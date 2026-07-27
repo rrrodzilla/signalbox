@@ -117,6 +117,17 @@ if [ -z "$CHANGED_FILES" ]; then
     finish "OK" "empty feature diff — nothing to sync"
 fi
 
+# The vault is repo-scoped, not run-scoped: every concurrent run syncs the SAME
+# three documents. Hash-read, model edit and hash-verify are therefore one
+# serialized transaction under a repo-scoped lock — otherwise two runs interleave
+# and the second overwrites the first feature's documentation while both still
+# record status "OK", and bin/planner.sh (which takes the lock shared) can read
+# the vault mid-edit. Held across the model call by necessity: the window that
+# must be exclusive is exactly the window in which the documents are mutated.
+mkdir -p "$LEDGER_DIR"
+exec 9>"$LEDGER_DIR/vault.lock"
+flock -x 9
+
 declare -A BEFORE=()
 declare -A AFTER=()
 # Documents absent from the vault after the run, whatever their hash history;
@@ -195,6 +206,10 @@ for DOC in "${DOCS[@]}"; do
     # update branch is not evidence that the document exists.
     [ -n "${AFTER[$DOC]}" ] || MISSING+=("$DOC")
 done
+
+# The mutation window is over: hand the vault to the next run before parsing
+# this run's own log and reporting.
+exec 9>&-
 
 NOTE_LINE="$(grep -E '^\{.*"note".*\}[[:space:]]*$' "$RUN_DIR/logs/docs-sync.md" | tail -1 || true)"
 NOTE=""

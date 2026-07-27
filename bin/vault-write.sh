@@ -16,13 +16,23 @@ CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
 VAULT="$(readlink -f "$REPO_ROOT/.claude/docs")"
 [ -d "$VAULT" ] || { echo "vault missing: $VAULT" >&2; exit 1; }
 
+# Same repo-scoped vault lock bin/docs-sync.sh holds exclusively and
+# bin/planner.sh holds shared: the exists-check and the write are one
+# transaction, and no reader observes a half-written document.
+mkdir -p "$LEDGER_DIR"
+exec 9>"$LEDGER_DIR/vault.lock"
+flock -x 9
+
 OUT="$VAULT/$DOC"
 if [ -e "$OUT" ]; then
     OUT="$VAULT/${DOC%.md}.proposed.md"
     echo "[vault-write] $DOC exists — writing proposal $(basename "$OUT")" >&2
 fi
 
-jq -r '.content' <<<"$PAYLOAD" >"$OUT"
+TEMP="$OUT.tmp.$$"
+jq -r '.content' <<<"$PAYLOAD" >"$TEMP"
+mv "$TEMP" "$OUT"
+exec 9>&-
 
 jq -n \
     --arg doc "$DOC" \

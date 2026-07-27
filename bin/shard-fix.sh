@@ -20,7 +20,12 @@ SHARD_ID="$(jq -r '.current.shard' <<<"$PAYLOAD")"
 BRANCH="$(jq -r '.current.branch' <<<"$PAYLOAD")"
 ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 REVIEW="$(jq -r '.review' <<<"$PAYLOAD")"
-WT="$WT_BASE/${BRANCH#shard/}"
+# The run's git namespace, derived exactly as in shard-worker.sh and
+# stage-merge.sh so this resolves the worktree shard-worker.sh created:
+# branch shard/<feature>/<stage>-<shard> lives in <wt-base>/<feature>-<stage>-<shard>.
+FEATURE="$(jq -r '.feature // "feature"' "$RUN_DIR/plan.json" 2>/dev/null || echo feature)"
+export FEATURE
+WT="$WT_BASE/$FEATURE-${BRANCH##*/}"
 
 mkdir -p "$RUN_DIR/logs"
 

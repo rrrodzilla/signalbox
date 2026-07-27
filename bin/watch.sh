@@ -34,7 +34,7 @@ if [ -n "${WATCH_PORT:-}" ]; then MODE="strict"; PORT="$WATCH_PORT"; else MODE="
 
 echo "harness: $HARNESS"
 exec python3 - "$HARNESS" "$PORT" "$MODE" <<'PYEOF'
-import calendar, errno, json, os, sys, time, tomllib
+import errno, json, os, sys, time, tomllib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -133,8 +133,11 @@ def engine_pid(run_dir):
     except ValueError:
         return None
 
-def proc_start_epoch(pid):
-    """Start time of PID as epoch seconds via /proc, or None when /proc
+def proc_start_id(pid):
+    """Exact process start identity: "<boot epoch>:<start time in ticks>",
+    the same string bin/run.sh reads from /proc and records in launch.json as
+    start_id. Both halves are integers straight out of the kernel, so equality
+    is exact — there is no clock to be tolerant of. Returns None when /proc
     cannot answer (non-Linux, torn read). A missing /proc/<pid> is not
     "indeterminate" — the caller's kill(0) already separates gone from alive,
     so None here strictly means the identity question could not be asked."""
@@ -142,35 +145,29 @@ def proc_start_epoch(pid):
         with open("/proc/%d/stat" % pid, "rb") as fh:
             # comm (field 2) may contain spaces and parens; fields 3+ start
             # after the LAST ')'. starttime is field 22 -> index 19 past comm.
-            rest = fh.read().rsplit(b")", 1)[1].split()
-        ticks = int(rest[19])
+            ticks = int(fh.read().rsplit(b")", 1)[1].split()[19])
         with open("/proc/stat", "rb") as fh:
             for line in fh:
                 if line.startswith(b"btime "):
-                    return int(line.split()[1]) + ticks / os.sysconf("SC_CLK_TCK")
+                    return "%d:%d" % (int(line.split()[1]), ticks)
     except (OSError, ValueError, IndexError):
         pass
     return None
 
-def launch_epoch(started):
-    """launch.json's started stamp (ISO-8601 UTC, bin/run.sh) as epoch."""
-    try:
-        return calendar.timegm(time.strptime(started, "%Y-%m-%dT%H:%M:%SZ"))
-    except (TypeError, ValueError):
-        return None
-
-def pid_state(pid, marker_pid, started):
+def pid_state(pid, marker_pid, start_id):
     """Liveness of a run's launch PID, corroborated by marker AND identity.
 
     A launch PID alone proves nothing once the run is over: the OS recycles
     PIDs, so an unrelated process can make a finished run look alive and keep
     it holding a port its lease already released. bin/run.sh removes
     state/engine.pid on exit, but the marker can survive SIGKILL or a reboot —
-    so marker equality plus kill(0) is still not identity. The process only
-    counts as alive when its /proc start time brackets the launch stamp:
-    started at or after the launch (bin/run.sh stamps `started` before
-    spawning) and within a few minutes of it. A recycled PID fails that on
-    either side; when /proc cannot answer, the honest verdict is unknown."""
+    so marker equality plus kill(0) is still not identity. The process counts
+    as alive only when its start identity is EXACTLY the one bin/run.sh
+    recorded for the engine it spawned. A time window would not do: a process
+    that inherits a recycled PID moments after the launch falls inside any
+    window wide enough to absorb the launcher's own stamping delay. When
+    /proc cannot answer, or the run predates start_id, the verdict is
+    unknown."""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return "unknown"
     if marker_pid != pid:
@@ -181,12 +178,12 @@ def pid_state(pid, marker_pid, started):
         return "dead"
     except OSError:
         pass  # exists (EPERM) or indeterminate; identity check decides below
-    born, stamped = proc_start_epoch(pid), launch_epoch(started)
-    if born is None or stamped is None:
+    if not isinstance(start_id, str) or not start_id:
         return "unknown"
-    if stamped - 5 <= born <= stamped + 300:
-        return "alive"
-    return "dead"
+    current = proc_start_id(pid)
+    if current is None:
+        return "unknown"
+    return "alive" if current == start_id else "dead"
 
 def log_info(run_dir):
     logs = []
@@ -227,7 +224,7 @@ def run_info(run_dir, fallback_slug):
         "launch": launch,
         "pid_state": pid_state(launch.get("pid") if launch else None,
                                engine_pid(run_dir),
-                               launch.get("started") if launch else None),
+                               launch.get("start_id") if launch else None),
         "artifacts": artifacts,
         "logs": logs,
         "streams": discover_streams(run_dir, slug),

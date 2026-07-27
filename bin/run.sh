@@ -18,6 +18,41 @@ pid_alive() {
     [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] && kill -0 "$PID_VALUE" 2>/dev/null
 }
 
+# Exact process start identity: "<boot epoch>:<start time in clock ticks>",
+# both read from /proc. Recorded in launch.json at spawn so bin/watch.sh can
+# tell this engine apart from a later, unrelated process that merely inherited
+# its PID — a PID alone is not an identity. Pairing the tick count with btime
+# keeps it exact across reboots, which reset both. Prints nothing and returns 1
+# when /proc cannot answer.
+proc_identity() {
+    local PID_VALUE="$1" STAT_LINE BTIME
+    local -a FIELDS
+
+    [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] || return 1
+    STAT_LINE="$(cat "/proc/$PID_VALUE/stat" 2>/dev/null)" || return 1
+    # comm (field 2) may hold spaces and parens; fields 3+ follow the LAST ')',
+    # so starttime (field 22) is the 20th field of the remainder.
+    read -ra FIELDS <<<"${STAT_LINE##*)}"
+    [ "${#FIELDS[@]}" -ge 20 ] || return 1
+    [[ "${FIELDS[19]}" =~ ^[0-9]+$ ]] || return 1
+    BTIME="$(awk '/^btime /{print $2; exit}' /proc/stat 2>/dev/null)" || return 1
+    [[ "$BTIME" =~ ^[0-9]+$ ]] || return 1
+    printf '%s:%s\n' "$BTIME" "${FIELDS[19]}"
+}
+
+# A launched engine still runs only when its PID is alive AND still names the
+# same process. No recorded identity, or no readable /proc, leaves liveness as
+# the only available evidence.
+launch_owner_live() {
+    local PID_VALUE="$1" RECORDED="$2" CURRENT
+
+    pid_alive "$PID_VALUE" || return 1
+    [ -n "$RECORDED" ] || return 0
+    CURRENT="$(proc_identity "$PID_VALUE" || true)"
+    [ -n "$CURRENT" ] || return 0
+    [ "$CURRENT" = "$RECORDED" ]
+}
+
 format_age() {
     local AGE_SECONDS="$1"
 
@@ -34,7 +69,7 @@ format_age() {
 
 list_runs() {
     local LAUNCH RUN_PATH RECORD ISSUE_VALUE SLUG_VALUE PHASE_VALUE
-    local PID_VALUE STATUS ENGINES PORTS NEWEST NEWEST_PATH NEWEST_EPOCH
+    local PID_VALUE START_VALUE STATUS ENGINES PORTS NEWEST NEWEST_PATH NEWEST_EPOCH
     local NOW AGE
     local -a LAUNCH_FILES
 
@@ -54,15 +89,21 @@ list_runs() {
             .slug,
             .phase,
             ((.pid // "none") | tostring),
+            (if (.start_id // "") == "" then "-" else .start_id end),
             ([.engines | to_entries[] | "\(.key)=\(.value)"] | join(", ")),
             ([.ports | to_entries[] | "\(.key)=\(.value)"] | join(", "))
         ] | @tsv' "$LAUNCH" 2>/dev/null)"; then
             echo "warning: invalid launch metadata: $LAUNCH" >&2
             continue
         fi
-        IFS=$'\t' read -r ISSUE_VALUE SLUG_VALUE PHASE_VALUE PID_VALUE ENGINES PORTS <<<"$RECORD"
+        IFS=$'\t' read -r ISSUE_VALUE SLUG_VALUE PHASE_VALUE PID_VALUE START_VALUE ENGINES PORTS <<<"$RECORD"
+        # Tab is IFS whitespace, so an empty column would collapse into its
+        # neighbour: the jq above emits "-" for "no recorded identity".
+        if [ "$START_VALUE" = "-" ]; then
+            START_VALUE=""
+        fi
 
-        if pid_alive "$PID_VALUE"; then
+        if launch_owner_live "$PID_VALUE" "$START_VALUE"; then
             STATUS="alive"
         else
             STATUS="dead"
@@ -304,7 +345,11 @@ SIGNALBOX_ISSUE="$ISSUE" SIGNALBOX_RUN_SLUG="$RUN_SLUG" \
 CHILD_PID=$!
 printf '%s\n' "$CHILD_PID" >"$PID_FILE"
 PID_FILE_OWNED=1
-jq --argjson pid "$CHILD_PID" '. + {pid: $pid}' "$LAUNCH" >"$LAUNCH_TEMP"
+# Read the identity as early as possible; an engine that dies instantly leaves
+# it empty, which every consumer reads as "identity unknown", never as "alive".
+CHILD_START="$(proc_identity "$CHILD_PID" || true)"
+jq --argjson pid "$CHILD_PID" --arg start "$CHILD_START" \
+    '. + {pid: $pid, start_id: $start}' "$LAUNCH" >"$LAUNCH_TEMP"
 mv "$LAUNCH_TEMP" "$LAUNCH"
 
 printf 'run:       %s\n' "$RUN_SLUG"

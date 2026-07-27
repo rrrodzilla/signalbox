@@ -112,7 +112,9 @@ if kill -0 "$PID" 2>/dev/null; then
         kill -0 "$PID" 2>/dev/null || break
         sleep 2
     done
-    kill -0 "$PID" 2>/dev/null && kill -KILL "$PID" 2>/dev/null
+    # The child may exit between the liveness check and the kill; either half
+    # going nonzero is a benign race, not a run failure.
+    { kill -0 "$PID" 2>/dev/null && kill -KILL "$PID" 2>/dev/null; } || true
 fi
 wait "$PID" 2>/dev/null || true
 trap - INT TERM

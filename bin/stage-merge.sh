@@ -11,13 +11,17 @@ source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 
 PAYLOAD="$(cat)"
 STAGE_ID="$(jq -r '.stage' <<<"$PAYLOAD")"
+mkdir -p "$ROOT/state"
+# Keep this lock scoped to each worktree command: concurrent runs share one
+# repository's worktree admin state.
+WORKTREE_LOCK="$ROOT/state/worktree.lock"
 
 for BRANCH in $(jq -r '.branches[]' <<<"$PAYLOAD"); do
-    WT="$WT_BASE/${BRANCH#shard/}"
+    WT="$WT_BASE/$FEATURE-${BRANCH##*/}"
     {
         git -C "$WT" rebase "$INT_BRANCH"
         git -C "$INT_WT" merge --ff-only "$BRANCH"
-        git -C "$ROOT" worktree remove "$WT"
+        ( flock -x 9; git -C "$ROOT" worktree remove "$WT" ) 9>"$WORKTREE_LOCK"
         # -d from the integration worktree: merged-ness is judged against the
         # branch we merged into, not whatever the primary checkout has as HEAD.
         git -C "$INT_WT" branch -d "$BRANCH"

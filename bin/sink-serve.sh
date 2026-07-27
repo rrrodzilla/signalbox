@@ -985,17 +985,25 @@ td.age, td.size { color:var(--faint); white-space:nowrap; text-align:right; }
 </div>
 <script>
 const PHASES = ["plan","implement","review","promote"];
+const ACTIVITY_PHASES = ["plan","implement","review"];
 const promoteStates = Object.create(null);
 const haltInfo = Object.create(null);      // key -> {phase, reason} from pipeline.halted
 const completeInfo = Object.create(null);  // key -> {parked, reason} from pipeline.complete
 const reviewLoop = Object.create(null);    // key -> {mode, round} from the review-phase cycle
 const shardYard = Object.create(null);     // key -> stage -> shard -> {state, round}
+const phaseActivity = Object.create(null); // key -> phase -> true, from this launch's live events
 const instanceColours = Object.create(null);
 const openDrawers = new Set();             // run keys whose detail drawer is open
 let stoppedOpen = false;                   // the collapsed STOPPED section
 let selectedKey = "all";
 let lastStatus = null;
 const $ = id => document.getElementById(id);
+
+function markPhaseActive(key, phase) {
+  if (!ACTIVITY_PHASES.includes(phase)) return;
+  const activity = phaseActivity[key] || (phaseActivity[key] = Object.create(null));
+  activity[phase] = true;
+}
 
 function age(now, m) {
   const s = Math.max(0, Math.round(now - m));
@@ -1062,6 +1070,10 @@ function appendProvenancePills(parent, value) {
 // as done. A live state/escalated.json is already newer than every live
 // stamp — /status marks it stale otherwise — so no stamp comparison is left
 // to make.
+//
+// A live phase event may upgrade a blank phase to active, including before
+// its first artifact lands, but it never contradicts an artifact-derived
+// terminal state.
 function derive(run) {
   const a = run.artifacts;
   const live = x => (x && x.exists === true && x.stale !== true) ? x : null;
@@ -1081,6 +1093,10 @@ function derive(run) {
   else if (pend && pend.mtime >= rs.mtime) out.review = "parked";
   else out.review = "active";
   out.promote = promoteStates[run.key] || "pending";
+  const activity = phaseActivity[run.key] || {};
+  for (const p of ACTIVITY_PHASES) {
+    if (out[p] === "pending" && activity[p]) out[p] = "active";
+  }
   const esc = live(a["state/escalated.json"]);
   if (esc && esc.json) {
     const p = esc.json.escalated_phase === "shard" ? "implement" : esc.json.escalated_phase;
@@ -1466,13 +1482,28 @@ function applyRunState(t, key, pl, engineLabel) {
   // and never publishes phase.request. verdictFor checks terminal latches
   // before every state the new launch can produce, so either latch would
   // otherwise shadow the entire relaunch.
-  const reentered = (t === "phase.request" && pl && typeof pl.phase === "string")
-    || t.indexOf("system.started.") === 0;
+  const phaseRequested = t === "phase.request" && pl &&
+    typeof pl.phase === "string";
+  const started = t.indexOf("system.started.") === 0;
+  // A phase engine announces its own start, so a phase-scoped system.started.*
+  // is the only re-entry signal a bin/run.sh --phase launch publishes.
+  const directPhaseStart = started && ACTIVITY_PHASES.includes(engineLabel);
+  const reentered = phaseRequested || started;
   if (reentered) {
     delete haltInfo[key];
     delete completeInfo[key];
     if (promoteStates[key] !== "active") delete promoteStates[key];
   }
+  // One phase runs at a time, so a re-entry drops every live-activity mark the
+  // run still carries: marks left by the phase the pipeline advanced from, and
+  // marks retained from an earlier launch when a direct phase start re-enters.
+  // Without this a stale phase stays active and can win PHASES.find ahead of
+  // the phase actually running.
+  if (phaseRequested || directPhaseStart) delete phaseActivity[key];
+  if (phaseRequested) markPhaseActive(key, pl.phase);
+  // Any phase-scoped event proves that phase is running. A system.stopped.*
+  // event only reports engine wind-down, so it is not progress.
+  if (t.indexOf("system.stopped.") !== 0) markPhaseActive(key, engineLabel);
   if (t === "phase.request" && pl && pl.phase === "promote") promoteStates[key] = "active";
   // A phase (re)start clears that phase's cycle state so a rerun of the same
   // run key never wears the previous attempt's rounds or shard lamps.
@@ -1512,7 +1543,14 @@ function applyRunState(t, key, pl, engineLabel) {
     for (const s of (Array.isArray(pl.done) ? pl.done : []))
       markShard(key, pl.stage, shardName(s), "done");
   }
+  // A phase terminal releases its live mark; fresh artifacts remain the
+  // authority for whether that phase finished successfully.
+  if (t === "phase.done" && pl && typeof pl.phase === "string" && phaseActivity[key]) {
+    delete phaseActivity[key][pl.phase];
+  }
   if (t === "pipeline.complete") {
+    // Pipeline terminals latch the verdict and clear every in-flight phase.
+    delete phaseActivity[key];
     promoteStates[key] = pl && pl.parked ? "parked" : "done";
     completeInfo[key] = {
       parked: !!(pl && pl.parked),
@@ -1520,6 +1558,8 @@ function applyRunState(t, key, pl, engineLabel) {
     };
   }
   if (t === "pipeline.halted") {
+    // Pipeline terminals latch the verdict and clear every in-flight phase.
+    delete phaseActivity[key];
     if (pl && pl.phase === "promote") promoteStates[key] = "failed";
     haltInfo[key] = {
       phase: pl && typeof pl.phase === "string" ? pl.phase : "",

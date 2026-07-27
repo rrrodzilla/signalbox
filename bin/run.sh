@@ -9,9 +9,11 @@
 # concurrent install.sh --reinstall cannot refresh the tree around a run its
 # liveness scan never saw. Because the run directory is reused across launches
 # of the same issue, it also removes the previous launch's terminal evidence
-# (state/complete.json, state/halted.json) before the engine starts. On exit it
-# stops only that child PID, gracefully with SIGTERM before bounded escalation,
-# removes the PID file only if it wrote one, and releases the run's port lease.
+# (state/complete.json, state/halted.json) before the engine starts. A --phase
+# launch stamps state/pipeline-<phase>.stamp so the dashboard and
+# bin/docs-sync-wait.sh can date the phase to this launch. On exit it stops only
+# that child PID, gracefully with SIGTERM before bounded escalation, removes the
+# PID file only if it wrote one, and releases the run's port lease.
 set -euo pipefail
 # shellcheck source=_liveness.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_liveness.sh"
@@ -301,6 +303,16 @@ jq -n \
         started: $started
     }' >"$LAUNCH_TEMP"
 mv "$LAUNCH_TEMP" "$LAUNCH"
+
+# STARTED is captured before launch.json is written and truncated to whole
+# seconds; /status prefers that recorded instant as the launch boundary. A
+# stamp written before the record could compare older even within that second
+# and be discarded as the previous run's leftover, so touch a direct phase's
+# stamp only after the record exists to guarantee its mtime is at least the
+# boundary. Pipeline phases stamp themselves as they actually start.
+if [ "$PHASE" != "pipeline" ]; then
+    touch "$RUN_DIR/state/pipeline-$PHASE.stamp"
+fi
 
 # 9>&- keeps the harness lock out of the engine: an inherited copy would hold
 # it for the whole run, so a later reinstall would block on the lock instead of

@@ -17,8 +17,8 @@ CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
 WORKDIR="$(jq -r '.workdir // empty' <<<"$PAYLOAD")"
 [ -n "$WORKDIR" ] || WORKDIR="$INT_WT"
 FEATURE="$(jq -r '.feature // empty' <<<"$PAYLOAD")"
-[ -n "$FEATURE" ] || FEATURE="$(jq -r '.feature' "$ROOT/plan.json" 2>/dev/null || true)"
-ISSUE="$(jq -r '.issue // empty' "$ROOT/plan.json" 2>/dev/null || true)"
+[ -n "$FEATURE" ] || FEATURE="$(jq -r '.feature' "$RUN_DIR/plan.json" 2>/dev/null || true)"
+ISSUE="$(jq -r '.issue // empty' "$RUN_DIR/plan.json" 2>/dev/null || true)"
 
 # Resolution must stay nonfatal: an unresolvable vault symlink has to reach
 # finish "ERROR" rather than kill the script and suppress the downstream event.
@@ -27,12 +27,12 @@ if ! VAULT="$(readlink -f "$REPO_ROOT/.claude/docs" 2>&1)"; then
     VAULT_ERR="cannot resolve vault path $REPO_ROOT/.claude/docs: $VAULT"
     VAULT="$REPO_ROOT/.claude/docs"
 fi
-STATE_PATH="$ROOT/state/docs-sync.json"
+STATE_PATH="$RUN_DIR/state/docs-sync.json"
 DOCS=("ARCHI.md" "ARCHI-rules.md" "TESTING.md")
 UPDATED=()
 UNCHANGED=()
 
-mkdir -p "$ROOT/state" "$ROOT/logs"
+mkdir -p "$RUN_DIR/state" "$RUN_DIR/logs"
 
 finish() {
     local STATUS="$1"
@@ -174,7 +174,7 @@ env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     --permission-mode acceptEdits \
     --add-dir "$VAULT" \
     --allowedTools "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git status:*)" \
-    >"$ROOT/logs/docs-sync.md" 2>"$ROOT/logs/docs-sync.md.stderr" || CLAUDE_RC=$?
+    >"$RUN_DIR/logs/docs-sync.md" 2>"$RUN_DIR/logs/docs-sync.md.stderr" || CLAUDE_RC=$?
 
 for DOC in "${DOCS[@]}"; do
     if [ -f "$VAULT/$DOC" ]; then
@@ -196,7 +196,7 @@ for DOC in "${DOCS[@]}"; do
     [ -n "${AFTER[$DOC]}" ] || MISSING+=("$DOC")
 done
 
-NOTE_LINE="$(grep -E '^\{.*"note".*\}[[:space:]]*$' "$ROOT/logs/docs-sync.md" | tail -1 || true)"
+NOTE_LINE="$(grep -E '^\{.*"note".*\}[[:space:]]*$' "$RUN_DIR/logs/docs-sync.md" | tail -1 || true)"
 NOTE=""
 if [ -n "$NOTE_LINE" ] && jq -e . >/dev/null 2>&1 <<<"$NOTE_LINE"; then
     NOTE="$(jq -r '.note // ""' <<<"$NOTE_LINE")"
@@ -211,7 +211,7 @@ append_note() {
 }
 
 STATUS="OK"
-if [ ! -s "$ROOT/logs/docs-sync.md" ]; then
+if [ ! -s "$RUN_DIR/logs/docs-sync.md" ]; then
     STATUS="ERROR"
     [ -n "$NOTE" ] || NOTE="model process produced no output; vault files were still verified by hash"
 elif [ "$CLAUDE_RC" -ne 0 ]; then

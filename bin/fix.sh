@@ -17,15 +17,15 @@ REVIEW="$(jq -r '.review' <<<"$PAYLOAD")"
 THREAD_ID="$(jq -r '.thread_id // ""' <<<"$PAYLOAD")"
 CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
 
-mkdir -p "$ROOT/logs"
+mkdir -p "$RUN_DIR/logs"
 
 INTENT=""
-if [ -f "$ROOT/plan.json" ]; then
+if [ -f "$RUN_DIR/plan.json" ]; then
     INTENT="## Feature intent (from the validated plan — authoritative)
 
-Issue #$(jq -r '.issue' "$ROOT/plan.json"): feature \`$(jq -r '.feature' "$ROOT/plan.json")\`
+Issue #$(jq -r '.issue' "$RUN_DIR/plan.json"): feature \`$(jq -r '.feature' "$RUN_DIR/plan.json")\`
 
-$(jq -r '.scope_notes // "(no scope notes)"' "$ROOT/plan.json")
+$(jq -r '.scope_notes // "(no scope notes)"' "$RUN_DIR/plan.json")
 
 "
 fi
@@ -56,7 +56,7 @@ env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     claude -p "$PROMPT" \
     --model opus \
     --permission-mode acceptEdits \
-    >"$ROOT/logs/fix-round-$ROUND.log" 2>&1
+    >"$RUN_DIR/logs/fix-round-$ROUND.log" 2>&1
 
 # Target mode ($WORKDIR = the integration worktree): fix edits must become
 # commits on the feature branch — uncommitted worktree state is invisible to

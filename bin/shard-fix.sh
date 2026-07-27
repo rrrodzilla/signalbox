@@ -22,7 +22,7 @@ ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 REVIEW="$(jq -r '.review' <<<"$PAYLOAD")"
 WT="$WT_BASE/${BRANCH#shard/}"
 
-mkdir -p "$ROOT/logs"
+mkdir -p "$RUN_DIR/logs"
 
 PROMPT="You are the fix half of an automated per-shard review loop. Your scope
 is ONE shard of a larger change, on its own git branch in this worktree.
@@ -47,7 +47,7 @@ env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     claude -p "$PROMPT" \
     --model opus \
     --permission-mode acceptEdits \
-    >"$ROOT/logs/shard-fix-$STAGE_ID-$SHARD_ID-r$ROUND.log" 2>&1
+    >"$RUN_DIR/logs/shard-fix-$STAGE_ID-$SHARD_ID-r$ROUND.log" 2>&1
 
 if [ -n "$(git status --porcelain)" ]; then
     git add -A

@@ -8,8 +8,9 @@
 # thread, so the re-review has full context of its own prior findings — the
 # thread id travels in the event payload, not in a state file.
 set -euo pipefail
+# shellcheck source=_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PAYLOAD="$(cat)"
 
 WORKDIR="$(jq -r '.workdir' <<<"$PAYLOAD")"
@@ -18,10 +19,10 @@ FEEDBACK="$(jq -r '.feedback // ""' <<<"$PAYLOAD")"
 THREAD_ID="$(jq -r '.thread_id // ""' <<<"$PAYLOAD")"
 CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
 
-mkdir -p "$ROOT/logs"
+mkdir -p "$RUN_DIR/logs"
 
-LAST="$ROOT/logs/review-round-$ROUND.md"
-EVENTS="$ROOT/logs/review-round-$ROUND.jsonl"
+LAST="$RUN_DIR/logs/review-round-$ROUND.md"
+EVENTS="$RUN_DIR/logs/review-round-$ROUND.jsonl"
 
 cd "$WORKDIR"
 
@@ -31,14 +32,14 @@ if [ -z "$THREAD_ID" ]; then
     PROMPT="$(cat "$ROOT/prompts/review.md")"
     # Target mode: the validated plan's intent is authoritative context —
     # without it, deliberate API removals read as compatibility defects.
-    if [ -f "$ROOT/plan.json" ]; then
+    if [ -f "$RUN_DIR/plan.json" ]; then
         PROMPT="$PROMPT
 
 ## Feature intent (from the validated plan — authoritative)
 
-Issue #$(jq -r '.issue' "$ROOT/plan.json"): feature \`$(jq -r '.feature' "$ROOT/plan.json")\`
+Issue #$(jq -r '.issue' "$RUN_DIR/plan.json"): feature \`$(jq -r '.feature' "$RUN_DIR/plan.json")\`
 
-$(jq -r '.scope_notes // "(no scope notes)"' "$ROOT/plan.json")"
+$(jq -r '.scope_notes // "(no scope notes)"' "$RUN_DIR/plan.json")"
     fi
     if [ -n "$FEEDBACK" ]; then
         PROMPT="$PROMPT

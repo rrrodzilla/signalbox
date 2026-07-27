@@ -26,9 +26,9 @@ ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 THREAD_ID="$(jq -r '.thread_id // ""' <<<"$PAYLOAD")"
 WT="$WT_BASE/${BRANCH#shard/}"
 
-mkdir -p "$ROOT/logs"
-LAST="$ROOT/logs/shard-review-$STAGE_ID-$SHARD_ID-r$ROUND.md"
-EVENTS="$ROOT/logs/shard-review-$STAGE_ID-$SHARD_ID-r$ROUND.jsonl"
+mkdir -p "$RUN_DIR/logs"
+LAST="$RUN_DIR/logs/shard-review-$STAGE_ID-$SHARD_ID-r$ROUND.md"
+EVENTS="$RUN_DIR/logs/shard-review-$STAGE_ID-$SHARD_ID-r$ROUND.jsonl"
 
 DIFF="$(git -C "$WT" diff "$INT_BRANCH"...HEAD)"
 

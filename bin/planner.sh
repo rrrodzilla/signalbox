@@ -15,8 +15,8 @@ PAYLOAD="$(cat)"
 ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 FEEDBACK="$(jq -r '.feedback // ""' <<<"$PAYLOAD")"
 
-mkdir -p "$ROOT/logs"
-LOG="$ROOT/logs/plan-round-$ROUND.md"
+mkdir -p "$RUN_DIR/logs"
+LOG="$RUN_DIR/logs/plan-round-$ROUND.md"
 
 PROMPT="$(cat "$ROOT/prompts/plan.md")
 

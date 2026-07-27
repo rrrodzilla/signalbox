@@ -11,8 +11,9 @@
 # only the judgment lives here. Fail-safe: an unparseable assessment means
 # floor 4 — when the leader can't be understood, a human decides.
 set -euo pipefail
+# shellcheck source=_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PAYLOAD="$(cat)"
 
 ACTION="${TRIP_ACTION:-promote}"
@@ -69,11 +70,11 @@ $REVIEW_HEAD
 Reply with STRICT JSON only — no prose, no code fences:
 {\"floor\": <integer 1-4>, \"rationale\": \"<one sentence>\"}"
 
-mkdir -p "$ROOT/logs" "$ROOT/state"
+mkdir -p "$RUN_DIR/logs" "$LEDGER_DIR"
 
 RAW="$(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     claude -p "$PROMPT" --model opus \
-    2>>"$ROOT/logs/assess.stderr" || true)"
+    2>>"$RUN_DIR/logs/assess.stderr" || true)"
 
 VERDICT_JSON="$(printf '%s' "$RAW" | tr '\n' ' ' | grep -oE '\{[^{}]*\}' | head -1 || true)"
 FLOOR="$(jq -r '.floor | select(type == "number")' <<<"$VERDICT_JSON" 2>/dev/null || true)"
@@ -95,7 +96,7 @@ jq -nc \
     --arg rationale "$RATIONALE" \
     --arg cid "$CID" \
     '{ts: (now | todate), action: $action, floor: $floor, rationale: $rationale, correlation_id: $cid}' \
-    >>"$ROOT/state/assessments.jsonl"
+    >>"$LEDGER_DIR/assessments.jsonl"
 
 jq -c \
     --arg action "$ACTION" \

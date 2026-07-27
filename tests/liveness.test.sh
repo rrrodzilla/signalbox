@@ -191,5 +191,70 @@ OK=1
 report_case "live_runs treats a nonexistent directory as empty" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 200 "$OUT") stderr=$(head -c 200 "$ERR")"
 
+# 13. Well-formed JSON carrying wrong field types or values is invalid
+# metadata, not something to coerce into a plausible-looking row.
+fixture
+TYPED_RUNS="$FIXTURE_PATH/runs"
+OBJECT_SLUG="$TYPED_RUNS/a-object-slug/launch.json"
+ARRAY_PHASE="$TYPED_RUNS/b-array-phase/launch.json"
+TEXT_PID="$TYPED_RUNS/c-text-pid/launch.json"
+ZERO_PID="$TYPED_RUNS/d-zero-pid/launch.json"
+NUMBER_START="$TYPED_RUNS/e-number-start/launch.json"
+LIST_RECORD="$TYPED_RUNS/f-list-record/launch.json"
+mkdir -p \
+    "$(dirname "$OBJECT_SLUG")" "$(dirname "$ARRAY_PHASE")" \
+    "$(dirname "$TEXT_PID")" "$(dirname "$ZERO_PID")" \
+    "$(dirname "$NUMBER_START")" "$(dirname "$LIST_RECORD")"
+jq -n --argjson pid "$LIVE_PID" \
+    '{slug: {name: "live-run"}, pid: $pid, start_id: "", phase: "pipeline"}' \
+    >"$OBJECT_SLUG"
+jq -n --argjson pid "$LIVE_PID" \
+    '{slug: "live-run", pid: $pid, start_id: "", phase: ["pipeline"]}' \
+    >"$ARRAY_PHASE"
+jq -n '{slug: "live-run", pid: "not-a-pid", start_id: "", phase: "pipeline"}' \
+    >"$TEXT_PID"
+jq -n '{slug: "live-run", pid: 0, start_id: "", phase: "pipeline"}' \
+    >"$ZERO_PID"
+jq -n --argjson pid "$LIVE_PID" \
+    '{slug: "live-run", pid: $pid, start_id: 12345, phase: "pipeline"}' \
+    >"$NUMBER_START"
+jq -n --argjson pid "$LIVE_PID" \
+    '[{slug: "live-run", pid: $pid, start_id: "", phase: "pipeline"}]' \
+    >"$LIST_RECORD"
+run_function "$OUT" "$ERR" live_runs "$TYPED_RUNS"
+# Pathname expansion is sorted, so the warnings follow the directory names.
+EXPECTED_WARNINGS="$(printf 'warning: invalid launch metadata: %s\n' \
+    "$OBJECT_SLUG" "$ARRAY_PHASE" "$TEXT_PID" "$ZERO_PID" "$NUMBER_START" \
+    "$LIST_RECORD")"
+ACTUAL_WARNING="$(<"$ERR")"
+OK=1
+if [ "$RUN_STATUS" -eq 0 ] \
+    && [ ! -s "$OUT" ] \
+    && [ "$ACTUAL_WARNING" = "$EXPECTED_WARNINGS" ]; then
+    OK=0
+fi
+report_case "live_runs warns about wrong field types instead of coercing" "$OK" \
+    "status=$RUN_STATUS stdout=$(head -c 200 "$OUT") stderr=$(head -c 200 "$ERR")"
+
+# 14. Validation stays tolerant of the shapes real metadata takes: a PID
+# recorded as a digit string, and a record predating the start_id field.
+fixture
+TOLERANT_RUNS="$FIXTURE_PATH/runs"
+STRING_PID="$TOLERANT_RUNS/string-pid/launch.json"
+mkdir -p "$(dirname "$STRING_PID")"
+jq -n --arg pid "$LIVE_PID" \
+    '{slug: "live-run", pid: $pid, phase: "pipeline"}' >"$STRING_PID"
+run_function "$OUT" "$ERR" live_runs "$TOLERANT_RUNS"
+EXPECTED_OUTPUT=$'live-run\t'"$LIVE_PID"$'\tpipeline'
+ACTUAL_OUTPUT="$(<"$OUT")"
+OK=1
+if [ "$RUN_STATUS" -eq 0 ] \
+    && [ "$ACTUAL_OUTPUT" = "$EXPECTED_OUTPUT" ] \
+    && [ ! -s "$ERR" ]; then
+    OK=0
+fi
+report_case "live_runs accepts a string pid and absent start_id" "$OK" \
+    "status=$RUN_STATUS stdout=$(head -c 200 "$OUT") stderr=$(head -c 200 "$ERR")"
+
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

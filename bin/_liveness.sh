@@ -13,7 +13,9 @@
 #     status: 0 when the recorded owner is conservatively still live; 1 otherwise
 #   live_runs <runs-dir>
 #     stdout: one "<slug>\t<pid>\t<phase>" line per live launched engine
-#     status: always 0; invalid launch metadata is warned about on stderr
+#     status: always 0; launch metadata that is unparseable, not an object, or
+#             carries a field of the wrong type or value is skipped with a
+#             warning on stderr rather than coerced
 # shellcheck shell=bash
 
 pid_alive() {
@@ -67,12 +69,42 @@ live_runs() (
     shopt -s nullglob
     LAUNCH_FILES=("$RUNS_DIR"/*/launch.json)
     for LAUNCH in "${LAUNCH_FILES[@]}"; do
-        if ! RECORD="$(jq -er '[
-            (if (.slug // "") == "" then "-" else (.slug | tostring) end),
-            (if (.pid // "") == "" then "-" else (.pid | tostring) end),
-            (if (.start_id // "") == "" then "-" else (.start_id | tostring) end),
-            (if (.phase // "") == "" then "-" else (.phase | tostring) end)
-        ] | @tsv' "$LAUNCH" 2>/dev/null)"; then
+        # Fields are validated, never coerced: tostring would happily turn an
+        # object slug or a boolean phase into a plausible-looking column, so a
+        # record whose shape or field types are wrong is an error here and is
+        # reported as invalid metadata below. Absent or null fields stay
+        # tolerated — older metadata predates start_id.
+        if ! RECORD="$(jq -er '
+            def text_field($name):
+                .[$name] as $value
+                | if $value == null then "-"
+                  elif ($value | type) != "string" then
+                      error("\($name) is not a string")
+                  elif $value == "" then "-"
+                  else $value
+                  end;
+            def pid_field:
+                .pid as $value
+                | if $value == null then "-"
+                  elif ($value | type) == "number" then
+                      (if ($value | floor) == $value and $value > 0
+                       then ($value | tostring)
+                       else error("pid is not a positive whole number")
+                       end)
+                  elif ($value | type) != "string" then
+                      error("pid is not a number")
+                  elif $value == "" then "-"
+                  elif ($value | test("^[1-9][0-9]*$")) then $value
+                  else error("pid is not a positive whole number")
+                  end;
+            if type != "object" then error("record is not an object") else . end
+            | [
+                text_field("slug"),
+                pid_field,
+                text_field("start_id"),
+                text_field("phase")
+            ]
+            | @tsv' "$LAUNCH" 2>/dev/null)"; then
             printf 'warning: invalid launch metadata: %s\n' "$LAUNCH" >&2 || true
             continue
         fi

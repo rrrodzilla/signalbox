@@ -117,7 +117,7 @@ subscribes = ["exec.error"]
 # Live watch: stream every interesting topic to the browser (bin/watch.sh
 # proxies this port so the dashboard needs no CORS). Ports are allocated per
 # repo at install time; per-run launches render a leased port block over the
-# same __SIGNALBOX_PORT_*__ placeholders. dev.sh renders 8100-8104.
+# same port placeholders. dev.sh renders 8100-8104.
 [[sinks]]
 name = "watchtower"
 path = "~/.local/share/emergent/primitives/bin/sse-sink"

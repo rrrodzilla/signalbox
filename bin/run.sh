@@ -8,49 +8,11 @@
 # with SIGTERM before bounded escalation, removes the PID file only if it wrote
 # one, and releases the run's port lease.
 set -euo pipefail
+# shellcheck source=_liveness.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_liveness.sh"
 
 usage() {
     echo "usage: bin/run.sh <issue> [--phase pipeline|plan|implement|review] | --list" >&2
-}
-
-pid_alive() {
-    local PID_VALUE="$1"
-    [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] && kill -0 "$PID_VALUE" 2>/dev/null
-}
-
-# Exact process start identity: "<boot epoch>:<start time in clock ticks>",
-# both read from /proc. Recorded in launch.json at spawn so metadata consumers
-# can tell this engine apart from a later, unrelated process that merely
-# inherited its PID — a PID alone is not an identity. Pairing the tick count
-# with btime keeps it exact across reboots, which reset both. Prints nothing
-# and returns 1 when /proc cannot answer.
-proc_identity() {
-    local PID_VALUE="$1" STAT_LINE BTIME
-    local -a FIELDS
-
-    [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] || return 1
-    STAT_LINE="$(cat "/proc/$PID_VALUE/stat" 2>/dev/null)" || return 1
-    # comm (field 2) may hold spaces and parens; fields 3+ follow the LAST ')',
-    # so starttime (field 22) is the 20th field of the remainder.
-    read -ra FIELDS <<<"${STAT_LINE##*)}"
-    [ "${#FIELDS[@]}" -ge 20 ] || return 1
-    [[ "${FIELDS[19]}" =~ ^[0-9]+$ ]] || return 1
-    BTIME="$(awk '/^btime /{print $2; exit}' /proc/stat 2>/dev/null)" || return 1
-    [[ "$BTIME" =~ ^[0-9]+$ ]] || return 1
-    printf '%s:%s\n' "$BTIME" "${FIELDS[19]}"
-}
-
-# A launched engine still runs only when its PID is alive AND still names the
-# same process. No recorded identity, or no readable /proc, leaves liveness as
-# the only available evidence.
-launch_owner_live() {
-    local PID_VALUE="$1" RECORDED="$2" CURRENT
-
-    pid_alive "$PID_VALUE" || return 1
-    [ -n "$RECORDED" ] || return 0
-    CURRENT="$(proc_identity "$PID_VALUE" || true)"
-    [ -n "$CURRENT" ] || return 0
-    [ "$CURRENT" = "$RECORDED" ]
 }
 
 format_age() {
@@ -103,7 +65,7 @@ list_runs() {
             START_VALUE=""
         fi
 
-        if launch_owner_live "$PID_VALUE" "$START_VALUE"; then
+        if owner_live "$PID_VALUE" "$START_VALUE"; then
             STATUS="alive"
         else
             STATUS="dead"

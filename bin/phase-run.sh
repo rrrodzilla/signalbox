@@ -22,6 +22,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 PAYLOAD="$(cat)"
 PHASE="$(jq -r '.phase' <<<"$PAYLOAD")"
 ISSUE="$(jq -r '.issue' <<<"$PAYLOAD")"
+CID="$(jq -r '.correlation_id // empty' <<<"$PAYLOAD")"
+[[ "$CID" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || CID=""
 
 case "$PHASE" in
     plan)      CFG="plan.toml";      TIMEOUT=2400 ;;
@@ -76,7 +78,11 @@ trap stop_engine EXIT
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
+# The pipeline mints one id per run and every phase engine stamps that same id,
+# so bin/audit.sh <id> reconstructs the whole run (issue #42). A phase launched
+# directly by bin/run.sh --phase gets no id here and mints a phase-prefixed one.
 SIGNALBOX_ISSUE="$ISSUE" SIGNALBOX_RUN_SLUG="$RUN_SLUG" \
+    SIGNALBOX_CORRELATION_ID="$CID" \
     emergent --config "$CONFIG" >"$LOG" 2>&1 &
 PID=$!
 printf '%s\n' "$PID" >"$PID_FILE"

@@ -34,7 +34,7 @@ if [ -n "${WATCH_PORT:-}" ]; then MODE="strict"; PORT="$WATCH_PORT"; else MODE="
 
 echo "harness: $HARNESS"
 exec python3 - "$HARNESS" "$PORT" "$MODE" <<'PYEOF'
-import errno, json, os, sys, time, tomllib
+import calendar, errno, json, os, sys, time, tomllib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -133,15 +133,44 @@ def engine_pid(run_dir):
     except ValueError:
         return None
 
-def pid_state(pid, marker_pid):
-    """Liveness of a run's launch PID, corroborated by its engine.pid marker.
+def proc_start_epoch(pid):
+    """Start time of PID as epoch seconds via /proc, or None when /proc
+    cannot answer (non-Linux, torn read). A missing /proc/<pid> is not
+    "indeterminate" — the caller's kill(0) already separates gone from alive,
+    so None here strictly means the identity question could not be asked."""
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as fh:
+            # comm (field 2) may contain spaces and parens; fields 3+ start
+            # after the LAST ')'. starttime is field 22 -> index 19 past comm.
+            rest = fh.read().rsplit(b")", 1)[1].split()
+        ticks = int(rest[19])
+        with open("/proc/stat", "rb") as fh:
+            for line in fh:
+                if line.startswith(b"btime "):
+                    return int(line.split()[1]) + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+def launch_epoch(started):
+    """launch.json's started stamp (ISO-8601 UTC, bin/run.sh) as epoch."""
+    try:
+        return calendar.timegm(time.strptime(started, "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        return None
+
+def pid_state(pid, marker_pid, started):
+    """Liveness of a run's launch PID, corroborated by marker AND identity.
 
     A launch PID alone proves nothing once the run is over: the OS recycles
     PIDs, so an unrelated process can make a finished run look alive and keep
     it holding a port its lease already released. bin/run.sh removes
-    state/engine.pid when the launcher exits, so a launch PID counts as alive
-    only while that marker still names it.
-    """
+    state/engine.pid on exit, but the marker can survive SIGKILL or a reboot —
+    so marker equality plus kill(0) is still not identity. The process only
+    counts as alive when its /proc start time brackets the launch stamp:
+    started at or after the launch (bin/run.sh stamps `started` before
+    spawning) and within a few minutes of it. A recycled PID fails that on
+    either side; when /proc cannot answer, the honest verdict is unknown."""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return "unknown"
     if marker_pid != pid:
@@ -150,11 +179,14 @@ def pid_state(pid, marker_pid):
         os.kill(pid, 0)
     except ProcessLookupError:
         return "dead"
-    except PermissionError:
-        return "alive"
     except OSError:
+        pass  # exists (EPERM) or indeterminate; identity check decides below
+    born, stamped = proc_start_epoch(pid), launch_epoch(started)
+    if born is None or stamped is None:
         return "unknown"
-    return "alive"
+    if stamped - 5 <= born <= stamped + 300:
+        return "alive"
+    return "dead"
 
 def log_info(run_dir):
     logs = []
@@ -194,7 +226,8 @@ def run_info(run_dir, fallback_slug):
         "feature": feature,
         "launch": launch,
         "pid_state": pid_state(launch.get("pid") if launch else None,
-                               engine_pid(run_dir)),
+                               engine_pid(run_dir),
+                               launch.get("started") if launch else None),
         "artifacts": artifacts,
         "logs": logs,
         "streams": discover_streams(run_dir, slug),
@@ -411,9 +444,13 @@ td.age, td.size { color:var(--dim); white-space:nowrap; text-align:right; }
 // via /status — the page assumes no port numbers. /status already resolves a
 // reused port to its owning live run, so at most one stream per port arrives
 // and a changed label means the port genuinely changed hands. Each SSE
-// response repeats the owner it resolved at connect time, which is what the
-// event labels follow: a handoff between two polls must not be read through
-// the previous owner's identity.
+// response repeats the owner it resolved at connect time; attach() freezes
+// that into a per-connection snapshot and every event from that connection
+// is labeled through the snapshot alone. The mutable STREAMS entries feed
+// only the badges: a /status poll (or a reconnect) may retarget a badge to
+// the port's new owner while buffered events from the old connection are
+// still being parsed, and those must keep the identity of the connection
+// they actually arrived on — run labels and promote state both.
 const STREAMS = [];
 const PHASES = ["plan","implement","review","promote"];
 const promoteStates = {};
@@ -541,21 +578,24 @@ function badge(port, cls) {
   b.className = "badge " + cls;
 }
 
-function addEvent(stream, topic, dataText) {
+// owner is the frozen per-connection identity from attach(), never a live
+// STREAMS entry — reading mutable stream.run here is how a port handoff
+// smears one run's events and promote state onto another.
+function addEvent(owner, topic, dataText) {
   let obj = null;
   try { obj = JSON.parse(dataText); } catch (e) {}
   const t = topic || (obj && (obj.message_type || obj.type || obj.topic)) || "message";
   if (t.startsWith("system.") ) {
     // engine heartbeat: reflect in badge title, keep the feed for real events
-    badge(stream.port, "live");
+    badge(owner.port, "live");
     return;
   }
   const pl = obj && obj.payload !== undefined ? obj.payload : obj;
-  if (t === "phase.request" && pl && pl.phase === "promote") promoteStates[stream.run] = "active";
-  if (t === "pipeline.complete") promoteStates[stream.run] = pl && pl.parked ? "parked" : "done";
-  if (t === "pipeline.halted" && pl && pl.phase === "promote") promoteStates[stream.run] = "failed";
+  if (t === "phase.request" && pl && pl.phase === "promote") promoteStates[owner.run] = "active";
+  if (t === "pipeline.complete") promoteStates[owner.run] = pl && pl.parked ? "parked" : "done";
+  if (t === "pipeline.halted" && pl && pl.phase === "promote") promoteStates[owner.run] = "failed";
   const div = document.createElement("div");
-  div.className = "ev " + stream.cls + (t.includes("error") || t.includes("escalated") || t.includes("halted") ? " err" : "");
+  div.className = "ev " + owner.cls + (t.includes("error") || t.includes("escalated") || t.includes("halted") ? " err" : "");
   // sse-sink envelope: {id, type, source, timestamp, payload}
   const body = obj && obj.payload !== undefined ? JSON.stringify(obj.payload, null, 1)
              : obj ? JSON.stringify(obj, null, 1) : dataText;
@@ -566,7 +606,7 @@ function addEvent(stream, topic, dataText) {
     ' · <span class="event-stream"></span>' + src + ' · <span class="topic"></span></div>' +
     (short ? '<details><summary>' + body.length + ' chars</summary><pre></pre></details>'
            : '<pre></pre>');
-  div.querySelector(".event-stream").textContent = stream.run + " · " + stream.name;
+  div.querySelector(".event-stream").textContent = owner.run + " · " + owner.name;
   div.querySelector(".topic").textContent = t;
   div.querySelector("pre").textContent = body;
   const feed = $("feed");
@@ -580,11 +620,19 @@ async function attach(stream) {
       badge(stream.port, "connecting");
       const r = await fetch("/stream/" + stream.port + "/events");
       if (!r.ok) throw new Error("offline");
-      // Take the owner the proxy actually connected to before reading a
+      // Freeze the owner the proxy actually connected to before reading a
       // single event: on a fast handoff this connection belongs to the new
-      // run while /status still reports the old one.
-      adoptIdentity(stream, r.headers.get("X-Signalbox-Run"),
-                    r.headers.get("X-Signalbox-Stream"));
+      // run while /status still reports the old one. The snapshot is const
+      // for the life of THIS response body — later polls and reconnects may
+      // retarget the shared stream entry (badges), but every event below is
+      // labeled with the identity of the connection it arrived on.
+      const owner = {
+        port: stream.port,
+        cls: stream.cls,
+        run: r.headers.get("X-Signalbox-Run") || stream.run,
+        name: r.headers.get("X-Signalbox-Stream") || stream.name,
+      };
+      adoptIdentity(stream, owner.run, owner.name);
       badge(stream.port, "live");
       const rd = r.body.getReader();
       const dec = new TextDecoder();
@@ -601,7 +649,7 @@ async function attach(stream) {
             if (line.startsWith("event:")) ev = line.slice(6).trim();
             else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
           }
-          if (data.length) addEvent(stream, ev, data.join("\n"));
+          if (data.length) addEvent(owner, ev, data.join("\n"));
         }
       }
     } catch (e) { /* engine not running or stream dropped */ }

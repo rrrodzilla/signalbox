@@ -25,7 +25,12 @@
 # own idempotent setup, vendored as bin/vault-setup.sh) and a preflight that
 # fails fast on missing tooling instead of failing 20 minutes into a run.
 #
-# Usage: install.sh <target-repo-path> [--vault <vault-root> [--folder <f>]] [--gate '<command>']
+# Usage: install.sh <target-repo-path> [--reinstall] [--vault <vault-root> [--folder <f>]] [--gate '<command>']
+#   --reinstall
+#             Refresh an existing harness in place after refusing when a
+#             launcher-recorded run is live. Preserves runs/ and the state/
+#             readiness ledger. On a never-installed target, acts like a
+#             plain install.
 #   --vault   Obsidian vault root; wires .claude/docs into it (idempotent,
 #             migrates a pre-existing real docs/ dir). Default folder:
 #             TRIP/<repo-name>. Without --vault the repo must already be
@@ -37,14 +42,15 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="${1:?usage: install.sh <target-repo-path> [--vault <vault-root> [--folder <folder>]] [--gate '<command>']}"
+TARGET="${1:?usage: install.sh <target-repo-path> [--reinstall] [--vault <vault-root> [--folder <folder>]] [--gate '<command>']}"
 shift
-VAULT="" FOLDER="" GATE_CMD=""
+VAULT="" FOLDER="" GATE_CMD="" GATE_SUPPLIED=0 REINSTALL=0
 while [ $# -gt 0 ]; do
     case "$1" in
+        --reinstall) REINSTALL=1; shift ;;
         --vault)  VAULT="${2:?--vault needs a path}"; shift 2 ;;
         --folder) FOLDER="${2:?--folder needs a name}"; shift 2 ;;
-        --gate) GATE_CMD="${2:?--gate needs a command}"; shift 2 ;;
+        --gate) GATE_CMD="${2:?--gate needs a command}"; GATE_SUPPLIED=1; shift 2 ;;
         *) echo "error: unknown argument $1" >&2; exit 64 ;;
     esac
 done
@@ -101,6 +107,48 @@ TARGET="$(cd "$TARGET" && pwd)"
 git -C "$TARGET" rev-parse --git-dir >/dev/null
 REPO="$(basename "$TARGET")"
 DEST="$TARGET/.claude/emergent"
+REINSTALL_ACTIVE=0
+
+# Resolve install mode before preflight or vault wiring: vault-setup.sh can
+# migrate a real docs/ directory, so no mutation may precede this decision.
+if [ -e "$DEST" ]; then
+    if [ "$REINSTALL" -eq 0 ]; then
+        echo "error: $DEST already exists — re-run with --reinstall to refresh it in place" >&2
+        echo "       --reinstall rebuilds bin/, prompts/, templates/, the rendered TOMLs and _env.sh," >&2
+        echo "       and preserves runs/, state/assessments.jsonl, and state/readiness.json." >&2
+        echo "       Removing it by hand destroys live runs and this repo's earned readiness ledger;" >&2
+        echo "       if you do it anyway, carry runs/, state/assessments.jsonl and state/readiness.json across." >&2
+        exit 1
+    fi
+
+    REINSTALL_ACTIVE=1
+    # This detects only runs recorded by bin/run.sh. A hand-started
+    # `emergent --config` engine remains the operator's responsibility.
+    # shellcheck source=bin/_liveness.sh
+    source "$SRC/bin/_liveness.sh"
+    LIVE_RUNS="$(live_runs "$DEST/runs")"
+    if [ -n "$LIVE_RUNS" ]; then
+        echo "error: $DEST has live launcher-recorded runs; refusing to refresh in place" >&2
+        while IFS=$'\t' read -r LIVE_SLUG LIVE_PID LIVE_PHASE; do
+            printf '       live run: slug=%s pid=%s phase=%s\n' \
+                "$LIVE_SLUG" "$LIVE_PID" "$LIVE_PHASE" >&2
+            printf '       stop this run with: kill -TERM %s\n' "$LIVE_PID" >&2
+        done <<<"$LIVE_RUNS"
+        echo "       inspect all runs with: $DEST/bin/run.sh --list" >&2
+        exit 1
+    fi
+
+    # The generated assignment is printf %q output. Evaluate only that single
+    # line rather than sourcing _env.sh, whose target-mode probes run git/jq.
+    if [ "$GATE_SUPPLIED" -eq 0 ] && [ -f "$DEST/bin/_env.sh" ]; then
+        PRIOR_GATE_LINE="$(grep -m 1 '^GATE_CMD=' "$DEST/bin/_env.sh" || true)"
+        if [ -n "$PRIOR_GATE_LINE" ]; then
+            if ! eval "$PRIOR_GATE_LINE" 2>/dev/null; then
+                GATE_CMD=""
+            fi
+        fi
+    fi
+fi
 
 # --- Preflight: everything the topologies shell out to, checked up front.
 MISSING=0
@@ -144,9 +192,8 @@ elif [ ! -e "$TARGET/.claude/docs" ]; then
     exit 1
 fi
 
-if [ -e "$DEST" ]; then
-    echo "error: $DEST already exists — remove it first to reinstall" >&2
-    exit 1
+if [ "$REINSTALL_ACTIVE" -eq 1 ]; then
+    rm -rf -- "$DEST/bin" "$DEST/prompts" "$DEST/templates"
 fi
 
 mkdir -p "$DEST/bin" "$DEST/prompts" "$DEST/state" "$DEST/logs" "$DEST/results" \
@@ -263,7 +310,12 @@ GIT_COMMON="$(git -C "$TARGET" rev-parse --path-format=absolute --git-common-dir
 grep -qxF '.claude' "$GIT_COMMON/info/exclude" 2>/dev/null \
     || printf '.claude\n' >>"$GIT_COMMON/info/exclude"
 
-echo "installed: $DEST"
+if [ "$REINSTALL_ACTIVE" -eq 1 ]; then
+    echo "refreshed: $DEST (in place)"
+    echo "preserved: $DEST/runs/ and $DEST/state/ readiness ledger"
+else
+    echo "installed: $DEST"
+fi
 echo "engines:   $REPO-pipeline (+ $REPO-init, $REPO-plan, $REPO-implement-stream, $REPO-review-loop)"
 echo "gate:      $GATE_CMD"
 echo "observe:   shared dashboard http://127.0.0.1:${SIGNALBOX_SINK_PORT:-8099}/ (SIGNALBOX_SINK_PORT); unit signalbox-sink.service; status: $DEST/bin/sink-service.sh status; approval webhook port $PORT_BASE reserved in $PORT_REG"

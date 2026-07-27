@@ -724,24 +724,19 @@ case "$PHASE" in
     review) TIMEOUT=3600 ;;
 esac
 
-printf '[standalone] %s engine up (pid %s), watching fresh artifacts\n' \
-    "$PHASE" "$CHILD_PID" >&2
-OUTCOME="TIMEOUT"
-ELAPSED=0
-while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-    if ! kill -0 "$CHILD_PID" 2>/dev/null; then
-        OUTCOME="ENGINE_DIED"
-        break
-    fi
+# One scan of this phase's terminal artifacts. Sets OUTCOME and returns 0 when
+# fresh evidence settles the run, leaves OUTCOME untouched and returns 1 when
+# nothing terminal is on disk yet.
+scan_artifacts() {
     if fresh "$RUN_DIR/state/escalated.json"; then
         OUTCOME="ESCALATED"
-        break
+        return 0
     fi
     case "$PHASE" in
         plan)
             if fresh "$RUN_DIR/plan.json"; then
                 OUTCOME="ARTIFACT"
-                break
+                return 0
             fi
             ;;
         implement)
@@ -755,23 +750,47 @@ while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
                 else
                     OUTCOME="GATE_RED"
                 fi
-                break
+                return 0
             fi
             ;;
         review)
             if fresh "$RUN_DIR/results/CR.md"; then
                 OUTCOME="ARTIFACT"
-                break
+                return 0
             fi
             if fresh "$RUN_DIR/state/pending.json"; then
                 OUTCOME="PARKED"
-                break
+                return 0
             fi
             ;;
     esac
+    return 1
+}
+
+printf '[standalone] %s engine up (pid %s), watching fresh artifacts\n' \
+    "$PHASE" "$CHILD_PID" >&2
+OUTCOME="TIMEOUT"
+ELAPSED=0
+while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
+    # Artifacts before liveness: an engine that writes its terminal artifact and
+    # exits immediately is a finished phase, not a death.
+    if scan_artifacts; then
+        break
+    fi
+    if ! kill -0 "$CHILD_PID" 2>/dev/null; then
+        OUTCOME="ENGINE_DIED"
+        break
+    fi
     sleep 2
     ELAPSED=$((ELAPSED + 2))
 done
+
+# An artifact can land between the last scan and the child's exit, or during the
+# final sleep before the deadline. Rescan once so neither is lost to a death or
+# timeout verdict; a real death or timeout leaves OUTCOME as it stands.
+case "$OUTCOME" in
+    ENGINE_DIED|TIMEOUT) scan_artifacts || true ;;
+esac
 
 if [ "$PHASE" = "review" ] \
     && [ "$OUTCOME" = "ARTIFACT" ] \

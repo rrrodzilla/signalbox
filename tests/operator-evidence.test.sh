@@ -50,12 +50,15 @@ git_fixture() {
 }
 
 setup_harness() {
+    # The integration directory name is a parameter because a worktree path is
+    # not a token: cases below name one with spaces and shell metacharacters.
+    local INT_NAME="${1:-integration}"
     fixture
     CASE_ROOT="$FIXTURE_PATH"
     SUBJECT="$CASE_ROOT/bin/operator.sh"
     REPO_ROOT_PATH="$CASE_ROOT/repo"
     WT_BASE_PATH="$CASE_ROOT/worktrees"
-    INT_WT_PATH="$WT_BASE_PATH/integration"
+    INT_WT_PATH="$WT_BASE_PATH/$INT_NAME"
     RUN_DIR_PATH="$CASE_ROOT/run"
     STUB_BIN="$CASE_ROOT/claude-stub.sh"
     ARGV_CAPTURE="$CASE_ROOT/model.argv"
@@ -584,6 +587,45 @@ if jq -e \
 fi
 report_case "tags named after the branches cannot shadow branch evidence" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.200s' "$BRANCH_EVIDENCE")"
+
+# 12. A worktree path is not a token either — git accepts spaces and shell
+# metacharacters in one — and a rule is an exact command string, so the path
+# must be embedded already escaped. Unescaped, the granted text parses as
+# several words (or as shell syntax) when run verbatim, while the quoting the
+# operator would add stops matching the rule: the corroborating check is
+# unavailable either way. The granted rule must therefore run verbatim against
+# that exact worktree, and the prompt must publish the same string so the
+# operator runs precisely what was granted.
+RULES_OK=0
+RULES_DETAIL=""
+for INT_NAME in 'integration wt' "integration'wt" 'integration;id'; do
+    setup_harness "$INT_NAME"
+    init_integration "integration-escaped"
+    EXPECTED_CMD="git -C $(printf '%q' "$INT_WT_PATH") status --porcelain"
+    run_operator "review" "$PROCEED_OUTPUT"
+    GRANTED_CMD="$(grep -m1 '^Bash(git -C ' "$ARGV_CAPTURE" || true)"
+    GRANTED_CMD="${GRANTED_CMD#Bash(}"
+    GRANTED_CMD="${GRANTED_CMD%)}"
+    # Running the granted string verbatim is the whole claim: a clean fixture
+    # worktree yields empty output, while a misparsed path yields a git error
+    # or the output of whatever the metacharacters spawned.
+    PORCELAIN_OUT="$(eval "$GRANTED_CMD" 2>&1)"
+    if [ "$RUN_STATUS" -ne 0 ] \
+        || [ "$GRANTED_CMD" != "$EXPECTED_CMD" ] \
+        || [ -n "$PORCELAIN_OUT" ] \
+        || ! grep -Fx \
+            "- integration worktree status command: $EXPECTED_CMD" \
+            "$PROMPT_CAPTURE" >/dev/null \
+        || ! jq -e '.exists == true and .clean == true' \
+            <<<"$(evidence_line)" >/dev/null \
+        || ! valid_proceed_payload; then
+        RULES_OK=1
+        RULES_DETAIL="worktree=$INT_NAME status=$RUN_STATUS granted=$GRANTED_CMD"
+        break
+    fi
+done
+report_case "a worktree path carrying shell characters is granted escaped" \
+    "$RULES_OK" "$RULES_DETAIL"
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

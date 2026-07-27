@@ -24,6 +24,19 @@ OUT="$RUN_DIR/logs/operator-$PHASE.md"
 RUN_DISPLAY="$RUN_SLUG"
 [ -n "$RUN_DISPLAY" ] || RUN_DISPLAY="(single-run)"
 
+# A permission rule is an exact command string, so the worktree path has to be
+# embedded as a single shell word. An unescaped path carrying a space or a
+# metacharacter is parsed as several words (or as shell syntax) when the
+# operator runs the rule verbatim, while the quoting the operator would
+# naturally add makes the command no longer match the rule — either way the
+# corroborating check is unavailable. printf %q yields a form that is both one
+# shell word and the exact text of the rule, and the same string is published
+# to the prompt below so the operator runs precisely what was granted.
+INT_WT_STATUS_CMD=""
+if [ -d "$INT_WT" ]; then
+    INT_WT_STATUS_CMD="git -C $(printf '%q' "$INT_WT") status --porcelain"
+fi
+
 PROMPT="$(cat "$ROOT/prompts/operator.md")
 
 ## This phase
@@ -37,6 +50,7 @@ PROMPT="$(cat "$ROOT/prompts/operator.md")
 - repo root: $REPO_ROOT
 - worktree home: $WT_BASE
 - integration worktree: $INT_WT
+- integration worktree status command: ${INT_WT_STATUS_CMD:-(not granted: no integration worktree yet)}
 - base branch: $BASE_BRANCH
 - engine log: $LOG
 
@@ -242,8 +256,8 @@ if [ -n "$FEATURE_BRANCH" ]; then
         )
     fi
 fi
-if [ -d "$INT_WT" ]; then
-    GIT_TOOLS+=("Bash(git -C $INT_WT status --porcelain)")
+if [ -n "$INT_WT_STATUS_CMD" ]; then
+    GIT_TOOLS+=("Bash($INT_WT_STATUS_CMD)")
 fi
 
 # Test-only binary seam for tests/operator-evidence.test.sh; production keeps

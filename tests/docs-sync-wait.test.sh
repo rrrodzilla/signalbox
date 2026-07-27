@@ -154,21 +154,37 @@ fi
 report_case "correlation mismatch names both ids" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 240 "$OUT")"
 
-# 5. With no CR.md, otherwise valid evidence passes and records the skipped check.
+# 5. With no CR.md there is nothing to correlate against, so promotion is blocked.
 fixture
 DIR="$FIXTURE_PATH"
 write_evidence "$DIR" "OK" "updated testing" "cid-without-cr" '["TESTING.md"]'
 make_fresh "$DIR"
 run_subject "$OUT" "$ERR" "$DIR" 0
 OK=1
-if [ "$RUN_STATUS" -eq 0 ] \
-    && grep -Fq 'correlation check skipped' "$OUT"; then
+if [ "$RUN_STATUS" -eq 1 ] \
+    && grep -Fq 'missing review result' "$OUT" \
+    && grep -Fq "$DIR/results/CR.md" "$OUT"; then
     OK=0
 fi
-report_case "missing CR skips correlation check" "$OK" \
+report_case "missing CR fails closed" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 240 "$OUT")"
 
-# 6. Missing evidence times out as never having appeared.
+# 6. A CR.md that declares no correlation_id is equally unverifiable.
+fixture
+DIR="$FIXTURE_PATH"
+write_evidence "$DIR" "OK" "updated testing" "cid-without-cr-id" '["TESTING.md"]'
+printf 'PROMOTION_READY\n' >"$DIR/results/CR.md"
+make_fresh "$DIR"
+run_subject "$OUT" "$ERR" "$DIR" 0
+OK=1
+if [ "$RUN_STATUS" -eq 1 ] \
+    && grep -Fq 'has no correlation_id' "$OUT"; then
+    OK=0
+fi
+report_case "CR without correlation_id fails closed" "$OK" \
+    "status=$RUN_STATUS stdout=$(head -c 240 "$OUT")"
+
+# 7. Missing evidence times out as never having appeared.
 fixture
 DIR="$FIXTURE_PATH"
 touch -d '@1000000000' "$DIR/state/pipeline-review.stamp"
@@ -182,7 +198,7 @@ fi
 report_case "missing evidence times out distinctly" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 240 "$OUT")"
 
-# 7. Evidence older than the review stamp remains stale until timeout.
+# 8. Evidence older than the review stamp remains stale until timeout.
 fixture
 DIR="$FIXTURE_PATH"
 write_evidence "$DIR" "OK" "left over" "cid-stale" '["ARCHI.md"]'
@@ -198,7 +214,7 @@ fi
 report_case "stale evidence is not accepted" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 240 "$OUT")"
 
-# 8. Fresh malformed evidence is rejected as invalid JSON.
+# 9. Fresh malformed evidence is rejected as invalid JSON.
 fixture
 DIR="$FIXTURE_PATH"
 printf '{not-json\n' >"$DIR/state/docs-sync.json"
@@ -213,7 +229,7 @@ fi
 report_case "invalid JSON evidence fails immediately" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 240 "$OUT")"
 
-# 9. Without the review stamp there is no trustworthy freshness baseline.
+# 10. Without the review stamp there is no trustworthy freshness baseline.
 fixture
 DIR="$FIXTURE_PATH"
 write_evidence "$DIR" "OK" "updated architecture" "cid-no-stamp" '["ARCHI.md"]'
@@ -227,7 +243,7 @@ fi
 report_case "missing review stamp fails closed" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 240 "$OUT")"
 
-# 10. Wrong argument counts are invalid invocations.
+# 11. Wrong argument counts are invalid invocations.
 run_subject "$OUT" "$ERR"
 ZERO_STATUS=$RUN_STATUS
 fixture
@@ -241,7 +257,7 @@ fi
 report_case "wrong argument count exits 64" "$OK" \
     "zero-args=$ZERO_STATUS three-args=$THREE_STATUS"
 
-# 11. A timeout must be a non-negative integer.
+# 12. A timeout must be a non-negative integer.
 fixture
 DIR="$FIXTURE_PATH"
 run_subject "$OUT" "$ERR" "$DIR" not-a-number

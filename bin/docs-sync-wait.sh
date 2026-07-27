@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # bin/docs-sync-wait.sh <run-dir> <timeout-secs>
 # Blocks until <run-dir>/state/docs-sync.json is newer than
-# <run-dir>/state/pipeline-review.stamp, then validates it. Prints a one-line
-# human-readable reason to stdout in every case.
+# <run-dir>/state/pipeline-review.stamp, then validates it. Validation fails
+# closed: the evidence must report status OK and carry the same correlation_id
+# as <run-dir>/results/CR.md, which must exist and declare one. Prints a
+# one-line human-readable reason to stdout in every case.
 # exit 0 = precondition satisfied; 1 = failed or timed out; 64 = bad invocation.
 set -euo pipefail
 
@@ -64,18 +66,24 @@ if ! jq -e 'type == "object" and .status == "OK"' "$EVIDENCE" >/dev/null; then
     exit 1
 fi
 
-CR_CID=""
-if [ -f "$CR" ]; then
-    CR_CID="$(awk '
-        /^correlation_id:[[:space:]]*/ {
-            sub(/^correlation_id:[[:space:]]*/, "")
-            sub(/[[:space:]]*$/, "")
-            if (length($0) > 0) {
-                print
-                exit
-            }
+if [ ! -f "$CR" ]; then
+    printf 'docs-sync precondition failed: missing review result %s; correlation cannot be validated\n' "$CR"
+    exit 1
+fi
+
+CR_CID="$(awk '
+    /^correlation_id:[[:space:]]*/ {
+        sub(/^correlation_id:[[:space:]]*/, "")
+        sub(/[[:space:]]*$/, "")
+        if (length($0) > 0) {
+            print
+            exit
         }
-    ' "$CR")"
+    }
+' "$CR")"
+if [ -z "$CR_CID" ]; then
+    printf 'docs-sync precondition failed: review result %s has no correlation_id; correlation cannot be validated\n' "$CR"
+    exit 1
 fi
 
 EVIDENCE_CID="$(jq -r '
@@ -85,7 +93,7 @@ EVIDENCE_CID="$(jq -r '
         ""
     end
 ' "$EVIDENCE")"
-if [ -n "$CR_CID" ] && [ "$CR_CID" != "$EVIDENCE_CID" ]; then
+if [ "$CR_CID" != "$EVIDENCE_CID" ]; then
     printf 'docs-sync precondition failed: CR correlation_id "%s" does not match evidence correlation_id "%s"\n' \
         "$CR_CID" "$EVIDENCE_CID"
     exit 1
@@ -100,10 +108,5 @@ else
     UPDATED_REASON="updated=$UPDATED"
 fi
 
-if [ -n "$CR_CID" ]; then
-    printf 'docs-sync precondition satisfied: status "OK"; %s; correlation_id "%s" matches CR.md\n' \
-        "$UPDATED_REASON" "$CR_CID"
-else
-    printf 'docs-sync precondition satisfied: status "OK"; %s; correlation check skipped (CR.md absent or has no correlation_id)\n' \
-        "$UPDATED_REASON"
-fi
+printf 'docs-sync precondition satisfied: status "OK"; %s; correlation_id "%s" matches CR.md\n' \
+    "$UPDATED_REASON" "$CR_CID"

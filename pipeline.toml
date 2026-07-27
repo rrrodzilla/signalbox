@@ -119,6 +119,8 @@ subscribes = ["exec.error"]
 # serves no port. Forwarding is fire-and-forget, so a down sink service cannot
 # stall or fail a run. exec-sink gives its child only the payload, with no topic
 # metadata, so one block per topic passes the exact label as a literal argument.
+# The wildcard lifecycle blocks have no single literal to pass, so they rebuild
+# the concrete topic from the payload's own "name" field before forwarding.
 [[sinks]]
 name = "forward-phase-request"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
@@ -158,17 +160,17 @@ subscribes = ["exec.error"]
 [[sinks]]
 name = "forward-system-started-any"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "system.started.*", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "pipeline", "system.started.*"]
+args = ["-s", "system.started.*", "-t", "5000", "--", "bash", "-c", 'payload=$(cat); name=$(jq -r ".name // empty" <<<"$payload" 2>/dev/null); printf "%s" "$payload" | "$0" pipeline "system.started.${name:-unknown}"', "__SIGNALBOX_ROOT__/bin/sse-forward.sh"]
 subscribes = ["system.started.*"]
 
 [[sinks]]
 name = "forward-system-stopped-any"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "system.stopped.*", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "pipeline", "system.stopped.*"]
+args = ["-s", "system.stopped.*", "-t", "5000", "--", "bash", "-c", 'payload=$(cat); name=$(jq -r ".name // empty" <<<"$payload" 2>/dev/null); printf "%s" "$payload" | "$0" pipeline "system.stopped.${name:-unknown}"', "__SIGNALBOX_ROOT__/bin/sse-forward.sh"]
 subscribes = ["system.stopped.*"]
 
 [[sinks]]
 name = "forward-system-error-any"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "system.error.*", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "pipeline", "system.error.*"]
+args = ["-s", "system.error.*", "-t", "5000", "--", "bash", "-c", 'payload=$(cat); name=$(jq -r ".name // empty" <<<"$payload" 2>/dev/null); printf "%s" "$payload" | "$0" pipeline "system.error.${name:-unknown}"', "__SIGNALBOX_ROOT__/bin/sse-forward.sh"]
 subscribes = ["system.error.*"]

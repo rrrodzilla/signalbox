@@ -104,6 +104,16 @@ fi
 
 if [ -z "$CHANGED_FILES" ]; then
     UNCHANGED=("${DOCS[@]}")
+    # Nothing to sync still requires the three vault documents to be present:
+    # an empty diff must not hand the operator seam a status: "OK" over a vault
+    # that is missing a required document.
+    EMPTY_DIFF_MISSING=()
+    for DOC in "${DOCS[@]}"; do
+        [ -f "$VAULT/$DOC" ] || EMPTY_DIFF_MISSING+=("$DOC")
+    done
+    if [ "${#EMPTY_DIFF_MISSING[@]}" -gt 0 ]; then
+        finish "ERROR" "empty feature diff — nothing to sync; required vault documents absent: $(IFS=', '; echo "${EMPTY_DIFF_MISSING[*]}")."
+    fi
     finish "OK" "empty feature diff — nothing to sync"
 fi
 

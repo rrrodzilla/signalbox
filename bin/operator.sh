@@ -121,8 +121,11 @@ esac
 # rules are simply omitted; without a second route such a repository could
 # never complete implement verification. The harness shell has no such limit:
 # it passes every ref as an argv word that no shell ever parses, so it captures
-# the same two facts itself. Ranges are built from the resolved object ids, not
-# the ref names, so a ref git might read as an option cannot reach a range
+# the same two facts itself. Both names are resolved inside refs/heads
+# explicitly: gitrevisions prefers refs/tags for a bare name, so a tag sharing
+# a branch's name would otherwise substitute its history while the evidence
+# still reads `resolved: true`. Ranges are built from the resolved object ids,
+# not the ref names, so a ref git might read as an option cannot reach a range
 # argument. Failure is non-fatal and explicit: unusable evidence must reach the
 # operator as a stated error, never abort the pipeline handler.
 branch_evidence() {
@@ -136,7 +139,8 @@ branch_evidence() {
     local DIFFSTAT=""
 
     if ! BASE_TIP="$(
-        git -C "$REPO_ROOT" rev-parse --verify --quiet "$BASE^{commit}" 2>/dev/null
+        git -C "$REPO_ROOT" rev-parse --verify --quiet \
+            "refs/heads/$BASE^{commit}" 2>/dev/null
     )"; then
         jq -nc \
             --arg base "$BASE" \
@@ -147,7 +151,8 @@ branch_evidence() {
         return 0
     fi
     if ! BRANCH_TIP="$(
-        git -C "$REPO_ROOT" rev-parse --verify --quiet "$BRANCH^{commit}" 2>/dev/null
+        git -C "$REPO_ROOT" rev-parse --verify --quiet \
+            "refs/heads/$BRANCH^{commit}" 2>/dev/null
     )"; then
         jq -nc \
             --arg base "$BASE" \

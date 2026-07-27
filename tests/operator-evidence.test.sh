@@ -45,6 +45,7 @@ git_fixture() {
         -c user.name=t \
         -c user.email=t@example.com \
         -c commit.gpgsign=false \
+        -c tag.gpgsign=false \
         -C "$DIR" "$@"
 }
 
@@ -550,6 +551,38 @@ if jq -e \
     OK=0
 fi
 report_case "unresolvable branches become explicit negative branch evidence" \
+    "$OK" "status=$RUN_STATUS evidence=$(printf '%.200s' "$BRANCH_EVIDENCE")"
+
+# 11. gitrevisions resolves a bare name through refs/tags before refs/heads,
+# so a tag named after either configured branch would substitute its history
+# while the evidence still reads resolved. The harness pins both names inside
+# refs/heads: with the tags deliberately crossed (tag main at the feature tip,
+# tag feat/... at the base tip), only branch resolution yields the shard commit.
+setup_harness
+seed_plan "fixture-feature"
+init_repo_branches "main" "feat/fixture-feature" "shard.txt"
+BASE_TIP_FULL="$(git_fixture "$REPO_ROOT_PATH" rev-parse refs/heads/main)"
+FEATURE_TIP_FULL="$(
+    git_fixture "$REPO_ROOT_PATH" rev-parse refs/heads/feat/fixture-feature
+)"
+git_fixture "$REPO_ROOT_PATH" tag main "$FEATURE_TIP_FULL"
+git_fixture "$REPO_ROOT_PATH" tag feat/fixture-feature "$BASE_TIP_FULL"
+run_operator "implement" "$PROCEED_OUTPUT"
+BRANCH_EVIDENCE="$(branch_evidence_line)"
+OK=1
+if jq -e \
+        --arg base_tip "$BASE_TIP_FULL" \
+        --arg branch_tip "$FEATURE_TIP_FULL" \
+        '.resolved == true
+            and .base_tip == $base_tip
+            and .branch_tip == $branch_tip
+            and (.commits | length) == 1
+            and (.files == ["shard.txt"])' \
+        <<<"$BRANCH_EVIDENCE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "tags named after the branches cannot shadow branch evidence" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.200s' "$BRANCH_EVIDENCE")"
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"

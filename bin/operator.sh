@@ -5,7 +5,8 @@
 # Headless Fable applies the phantom-run discipline as topology: never trust
 # the runner's outcome, verify the phase's disk artifacts first-hand, then
 # PROCEED or HALT. Review and promote prompts include harness-captured live
-# integration-worktree evidence. Fail-safe: an unparseable verdict is a HALT
+# integration-worktree evidence; implement prompts include the harness-captured
+# live branch comparison. Fail-safe: an unparseable verdict is a HALT
 # — when the operator can't be understood, the pipeline stops.
 set -euo pipefail
 # shellcheck source=_env.sh
@@ -112,6 +113,106 @@ case "$BASE_BRANCH" in
     "" | -* | */ | *..* | *[!A-Za-z0-9._/-]*) ;;
     *) SAFE_BASE="$BASE_BRANCH" ;;
 esac
+
+# The implement terminal's two mandatory checks — at least one shard commit,
+# and a diff confined to plan.json's declared files — are both ref-bearing, and
+# a rule is one exact command string. A base branch spelled with `;`, `&`, or
+# `$(...)` is legal to git but has no safe spelling inside a rule, so those two
+# rules are simply omitted; without a second route such a repository could
+# never complete implement verification. The harness shell has no such limit:
+# it passes every ref as an argv word that no shell ever parses, so it captures
+# the same two facts itself. Ranges are built from the resolved object ids, not
+# the ref names, so a ref git might read as an option cannot reach a range
+# argument. Failure is non-fatal and explicit: unusable evidence must reach the
+# operator as a stated error, never abort the pipeline handler.
+branch_evidence() {
+    local BASE="$1"
+    local BRANCH="$2"
+    local BASE_TIP=""
+    local BRANCH_TIP=""
+    local BRANCH_SHORT=""
+    local COMMITS=""
+    local FILES=""
+    local DIFFSTAT=""
+
+    if ! BASE_TIP="$(
+        git -C "$REPO_ROOT" rev-parse --verify --quiet "$BASE^{commit}" 2>/dev/null
+    )"; then
+        jq -nc \
+            --arg base "$BASE" \
+            --arg branch "$BRANCH" \
+            --argjson resolved false \
+            --arg error "base branch does not resolve to a commit" \
+            '{base: $base, branch: $branch, resolved: $resolved, error: $error}'
+        return 0
+    fi
+    if ! BRANCH_TIP="$(
+        git -C "$REPO_ROOT" rev-parse --verify --quiet "$BRANCH^{commit}" 2>/dev/null
+    )"; then
+        jq -nc \
+            --arg base "$BASE" \
+            --arg branch "$BRANCH" \
+            --argjson resolved false \
+            --arg error "feature branch does not resolve to a commit" \
+            '{base: $base, branch: $branch, resolved: $resolved, error: $error}'
+        return 0
+    fi
+    if ! COMMITS="$(
+        git -C "$REPO_ROOT" log --oneline "$BASE_TIP..$BRANCH_TIP" 2>/dev/null
+    )" || ! FILES="$(
+        git -C "$REPO_ROOT" diff --name-only "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
+    )" || ! DIFFSTAT="$(
+        git -C "$REPO_ROOT" diff --stat "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
+    )"; then
+        jq -nc \
+            --arg base "$BASE" \
+            --arg branch "$BRANCH" \
+            --argjson resolved false \
+            --arg error "git could not compare the branches" \
+            '{base: $base, branch: $branch, resolved: $resolved, error: $error}'
+        return 0
+    fi
+    # gate.json records the short tip, so the evidence carries that form too.
+    BRANCH_SHORT="$(
+        git -C "$REPO_ROOT" rev-parse --short "$BRANCH_TIP" 2>/dev/null || true
+    )"
+
+    jq -nc \
+        --arg base "$BASE" \
+        --arg branch "$BRANCH" \
+        --argjson resolved true \
+        --arg base_tip "$BASE_TIP" \
+        --arg branch_tip "$BRANCH_TIP" \
+        --arg branch_tip_short "$BRANCH_SHORT" \
+        --arg commits "$COMMITS" \
+        --arg files "$FILES" \
+        --arg diffstat "$DIFFSTAT" \
+        '{
+            base: $base,
+            branch: $branch,
+            resolved: $resolved,
+            base_tip: $base_tip,
+            branch_tip: $branch_tip,
+            branch_tip_short: $branch_tip_short,
+            commits: ($commits | split("\n") | map(select(length > 0))),
+            files: ($files | split("\n") | map(select(length > 0))),
+            diffstat: $diffstat
+        }'
+}
+
+if [ "$PHASE" = "implement" ] && [ -n "$FEATURE_BRANCH" ]; then
+    BRANCH_EVIDENCE="$(branch_evidence "$BASE_BRANCH" "$FEATURE_BRANCH")"
+    BRANCH_CAPTURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    PROMPT="$PROMPT
+
+## Branch evidence (harness-captured live at operator time)
+
+- repo root: $REPO_ROOT
+- base branch: $BASE_BRANCH
+- feature branch: $FEATURE_BRANCH
+- captured: $BRANCH_CAPTURED_AT
+$BRANCH_EVIDENCE"
+fi
 
 GIT_TOOLS=(
     "Bash(git status --porcelain)"

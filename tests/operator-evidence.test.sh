@@ -128,6 +128,20 @@ init_integration() {
     git_fixture "$INT_WT_PATH" commit -q -m initial
 }
 
+init_repo_branches() {
+    local BASE="$1"
+    local BRANCH="$2"
+    local SHARD_FILE="$3"
+    git_fixture "$REPO_ROOT_PATH" init -q -b "$BASE"
+    printf '%s\n' "base" >"$REPO_ROOT_PATH/base.txt"
+    git_fixture "$REPO_ROOT_PATH" add base.txt
+    git_fixture "$REPO_ROOT_PATH" commit -q -m base
+    git_fixture "$REPO_ROOT_PATH" checkout -q -b "$BRANCH"
+    printf '%s\n' "shard" >"$REPO_ROOT_PATH/$SHARD_FILE"
+    git_fixture "$REPO_ROOT_PATH" add "$SHARD_FILE"
+    git_fixture "$REPO_ROOT_PATH" commit -q -m "shard commit"
+}
+
 set_fixture_base_branch() {
     local BASE="$1"
     printf 'BASE_BRANCH=%s\nexport BASE_BRANCH\n' "$(printf '%q' "$BASE")" \
@@ -202,6 +216,15 @@ evidence_line() {
     awk '
         FOUND && /^\{/ { print; exit }
         $0 == "## Worktree evidence (harness-captured live at operator time)" {
+            FOUND = 1
+        }
+    ' "$PROMPT_CAPTURE"
+}
+
+branch_evidence_line() {
+    awk '
+        FOUND && /^\{/ { print; exit }
+        $0 == "## Branch evidence (harness-captured live at operator time)" {
             FOUND = 1
         }
     ' "$PROMPT_CAPTURE"
@@ -472,6 +495,62 @@ for BAD_BASE in 'main;id' 'main --output=/tmp/x' 'main$(id)' '-main' 'a..b'; do
 done
 report_case "a non-token base branch grants no rule bearing it" "$RULES_OK" \
     "$RULES_DETAIL"
+
+# 9. The implement terminal's commit and diff checks must stay completable for
+# every base branch git accepts, including one no exact rule can spell. The
+# harness compares the branches itself — refs as arguments, never shell words —
+# and injects the same two facts, so the omitted rules cost no verification.
+RULES_OK=0
+RULES_DETAIL=""
+for TEST_BASE in 'main' 'main;id' 'main$(id)'; do
+    setup_harness
+    seed_plan "fixture-feature"
+    set_fixture_base_branch "$TEST_BASE"
+    init_repo_branches "$TEST_BASE" "feat/fixture-feature" "shard.txt"
+    run_operator "implement" "$PROCEED_OUTPUT"
+    BRANCH_EVIDENCE="$(branch_evidence_line)"
+    if [ "$RUN_STATUS" -ne 0 ] \
+        || ! grep -Fx \
+            '## Branch evidence (harness-captured live at operator time)' \
+            "$PROMPT_CAPTURE" >/dev/null \
+        || ! grep -E '^- captured: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+            "$PROMPT_CAPTURE" >/dev/null \
+        || ! jq -e \
+            --arg base "$TEST_BASE" \
+            '.resolved == true
+                and .base == $base
+                and .branch == "feat/fixture-feature"
+                and (.commits | length) == 1
+                and (.files == ["shard.txt"])
+                and (.branch_tip_short | length > 0)
+                and (.diffstat | contains("shard.txt"))' \
+            <<<"$BRANCH_EVIDENCE" >/dev/null \
+        || ! valid_proceed_payload; then
+        RULES_OK=1
+        RULES_DETAIL="base=$TEST_BASE status=$RUN_STATUS evidence=$(printf '%.200s' "$BRANCH_EVIDENCE")"
+        break
+    fi
+done
+report_case "implement carries harness-captured branch evidence for any base" \
+    "$RULES_OK" "$RULES_DETAIL"
+
+# 10. Branch evidence is honest about its own gaps: when the refs do not
+# resolve the operator must still emit a verdict payload, carrying an explicit
+# error rather than a silently empty commit list that reads as a clean diff.
+setup_harness
+seed_plan "fixture-feature"
+git_fixture "$REPO_ROOT_PATH" init -q -b main
+run_operator "implement" "$PROCEED_OUTPUT"
+BRANCH_EVIDENCE="$(branch_evidence_line)"
+OK=1
+if jq -e \
+        '.resolved == false and (.error | length > 0) and (has("commits") | not)' \
+        <<<"$BRANCH_EVIDENCE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "unresolvable branches become explicit negative branch evidence" \
+    "$OK" "status=$RUN_STATUS evidence=$(printf '%.200s' "$BRANCH_EVIDENCE")"
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

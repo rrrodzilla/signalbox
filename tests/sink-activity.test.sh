@@ -191,6 +191,7 @@ HARNESS_CASES=(
     "activity-never-shadows-artifact"
     "escalation-still-wins"
     "stopped-event-is-not-progress"
+    "direct-start-resets"
 )
 CASE_LABELS=(
     "stale relaunch begins in WAITING"
@@ -202,6 +203,7 @@ CASE_LABELS=(
     "live activity never shadows a terminal artifact"
     "artifact escalation still wins over live activity"
     "system.stopped is not treated as progress"
+    "a direct phase start replaces retained phase activity"
 )
 
 if ! command -v node >/dev/null 2>&1; then
@@ -396,6 +398,26 @@ check(
   "stopped-event-is-not-progress",
   derive(runA).review !== "active",
   "expected system.stopped.review-seed not to activate review"
+);
+
+// A bin/run.sh --phase launch publishes no phase.request, so its engine start
+// is what must drop the implement mark retained from the earlier launch.
+// Otherwise implement stays active and wins PHASES.find ahead of review.
+applyRunState("stage.item", KEY_A, { id: "s1", shards: [] }, "implement");
+applyRunState(
+  "system.started.review-seed",
+  KEY_A,
+  { name: "review-seed" },
+  "review"
+);
+states = derive(runA);
+check(
+  "direct-start-resets",
+  states.implement === "pending" && states.review === "active" &&
+    verdictFor(runA, states).label === "REVIEW IN PROGRESS",
+  "expected implement pending and review active, got " +
+    states.implement + "/" + states.review + "/" +
+    verdictFor(runA, states).label
 );
 JSEOF
 

@@ -1484,18 +1484,23 @@ function applyRunState(t, key, pl, engineLabel) {
   // otherwise shadow the entire relaunch.
   const phaseRequested = t === "phase.request" && pl &&
     typeof pl.phase === "string";
-  const reentered = phaseRequested || t.indexOf("system.started.") === 0;
+  const started = t.indexOf("system.started.") === 0;
+  // A phase engine announces its own start, so a phase-scoped system.started.*
+  // is the only re-entry signal a bin/run.sh --phase launch publishes.
+  const directPhaseStart = started && ACTIVITY_PHASES.includes(engineLabel);
+  const reentered = phaseRequested || started;
   if (reentered) {
     delete haltInfo[key];
     delete completeInfo[key];
     if (promoteStates[key] !== "active") delete promoteStates[key];
   }
-  // The pipeline advances one phase at a time, so a new request replaces
-  // every live-activity mark left by the phase it just advanced from.
-  if (phaseRequested) {
-    delete phaseActivity[key];
-    markPhaseActive(key, pl.phase);
-  }
+  // One phase runs at a time, so a re-entry drops every live-activity mark the
+  // run still carries: marks left by the phase the pipeline advanced from, and
+  // marks retained from an earlier launch when a direct phase start re-enters.
+  // Without this a stale phase stays active and can win PHASES.find ahead of
+  // the phase actually running.
+  if (phaseRequested || directPhaseStart) delete phaseActivity[key];
+  if (phaseRequested) markPhaseActive(key, pl.phase);
   // Any phase-scoped event proves that phase is running. A system.stopped.*
   // event only reports engine wind-down, so it is not progress.
   if (t.indexOf("system.stopped.") !== 0) markPhaseActive(key, engineLabel);

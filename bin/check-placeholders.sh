@@ -2,9 +2,12 @@
 # Usage: bin/check-placeholders.sh <rendered-dir>
 #
 # Checks every top-level TOML file in a rendered run directory for unresolved
-# __SIGNALBOX_ placeholders. Whole-line comments are excluded because templates
+# __SIGNALBOX_ placeholders. Comments are excluded because templates
 # legitimately name the placeholder tokens in their own prose; only a live
-# (non-comment) occurrence is evidence of a rendering failure.
+# (non-comment) occurrence is evidence of a rendering failure. Detection runs
+# against the live prefix of each line, so an inline comment that names a
+# placeholder is ignored while a placeholder earlier on that same line is
+# still reported.
 #
 # TOML string state is tracked while scanning so that a line beginning with #
 # inside a multiline string is treated as string content, not as a comment:
@@ -60,13 +63,16 @@ OFFENDING="$(
 
         # Walk one line, updating STATE: 0 outside any multiline string,
         # 1 inside a multiline basic string, 2 inside a multiline literal one.
+        # Returns the live prefix of the line: everything up to a real comment
+        # marker, or the whole line when it carries none. String contents are
+        # live, so a placeholder inside a string is still reported.
         function scan(s,   i, n, c) {
             i = 1
             n = length(s)
             while (i <= n) {
                 c = substr(s, i, 1)
                 if (STATE == 0) {
-                    if (c == "#") { return }
+                    if (c == "#") { return substr(s, 1, i - 1) }
                     if (substr(s, i, 3) == DQ3) { STATE = 1; i += 3; continue }
                     if (substr(s, i, 3) == SQ3) { STATE = 2; i += 3; continue }
                     if (c == DQ) { i = skip_basic(s, i + 1, n); continue }
@@ -81,13 +87,13 @@ OFFENDING="$(
                     i++
                 }
             }
+            return s
         }
 
         FNR == 1 { STATE = 0 }
-        STATE == 0 && /^[[:space:]]*#/ { next }
         {
-            scan($0)
-            if ($0 ~ /__SIGNALBOX_/) { print FILENAME ":" FNR ":" $0 }
+            LIVE = scan($0)
+            if (LIVE ~ /__SIGNALBOX_/) { print FILENAME ":" FNR ":" $0 }
         }
     ' "${TOML_FILES[@]}"
 )"

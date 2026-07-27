@@ -176,6 +176,37 @@ else
     report_case "quotes in comments and values keep comments skipped" 1
 fi
 
+INLINE_COMMENT_DIR="$(mktemp -d)"
+FIXTURES+=("$INLINE_COMMENT_DIR")
+cat >"$INLINE_COMMENT_DIR/pipeline.toml" <<'EOF'
+name = "signalbox-pipeline-issue-17"
+args = ["--port", "8203"] # rendered from __SIGNALBOX_PORT_PIPELINE__
+EOF
+run_subject "$INLINE_COMMENT_DIR/stdout" "$INLINE_COMMENT_DIR/stderr" "$INLINE_COMMENT_DIR"
+if [ "$RUN_STATUS" -eq 0 ] &&
+    [ ! -s "$INLINE_COMMENT_DIR/stdout" ] &&
+    [ ! -s "$INLINE_COMMENT_DIR/stderr" ]; then
+    report_case "placeholder only in an inline comment" 0
+else
+    report_case "placeholder only in an inline comment" 1
+fi
+
+INLINE_LIVE_DIR="$(mktemp -d)"
+FIXTURES+=("$INLINE_LIVE_DIR")
+INLINE_LIVE_FILE="$INLINE_LIVE_DIR/plan.toml"
+cat >"$INLINE_LIVE_FILE" <<'EOF'
+name = "signalbox-plan-issue-17"
+args = ["--port", "__SIGNALBOX_PORT_PLAN__"] # rendered from __SIGNALBOX_PORT_PLAN__
+EOF
+run_subject "$INLINE_LIVE_DIR/stdout" "$INLINE_LIVE_DIR/stderr" "$INLINE_LIVE_DIR"
+INLINE_LIVE_STDERR="$(<"$INLINE_LIVE_DIR/stderr")"
+if [ "$RUN_STATUS" -eq 1 ] &&
+    [[ "$INLINE_LIVE_STDERR" == *"$INLINE_LIVE_FILE:2:"* ]]; then
+    report_case "live placeholder before an inline comment" 0
+else
+    report_case "live placeholder before an inline comment" 1
+fi
+
 ARGUMENT_DIR="$(mktemp -d)"
 FIXTURES+=("$ARGUMENT_DIR")
 run_subject "$ARGUMENT_DIR/zero.stdout" "$ARGUMENT_DIR/zero.stderr"

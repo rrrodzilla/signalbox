@@ -96,6 +96,10 @@ report_case() {
 # shellcheck source=../bin/_liveness.sh
 source "$LIVENESS"
 
+# Every case except the post-withdrawal race below wants the shortest possible
+# quiescence watch: one scan, no waiting. The race case raises it deliberately.
+export SIGNALBOX_REINSTALL_QUIESCE=0
+
 fixture
 OUT="$(mktemp)"
 ERR="$(mktemp)"
@@ -325,6 +329,59 @@ fi
 report_case "a run recorded after the first scan is refused with bin/ restored" "$OK" \
     "status=$RUN_STATUS staged-left=$STAGED_LEFT stderr=$(head -c 300 "$ERR")"
 unset STALE_LAUNCH_SRC STALE_LAUNCH_DEST
+kill "$STALE_PID" 2>/dev/null || true
+wait "$STALE_PID" 2>/dev/null || true
+
+# 10. Post-withdrawal race: a stale launcher that had already passed its last
+# bin/ exec when bin/ was withdrawn writes its launch.json after the rescan.
+# run.sh records the pid only after spawning the engine, so this metadata names
+# no process at all and liveness cannot see it — the quiescence window has to
+# catch the write itself, refuse, and leave the harness exactly as found.
+export SIGNALBOX_REINSTALL_QUIESCE=3
+RACE_RUN_DIR="$FIXTURE_DEST/runs/issue-88"
+RACE_LAUNCH="$RACE_RUN_DIR/launch.json"
+mkdir -p "$RACE_RUN_DIR"
+(
+    for _ in $(seq 1 200); do
+        [ -d "$FIXTURE_DEST/bin" ] || break
+        sleep 0.05
+    done
+    printf '{"slug":"issue-88","phase":"pipeline","issue":88}\n' >"$RACE_LAUNCH"
+) &
+RACE_PID=$!
+CHILD_PIDS+=("$RACE_PID")
+printf '\nPOST_WITHDRAWAL_SENTINEL\n' >>"$FIXTURE_DEST/bin/run.sh"
+run_subject "$OUT" "$ERR" --reinstall
+wait "$RACE_PID" 2>/dev/null || true
+STAGED_LEFT=0
+compgen -G "$FIXTURE_DEST/.bin.reinstalling.*" >/dev/null && STAGED_LEFT=1
+MARKER_LEFT=0
+compgen -G "$FIXTURE_DEST/.reinstall.quiesce.*" >/dev/null && MARKER_LEFT=1
+OK=1
+if [ "$RUN_STATUS" -eq 1 ] \
+    && grep -q 'startup in flight' "$ERR" \
+    && grep -q 'issue-88' "$ERR" \
+    && [ "$STAGED_LEFT" -eq 0 ] \
+    && [ "$MARKER_LEFT" -eq 0 ] \
+    && [ -d "$FIXTURE_DEST/prompts" ] \
+    && grep -q 'POST_WITHDRAWAL_SENTINEL' "$FIXTURE_DEST/bin/run.sh"; then
+    OK=0
+fi
+report_case "launch metadata written after the withdrawal refuses the refresh" "$OK" \
+    "status=$RUN_STATUS staged-left=$STAGED_LEFT marker-left=$MARKER_LEFT stderr=$(head -c 300 "$ERR")"
+rm -f -- "$RACE_LAUNCH"
+
+# 11. The quiescence window is bounded: still at three seconds, with no
+# launcher in flight, the refresh completes rather than waiting for ever.
+run_subject "$OUT" "$ERR" --reinstall
+OK=1
+if [ "$RUN_STATUS" -eq 0 ] \
+    && [ -d "$FIXTURE_DEST/bin" ] \
+    && ! grep -q 'POST_WITHDRAWAL_SENTINEL' "$FIXTURE_DEST/bin/run.sh"; then
+    OK=0
+fi
+report_case "a quiet quiescence window lets the refresh through" "$OK" \
+    "status=$RUN_STATUS stderr=$(head -c 300 "$ERR")"
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

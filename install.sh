@@ -30,11 +30,14 @@
 #             Refresh an existing harness in place after refusing when a
 #             launcher-recorded run is live. The refusal check and the refresh
 #             run under an exclusive <dest>/.install.lock that bin/run.sh also
-#             takes, and the installed bin/ is withdrawn and rescanned before
-#             anything is destroyed, so no run can start in between — including
-#             from a harness installed before the lock existed. Preserves runs/
-#             and the state/ readiness ledger. On a never-installed target,
-#             acts like a plain install.
+#             takes, and the installed bin/ is withdrawn before anything is
+#             destroyed, then watched until startups quiesce, so no run can
+#             start in between — including from a harness installed before the
+#             lock existed. The quiescence window is SIGNALBOX_REINSTALL_QUIESCE
+#             seconds (default 5); any launch metadata written under runs/
+#             during it refuses the refresh. Preserves runs/ and the state/
+#             readiness ledger. On a never-installed target, acts like a plain
+#             install.
 #   --vault   Obsidian vault root; wires .claude/docs into it (idempotent,
 #             migrates a pre-existing real docs/ dir). Default folder:
 #             TRIP/<repo-name>. Without --vault the repo must already be
@@ -123,6 +126,24 @@ refuse_live_runs() {
         printf '       stop this run with: kill -TERM %s\n' "$LIVE_PID" >&2
     done <<<"$LIVE_LIST"
     echo "       inspect all runs with: $DEST/bin/run.sh --list" >&2
+    exit 1
+}
+
+# A launcher writes launch.json before its engine exists and patches the pid in
+# afterwards, so metadata that appears while the harness is withdrawn is a
+# startup in flight whether or not it yet names a live process. Neither the
+# liveness scan nor the lock can settle it — the launcher that wrote it never
+# took the lock — so the conservative verdict is to refuse.
+refuse_startup_in_flight() {
+    local PENDING_LIST="$1" PENDING_FILE
+
+    echo "error: launch metadata was written under $DEST/runs while the harness was" >&2
+    echo "       withdrawn; a launcher is starting an engine right now — refusing to refresh" >&2
+    while IFS= read -r PENDING_FILE; do
+        [ -n "$PENDING_FILE" ] || continue
+        printf '       startup in flight: %s\n' "$PENDING_FILE" >&2
+    done <<<"$PENDING_LIST"
+    echo "       wait for it to finish starting, then: $DEST/bin/run.sh --list" >&2
     exit 1
 }
 
@@ -223,24 +244,57 @@ if [ "$REINSTALL_ACTIVE" -eq 1 ]; then
     # already inside its startup window cannot reach an engine either, because
     # it still has to exec bin/ports.sh and bin/check-placeholders.sh from the
     # directory that just vanished — both run before it spawns emergent.
-    # Then rescan, since a stale launcher may have recorded its run after the
+    # Then watch, since a stale launcher may have recorded its run after the
     # first scan: if it did, bin/ goes straight back and the refusal names it,
-    # leaving the harness exactly as it was found. What no installer-side
-    # mechanism can cover is a pre-lock launcher that had already passed its
-    # last bin/ exec when the rename landed and records launch.json after this
-    # rescan reads it; a lock-aware launcher has no such window.
+    # leaving the harness exactly as it was found. The withdrawal binds only
+    # launchers that still have a bin/ exec ahead of them; one that had already
+    # passed its last one when the rename landed is mid startup right now and
+    # will write launch.json in the next moments. So a single rescan is not
+    # enough — the tree is watched for a quiescence window, and anything that
+    # touches launch metadata during it is refused, live pid or not. Startups
+    # cannot begin during the window (bin/ is gone), so the window only has to
+    # outlast the tail of one already in flight: the jq that writes launch.json
+    # and the spawn that follows it.
     STAGED_BIN="$DEST/.bin.reinstalling.$$"
+    QUIESCE_MARKER="$DEST/.reinstall.quiesce.$$"
+    QUIESCE_SECONDS="${SIGNALBOX_REINSTALL_QUIESCE:-5}"
+    [[ "$QUIESCE_SECONDS" =~ ^[0-9]+$ ]] || QUIESCE_SECONDS=5
     if [ -d "$DEST/bin" ]; then
+        # The marker dates the withdrawal, and find -newer compares against it.
+        # It is backdated a second so a filesystem with coarse timestamps cannot
+        # round a launch.json written just after the rename back onto the
+        # marker's own second and hide it; erring early only ever adds refusals.
+        : >"$QUIESCE_MARKER"
+        touch -d '1 second ago' -- "$QUIESCE_MARKER" 2>/dev/null || true
         mv -- "$DEST/bin" "$STAGED_BIN"
-        LIVE_RUNS="$(live_runs "$DEST/runs")"
-        if [ -n "$LIVE_RUNS" ]; then
-            mv -- "$STAGED_BIN" "$DEST/bin"
-            refuse_live_runs "$LIVE_RUNS"
-        fi
+        ELAPSED=0
+        while :; do
+            LIVE_RUNS="$(live_runs "$DEST/runs")"
+            # launch.json* also catches the launcher's temp file: metadata half
+            # written is a startup in flight just as much as metadata renamed
+            # into place. Older debris keeps its old mtime and is ignored.
+            PENDING_LAUNCHES="$(find "$DEST/runs" -mindepth 2 -maxdepth 2 \
+                -name 'launch.json*' -newer "$QUIESCE_MARKER" 2>/dev/null || true)"
+            if [ -n "$LIVE_RUNS" ] || [ -n "$PENDING_LAUNCHES" ]; then
+                mv -- "$STAGED_BIN" "$DEST/bin"
+                rm -f -- "$QUIESCE_MARKER"
+                if [ -n "$LIVE_RUNS" ]; then
+                    refuse_live_runs "$LIVE_RUNS"
+                fi
+                refuse_startup_in_flight "$PENDING_LAUNCHES"
+            fi
+            if [ "$ELAPSED" -ge "$QUIESCE_SECONDS" ]; then
+                break
+            fi
+            sleep 1
+            ELAPSED=$((ELAPSED + 1))
+        done
     fi
-    # Any other staged directory is the debris of an installer that died
-    # holding the lock this one now holds; bin/ is rebuilt from source anyway.
-    rm -rf -- "$DEST"/.bin.reinstalling.* "$DEST/bin" "$DEST/prompts" "$DEST/templates"
+    # Any other staged directory or marker is the debris of an installer that
+    # died holding the lock this one now holds; bin/ is rebuilt from source
+    # anyway, and a stale marker dates a withdrawal that is long over.
+    rm -rf -- "$DEST"/.bin.reinstalling.* "$DEST"/.reinstall.quiesce.* \
+        "$DEST/bin" "$DEST/prompts" "$DEST/templates"
 fi
 
 mkdir -p "$DEST/bin" "$DEST/prompts" "$DEST/state" "$DEST/logs" "$DEST/results" \

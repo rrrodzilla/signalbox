@@ -17,8 +17,8 @@ Work from the current repo's root (primary checkout, not a worktree; `.claude` m
    `<signalbox>/install.sh <repo> [--vault <vault-root> [--folder TRIP/<repo>]] [--gate '<command>']`
    The `--vault` flags are needed only if `.claude/docs` doesn't exist yet (a repo that has never used TRIP). The vault root is the directory containing `.obsidian`. The gate is detected per repo and recorded in the generated `_env.sh`; if preflight reports that it cannot detect one, ask the user for the repo's gate command and re-run with `--gate '<command>'`. Preflight failures print exactly what to fix.
 2. **Vault docs missing or stale** (no `ARCHI.md` in `.claude/docs/`, or the user says "init"): fill the vault.
-   `emergent --config .claude/emergent/init.toml`
-   Three read-only researchers write `ARCHI.md`, `ARCHI-rules.md`, `TESTING.md`; existing docs get `.proposed.md` siblings. When adoption is delegated to you: archive originals first (`_archive/<doc>-<date>-pre-init.md`; the vault is NOT under git), and prefer merging over swapping when the existing doc holds knowledge a repo researcher cannot see (issue-tracker state, external pointers, decision history).
+   `.claude/emergent/bin/init-run.sh`
+   This runner supervises and stops the init engine itself, exiting non-zero if the three documents never land, so the launcher does not need to babysit the engine or SIGTERM it by hand for this phase. Three read-only researchers write `ARCHI.md`, `ARCHI-rules.md`, `TESTING.md`; existing docs get `.proposed.md` siblings. When adoption is delegated to you: archive originals first (`_archive/<doc>-<date>-pre-init.md`; the vault is NOT under git), and prefer merging over swapping when the existing doc holds knowledge a repo researcher cannot see (issue-tracker state, external pointers, decision history).
 3. **An issue number** (e.g. "/signalbox 54"): run the pipeline.
    `SIGNALBOX_ISSUE=<n> emergent --config .claude/emergent/pipeline.toml`
    This is the whole feature path; a headless operator verifies each phase seam and a promotion executor opens and merges the PR after green CI. The only human-gated outcomes are a situational-gate park and a release.

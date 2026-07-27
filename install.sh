@@ -15,7 +15,7 @@
 #   state           per-repo readiness ladder + assessment ledger, so every
 #                   repo earns its own autonomy track record from R2
 #
-# After installing: `emergent --config <dest>/init.toml` once to fill the
+# After installing: `<dest>/bin/init-run.sh` once to fill the
 # vault, then per feature: `SIGNALBOX_ISSUE=<n> emergent --config <dest>/plan.toml`
 # (issue -> validated plan.json), `emergent --config <dest>/implement.toml`,
 # then the review loop.
@@ -229,6 +229,6 @@ echo "installed: $DEST"
 echo "engines:   $REPO-pipeline (+ $REPO-init, $REPO-plan, $REPO-implement-stream, $REPO-review-loop)"
 echo "gate:      $GATE_CMD"
 echo "watch:     SSE ports $PORT_BASE-$((PORT_BASE + 4)), approval webhook $((PORT_BASE + 5)) ($PORT_REG); dashboard: $DEST/bin/watch.sh"
-echo "next:      emergent --config $DEST/init.toml                    (fill the vault, once per repo)"
+echo "next:      $DEST/bin/init-run.sh                                 (fill the vault once; stops itself when all three docs land)"
 echo "           SIGNALBOX_ISSUE=<n> emergent --config $DEST/pipeline.toml (issue -> plan -> implement -> review,"
 echo "                                                                 Fable operating the phase seams)"

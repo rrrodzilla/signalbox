@@ -206,7 +206,13 @@ if check == "legacy":
         ("__SIGNALBOX_PORT_" + suffix + "__").encode()
         for suffix in ("PIPELINE", "PLAN", "IMPLEMENT", "REVIEW", "INIT")
     ]
+    # The placeholder guard's own runner writes live port tokens into its
+    # throwaway fixtures on purpose — that is precisely what it asserts the
+    # guard catches — so its source is exempt from this scan.
+    exempt = {"tests/check-placeholders.test.sh"}
     for relative in tracked_paths():
+        if relative in exempt:
+            continue
         try:
             content = (root / relative).read_bytes()
         except OSError as exc:

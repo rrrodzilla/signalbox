@@ -256,5 +256,31 @@ fi
 report_case "live_runs accepts a string pid and absent start_id" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 200 "$OUT") stderr=$(head -c 200 "$ERR")"
 
+# 15. A whole-number PID written in decimal or exponent form is normalised to
+# plain digits: jq preserves the original literal, so an unfloored pid would
+# reach pid_alive as "1234.0" and silently drop a live run.
+fixture
+NUMERIC_RUNS="$FIXTURE_PATH/runs"
+DECIMAL_PID="$NUMERIC_RUNS/a-decimal-pid/launch.json"
+EXPONENT_PID="$NUMERIC_RUNS/b-exponent-pid/launch.json"
+mkdir -p "$(dirname "$DECIMAL_PID")" "$(dirname "$EXPONENT_PID")"
+# Written literally rather than through jq, so the on-disk representation is
+# the one under test rather than whatever jq would choose to emit.
+printf '{"slug": "live-run", "pid": %s.0, "phase": "pipeline"}\n' \
+    "$LIVE_PID" >"$DECIMAL_PID"
+printf '{"slug": "live-run", "pid": %se0, "phase": "pipeline"}\n' \
+    "$LIVE_PID" >"$EXPONENT_PID"
+run_function "$OUT" "$ERR" live_runs "$NUMERIC_RUNS"
+EXPECTED_OUTPUT="$(printf 'live-run\t%s\tpipeline\n' "$LIVE_PID" "$LIVE_PID")"
+ACTUAL_OUTPUT="$(<"$OUT")"
+OK=1
+if [ "$RUN_STATUS" -eq 0 ] \
+    && [ "$ACTUAL_OUTPUT" = "$EXPECTED_OUTPUT" ] \
+    && [ ! -s "$ERR" ]; then
+    OK=0
+fi
+report_case "live_runs normalises decimal and exponent pids" "$OK" \
+    "status=$RUN_STATUS stdout=$(head -c 200 "$OUT") stderr=$(head -c 200 "$ERR")"
+
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

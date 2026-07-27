@@ -25,7 +25,23 @@
 # own idempotent setup, vendored as bin/vault-setup.sh) and a preflight that
 # fails fast on missing tooling instead of failing 20 minutes into a run.
 #
-# Usage: install.sh <target-repo-path> [--vault <vault-root> [--folder <f>]] [--gate '<command>']
+# Usage: install.sh <target-repo-path> [--reinstall] [--vault <vault-root> [--folder <f>]] [--gate '<command>']
+#   --reinstall
+#             Refresh an existing harness in place after refusing when a
+#             launcher-recorded run is live. The refusal check and the refresh
+#             run under an exclusive <dest>/.install.lock that bin/run.sh also
+#             takes, and the installed bin/ is withdrawn before anything is
+#             destroyed, so no run can start in between — including from a
+#             harness installed before the lock existed. After the withdrawal,
+#             three deterministic checks close every stale-launcher path: any
+#             process still holding an open file from the withdrawn bin/ is a
+#             launcher still running; the liveness rescan sees a run recorded
+#             since the first scan; and the launch metadata under runs/ is
+#             compared against a pre-withdrawal snapshot, so any launch.json
+#             created or changed since is a startup in flight. No timers, and
+#             metadata that merely predates the reinstall never blocks it.
+#             Preserves runs/ and the state/ readiness ledger. On a
+#             never-installed target, acts like a plain install.
 #   --vault   Obsidian vault root; wires .claude/docs into it (idempotent,
 #             migrates a pre-existing real docs/ dir). Default folder:
 #             TRIP/<repo-name>. Without --vault the repo must already be
@@ -37,14 +53,15 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="${1:?usage: install.sh <target-repo-path> [--vault <vault-root> [--folder <folder>]] [--gate '<command>']}"
+TARGET="${1:?usage: install.sh <target-repo-path> [--reinstall] [--vault <vault-root> [--folder <folder>]] [--gate '<command>']}"
 shift
-VAULT="" FOLDER="" GATE_CMD=""
+VAULT="" FOLDER="" GATE_CMD="" GATE_SUPPLIED=0 REINSTALL=0
 while [ $# -gt 0 ]; do
     case "$1" in
+        --reinstall) REINSTALL=1; shift ;;
         --vault)  VAULT="${2:?--vault needs a path}"; shift 2 ;;
         --folder) FOLDER="${2:?--folder needs a name}"; shift 2 ;;
-        --gate) GATE_CMD="${2:?--gate needs a command}"; shift 2 ;;
+        --gate) GATE_CMD="${2:?--gate needs a command}"; GATE_SUPPLIED=1; shift 2 ;;
         *) echo "error: unknown argument $1" >&2; exit 64 ;;
     esac
 done
@@ -101,6 +118,136 @@ TARGET="$(cd "$TARGET" && pwd)"
 git -C "$TARGET" rev-parse --git-dir >/dev/null
 REPO="$(basename "$TARGET")"
 DEST="$TARGET/.claude/emergent"
+REINSTALL_ACTIVE=0
+
+refuse_live_runs() {
+    local LIVE_LIST="$1" LIVE_SLUG LIVE_PID LIVE_PHASE
+
+    echo "error: $DEST has live launcher-recorded runs; refusing to refresh in place" >&2
+    while IFS=$'\t' read -r LIVE_SLUG LIVE_PID LIVE_PHASE; do
+        printf '       live run: slug=%s pid=%s phase=%s\n' \
+            "$LIVE_SLUG" "$LIVE_PID" "$LIVE_PHASE" >&2
+        printf '       stop this run with: kill -TERM %s\n' "$LIVE_PID" >&2
+    done <<<"$LIVE_LIST"
+    echo "       inspect all runs with: $DEST/bin/run.sh --list" >&2
+    exit 1
+}
+
+# A launcher writes launch.json before its engine exists and patches the pid in
+# afterwards, so metadata created or changed while the harness is withdrawn is a
+# startup in flight whether or not it yet names a live process. Neither the
+# liveness scan nor the lock can settle it — the launcher that wrote it never
+# took the lock — so the conservative verdict is to refuse.
+refuse_startup_in_flight() {
+    local PENDING_LIST="$1" PENDING_FILE
+
+    echo "error: launch metadata was written under $DEST/runs while the harness was" >&2
+    echo "       withdrawn; a launcher is starting an engine right now — refusing to refresh" >&2
+    while IFS= read -r PENDING_FILE; do
+        [ -n "$PENDING_FILE" ] || continue
+        printf '       startup in flight: %s\n' "$PENDING_FILE" >&2
+    done <<<"$PENDING_LIST"
+    echo "       wait for it to finish starting, then: $DEST/bin/run.sh --list" >&2
+    exit 1
+}
+
+# One line per process holding an open file descriptor on anything under the
+# withdrawn bin/ tree: "<pid>\t<file>". A bash process executing a script
+# keeps that script's descriptor open for its whole lifetime, so every stale
+# launcher still running — however far past its last bin/ exec — appears
+# here, and one that already exited either recorded launch.json (the liveness
+# rescan and snapshot comparison see it) or never will. Reading /proc answers
+# only for this user's processes, which is exactly the set that can launch
+# from this harness. Prints nothing when nothing holds the tree.
+holders_of_withdrawn_bin() {
+    local STAGED_DIR="$1" FD_LINK="" FD_TARGET="" HOLDER_PID=""
+
+    for FD_LINK in /proc/[0-9]*/fd/*; do
+        FD_TARGET="$(readlink "$FD_LINK" 2>/dev/null)" || continue
+        case "$FD_TARGET" in
+            "$STAGED_DIR"/*|"$STAGED_DIR")
+                HOLDER_PID="${FD_LINK#/proc/}"
+                HOLDER_PID="${HOLDER_PID%%/*}"
+                [ "$HOLDER_PID" = "$$" ] && continue
+                printf '%s\t%s\n' "$HOLDER_PID" "$FD_TARGET"
+                ;;
+        esac
+    done
+}
+
+refuse_stale_launcher_processes() {
+    local HOLDER_LIST="$1" HOLDER_PID HOLDER_FILE
+
+    echo "error: processes still hold open files from $DEST/bin — a launcher from the" >&2
+    echo "       pre-lock harness is running right now; refusing to refresh" >&2
+    while IFS=$'\t' read -r HOLDER_PID HOLDER_FILE; do
+        [ -n "$HOLDER_PID" ] || continue
+        printf '       stale launcher: pid=%s holds %s\n' "$HOLDER_PID" "$HOLDER_FILE" >&2
+    done <<<"$HOLDER_LIST"
+    echo "       wait for it to finish or stop it (kill -TERM <pid>), then re-run" >&2
+    exit 1
+}
+
+# One line per launch metadata file under <runs-dir>: path, size, mtime —
+# sorted, so two captures compare with a plain string test and their
+# difference names exactly the files created or changed between them. Age
+# plays no part: metadata that merely predates the reinstall, however
+# recent, is indistinguishable from metadata written during it by any
+# clock-based test, and must never block a refresh (dead runs are normal
+# residents of runs/). launch.json* also catches the launcher's temp file:
+# metadata half written is a startup in flight just as much as metadata
+# renamed into place.
+snapshot_launch_metadata() {
+    local RUNS_DIR="$1"
+    [ -d "$RUNS_DIR" ] || return 0
+    find "$RUNS_DIR" -mindepth 2 -maxdepth 2 -name 'launch.json*' \
+        -printf '%p\t%s\t%T@\n' 2>/dev/null | LC_ALL=C sort
+}
+
+# Resolve install mode before preflight or vault wiring: vault-setup.sh can
+# migrate a real docs/ directory, so no mutation may precede this decision.
+if [ -e "$DEST" ]; then
+    if [ "$REINSTALL" -eq 0 ]; then
+        echo "error: $DEST already exists — re-run with --reinstall to refresh it in place" >&2
+        echo "       --reinstall rebuilds bin/, prompts/, templates/, the rendered TOMLs and _env.sh," >&2
+        echo "       and preserves runs/, state/assessments.jsonl, and state/readiness.json." >&2
+        echo "       Removing it by hand destroys live runs and this repo's earned readiness ledger;" >&2
+        echo "       if you do it anyway, carry runs/, state/assessments.jsonl and state/readiness.json across." >&2
+        exit 1
+    fi
+
+    REINSTALL_ACTIVE=1
+    # This detects only runs recorded by bin/run.sh. A hand-started
+    # `emergent --config` engine remains the operator's responsibility.
+    # shellcheck source=bin/_liveness.sh
+    source "$SRC/bin/_liveness.sh"
+    # Take the harness lock before the scan and hold it until this process
+    # exits, which is after the refresh has completed. bin/run.sh takes the
+    # same lock shared across its startup window, so no engine can be launched
+    # into the gap between the scan below and the rebuild further down: a
+    # launcher either recorded its run before the scan, and is refused here, or
+    # blocks until the refreshed harness is whole. The lock binds only launchers
+    # that take it, so the harness already installed here — which on the first
+    # upgrade predates the lock entirely — is excluded separately, by
+    # withdrawing its entry point before the rebuild (see below).
+    install_lock "$DEST" exclusive || exit 1
+    trap install_unlock EXIT
+    LIVE_RUNS="$(live_runs "$DEST/runs")"
+    if [ -n "$LIVE_RUNS" ]; then
+        refuse_live_runs "$LIVE_RUNS"
+    fi
+
+    # The generated assignment is printf %q output. Evaluate only that single
+    # line rather than sourcing _env.sh, whose target-mode probes run git/jq.
+    if [ "$GATE_SUPPLIED" -eq 0 ] && [ -f "$DEST/bin/_env.sh" ]; then
+        PRIOR_GATE_LINE="$(grep -m 1 '^GATE_CMD=' "$DEST/bin/_env.sh" || true)"
+        if [ -n "$PRIOR_GATE_LINE" ]; then
+            if ! eval "$PRIOR_GATE_LINE" 2>/dev/null; then
+                GATE_CMD=""
+            fi
+        fi
+    fi
+fi
 
 # --- Preflight: everything the topologies shell out to, checked up front.
 MISSING=0
@@ -114,6 +261,7 @@ need gh       "plan seed and promotion use the GitHub CLI"
 need jq       "every topology transform is jq"
 need python3  "the shared sink service and dashboard are python3"
 need curl     "topology sinks POST their events to the shared sink service"
+need flock    "reinstall and bin/run.sh serialize on the harness lock"
 need setsid   "the phase runner detaches its deferred engine reaper with setsid"
 if [ -z "$GATE_CMD" ]; then
     GATE_CMD="$(detect_gate "$TARGET" || true)"
@@ -145,9 +293,80 @@ elif [ ! -e "$TARGET/.claude/docs" ]; then
     exit 1
 fi
 
-if [ -e "$DEST" ]; then
-    echo "error: $DEST already exists — remove it first to reinstall" >&2
-    exit 1
+if [ "$REINSTALL_ACTIVE" -eq 1 ]; then
+    # Withdraw the launcher before destroying anything. The lock above only
+    # binds launchers that take it, and the harness installed here may well be
+    # an older one that does not — every first upgrade is such a harness. So
+    # the entry point is removed from its path in a single rename: after it,
+    # `<dest>/bin/run.sh` cannot be started at all, and a stale launcher
+    # already inside its startup window cannot reach an engine either, because
+    # it still has to exec bin/ports.sh and bin/check-placeholders.sh from the
+    # directory that just vanished — both run before it spawns emergent.
+    # A stale launcher may still have recorded its run after the first scan,
+    # or be running right now with its metadata write still ahead of it. Three
+    # checks after the rename close every path a stale launcher has to an
+    # unseen engine, each deterministic and each restoring bin/ on refusal:
+    #
+    #   1. The process check: any process holding an open descriptor on the
+    #      withdrawn bin/ tree is a launcher (or another consumer of this
+    #      harness) still running — bash keeps the executing script's
+    #      descriptor open for the process's whole lifetime, so a launcher
+    #      past its last bin/ exec is still visible here right up until it
+    #      exits.
+    #   2. The liveness rescan: a launcher that exited after spawning left
+    #      launch.json naming a live engine.
+    #   3. The snapshot comparison: launch metadata created or changed since
+    #      the pre-rename snapshot is a startup in flight even before it
+    #      names a live process, because run.sh writes launch.json before the
+    #      engine exists and patches the pid in afterwards.
+    #
+    # A launcher that exited before writing anything spawned nothing, and no
+    # new launcher can begin (bin/ is gone), so a stale launcher is caught
+    # running (1), caught by what it wrote (2, 3), or wrote nothing and never
+    # will. The verdicts are properties of the process table and the metadata
+    # tree, not of how long anything was watched, and preexisting metadata
+    # never trips them however recent its timestamps: dead runs are normal
+    # residents of runs/, and runs/ itself is never touched either way.
+    STAGED_BIN="$DEST/.bin.reinstalling.$$"
+    if [ -d "$DEST/bin" ]; then
+        LAUNCH_SNAPSHOT="$(snapshot_launch_metadata "$DEST/runs")"
+        mv -- "$DEST/bin" "$STAGED_BIN"
+        # Test seam: deterministic reproduction of the stale-launcher race.
+        # Runs once, immediately after the withdrawal rename; empty outside
+        # the test suite.
+        if [ -n "${SIGNALBOX_REINSTALL_POST_WITHDRAW_HOOK:-}" ]; then
+            eval "$SIGNALBOX_REINSTALL_POST_WITHDRAW_HOOK" || true
+        fi
+        STALE_LAUNCHERS="$(holders_of_withdrawn_bin "$STAGED_BIN")"
+        if [ -n "$STALE_LAUNCHERS" ]; then
+            mv -- "$STAGED_BIN" "$DEST/bin"
+            refuse_stale_launcher_processes "$STALE_LAUNCHERS"
+        fi
+        LIVE_RUNS="$(live_runs "$DEST/runs")"
+        LAUNCH_RESCAN="$(snapshot_launch_metadata "$DEST/runs")"
+        if [ -n "$LIVE_RUNS" ] || [ "$LAUNCH_RESCAN" != "$LAUNCH_SNAPSHOT" ]; then
+            mv -- "$STAGED_BIN" "$DEST/bin"
+            if [ -n "$LIVE_RUNS" ]; then
+                refuse_live_runs "$LIVE_RUNS"
+            fi
+            # Lines only in the rescan are the files created or changed since
+            # the snapshot (size or mtime moves a line); deletions are a run
+            # being cleaned up, not a startup, and do not reach here on their
+            # own because the branch above already compared for any change.
+            PENDING_LAUNCHES="$(LC_ALL=C comm -13 \
+                <(printf '%s\n' "$LAUNCH_SNAPSHOT") \
+                <(printf '%s\n' "$LAUNCH_RESCAN") | cut -f1)"
+            if [ -n "$PENDING_LAUNCHES" ]; then
+                refuse_startup_in_flight "$PENDING_LAUNCHES"
+            fi
+            echo "error: launch metadata under $DEST/runs was removed while the harness was withdrawn — refusing to refresh; inspect $DEST/runs and re-run" >&2
+            exit 1
+        fi
+    fi
+    # Any other staged directory is the debris of an installer that died
+    # holding the lock this one now holds; bin/ is rebuilt from source anyway.
+    rm -rf -- "$DEST"/.bin.reinstalling.* \
+        "$DEST/bin" "$DEST/prompts" "$DEST/templates"
 fi
 
 mkdir -p "$DEST/bin" "$DEST/prompts" "$DEST/state" "$DEST/logs" "$DEST/results" \
@@ -264,7 +483,12 @@ GIT_COMMON="$(git -C "$TARGET" rev-parse --path-format=absolute --git-common-dir
 grep -qxF '.claude' "$GIT_COMMON/info/exclude" 2>/dev/null \
     || printf '.claude\n' >>"$GIT_COMMON/info/exclude"
 
-echo "installed: $DEST"
+if [ "$REINSTALL_ACTIVE" -eq 1 ]; then
+    echo "refreshed: $DEST (in place)"
+    echo "preserved: $DEST/runs/ and $DEST/state/ readiness ledger"
+else
+    echo "installed: $DEST"
+fi
 echo "engines:   $REPO-pipeline (+ $REPO-init, $REPO-plan, $REPO-implement-stream, $REPO-review-loop)"
 echo "gate:      $GATE_CMD"
 echo "observe:   shared dashboard http://127.0.0.1:${SIGNALBOX_SINK_PORT:-8099}/ (SIGNALBOX_SINK_PORT); unit signalbox-sink.service; status: $DEST/bin/sink-service.sh status; approval webhook port $PORT_BASE reserved in $PORT_REG"

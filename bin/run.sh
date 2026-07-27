@@ -4,55 +4,20 @@
 # event contract; stdout is human narration and diagnostics go to stderr.
 #
 # Launches one Emergent engine as a child, records its run metadata, and remains
-# its foreground supervisor. Because the run directory is reused across launches
-# of the same issue, it first removes the previous launch's terminal evidence
-# (state/complete.json, state/halted.json). On exit it stops only that child
-# PID, gracefully with SIGTERM before bounded escalation, removes the PID file
-# only if it wrote one, and releases the run's port lease.
+# its foreground supervisor. Startup — from inspecting existing run state until
+# launch.json records the engine — holds the harness lock shared, so a
+# concurrent install.sh --reinstall cannot refresh the tree around a run its
+# liveness scan never saw. Because the run directory is reused across launches
+# of the same issue, it also removes the previous launch's terminal evidence
+# (state/complete.json, state/halted.json) before the engine starts. On exit it
+# stops only that child PID, gracefully with SIGTERM before bounded escalation,
+# removes the PID file only if it wrote one, and releases the run's port lease.
 set -euo pipefail
+# shellcheck source=_liveness.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_liveness.sh"
 
 usage() {
     echo "usage: bin/run.sh <issue> [--phase pipeline|plan|implement|review] | --list" >&2
-}
-
-pid_alive() {
-    local PID_VALUE="$1"
-    [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] && kill -0 "$PID_VALUE" 2>/dev/null
-}
-
-# Exact process start identity: "<boot epoch>:<start time in clock ticks>",
-# both read from /proc. Recorded in launch.json at spawn so metadata consumers
-# can tell this engine apart from a later, unrelated process that merely
-# inherited its PID — a PID alone is not an identity. Pairing the tick count
-# with btime keeps it exact across reboots, which reset both. Prints nothing
-# and returns 1 when /proc cannot answer.
-proc_identity() {
-    local PID_VALUE="$1" STAT_LINE BTIME
-    local -a FIELDS
-
-    [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] || return 1
-    STAT_LINE="$(cat "/proc/$PID_VALUE/stat" 2>/dev/null)" || return 1
-    # comm (field 2) may hold spaces and parens; fields 3+ follow the LAST ')',
-    # so starttime (field 22) is the 20th field of the remainder.
-    read -ra FIELDS <<<"${STAT_LINE##*)}"
-    [ "${#FIELDS[@]}" -ge 20 ] || return 1
-    [[ "${FIELDS[19]}" =~ ^[0-9]+$ ]] || return 1
-    BTIME="$(awk '/^btime /{print $2; exit}' /proc/stat 2>/dev/null)" || return 1
-    [[ "$BTIME" =~ ^[0-9]+$ ]] || return 1
-    printf '%s:%s\n' "$BTIME" "${FIELDS[19]}"
-}
-
-# A launched engine still runs only when its PID is alive AND still names the
-# same process. No recorded identity, or no readable /proc, leaves liveness as
-# the only available evidence.
-launch_owner_live() {
-    local PID_VALUE="$1" RECORDED="$2" CURRENT
-
-    pid_alive "$PID_VALUE" || return 1
-    [ -n "$RECORDED" ] || return 0
-    CURRENT="$(proc_identity "$PID_VALUE" || true)"
-    [ -n "$CURRENT" ] || return 0
-    [ "$CURRENT" = "$RECORDED" ]
 }
 
 format_age() {
@@ -105,7 +70,7 @@ list_runs() {
             START_VALUE=""
         fi
 
-        if launch_owner_live "$PID_VALUE" "$START_VALUE"; then
+        if owner_live "$PID_VALUE" "$START_VALUE"; then
             STATUS="alive"
         else
             STATUS="dead"
@@ -238,6 +203,15 @@ if [ ! -f "$DOCS/ARCHI.md" ]; then
     exit 1
 fi
 
+# Startup window: everything from here until launch.json carries this engine's
+# pid runs under the shared harness lock, which install.sh --reinstall takes
+# exclusively across its liveness scan and refresh. Holding it shared means
+# concurrent launchers still start freely, while a reinstall either sees this
+# run recorded and refuses, or waits for it to be recorded. Released as soon as
+# the metadata is on disk — a run must not block a later reinstall's lock, only
+# its liveness scan.
+install_lock "$ROOT" shared || exit 1
+
 PID_FILE="$RUN_DIR/state/engine.pid"
 if [ -f "$PID_FILE" ]; then
     EXISTING_PID="$(head -n 1 "$PID_FILE" 2>/dev/null || true)"
@@ -328,8 +302,11 @@ jq -n \
     }' >"$LAUNCH_TEMP"
 mv "$LAUNCH_TEMP" "$LAUNCH"
 
+# 9>&- keeps the harness lock out of the engine: an inherited copy would hold
+# it for the whole run, so a later reinstall would block on the lock instead of
+# refusing with the live run named.
 SIGNALBOX_ISSUE="$ISSUE" SIGNALBOX_RUN_SLUG="$RUN_SLUG" \
-    emergent --config "$RUN_DIR/$CONFIG_NAME.toml" >"$LOG" 2>&1 &
+    emergent --config "$RUN_DIR/$CONFIG_NAME.toml" >"$LOG" 2>&1 9>&- &
 CHILD_PID=$!
 printf '%s\n' "$CHILD_PID" >"$PID_FILE"
 PID_FILE_OWNED=1
@@ -339,6 +316,9 @@ CHILD_START="$(proc_identity "$CHILD_PID" || true)"
 jq --argjson pid "$CHILD_PID" --arg start "$CHILD_START" \
     '. + {pid: $pid, start_id: $start}' "$LAUNCH" >"$LAUNCH_TEMP"
 mv "$LAUNCH_TEMP" "$LAUNCH"
+# The engine is on disk with its identity: a reinstall scan can see it now, so
+# the startup window is over.
+install_unlock
 
 printf 'run:       %s\n' "$RUN_SLUG"
 printf 'issue:     %s\n' "$ISSUE"

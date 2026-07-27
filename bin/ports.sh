@@ -9,6 +9,8 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+# shellcheck source=_liveness.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_liveness.sh"
 
 # A run's block is exactly one port: the approval webhook. SSE now uses one
 # shared machine-level sink service, so ports no longer scale with runs or repos.
@@ -16,45 +18,6 @@ readonly BLOCK_SIZE=1
 
 usage() {
     echo "usage: bin/ports.sh lease <slug> | release <slug> | list" >&2
-}
-
-# Exact process start identity: "<boot epoch>:<start time in clock ticks>",
-# both read from /proc. A PID is not an identity — the kernel recycles it, so
-# after a crash or a reboot an unrelated process can inherit a dead lease
-# owner's PID and keep that lease alive forever. The start time distinguishes
-# them; pairing it with btime keeps it exact across reboots, which reset both
-# the boot epoch and the tick origin. Fails (returns 1, prints nothing) when
-# /proc cannot answer.
-proc_identity() {
-    local PID_VALUE="$1" STAT_LINE BTIME
-    local -a FIELDS
-
-    [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] || return 1
-    STAT_LINE="$(cat "/proc/$PID_VALUE/stat" 2>/dev/null)" || return 1
-    # comm (field 2) may hold spaces and parens; fields 3+ follow the LAST ')',
-    # so starttime (field 22) is the 20th field of the remainder.
-    read -ra FIELDS <<<"${STAT_LINE##*)}"
-    [ "${#FIELDS[@]}" -ge 20 ] || return 1
-    [[ "${FIELDS[19]}" =~ ^[0-9]+$ ]] || return 1
-    BTIME="$(awk '/^btime /{print $2; exit}' /proc/stat 2>/dev/null)" || return 1
-    [[ "$BTIME" =~ ^[0-9]+$ ]] || return 1
-    printf '%s:%s\n' "$BTIME" "${FIELDS[19]}"
-}
-
-# A lease is held only while the ORIGINAL owning process is still running:
-# alive by kill(0) AND the same process by start identity.
-lease_owner_live() {
-    local PID_VALUE="$1" RECORDED="$2" CURRENT
-
-    [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] || return 1
-    kill -0 "$PID_VALUE" 2>/dev/null || return 1
-    # No recorded identity (a lease from before this field existed) or no
-    # readable /proc (non-Linux, torn read) leaves liveness as the only
-    # evidence there is; holding the lease is then the conservative verdict.
-    [ -n "$RECORDED" ] || return 0
-    CURRENT="$(proc_identity "$PID_VALUE" || true)"
-    [ -n "$CURRENT" ] || return 0
-    [ "$CURRENT" = "$RECORDED" ]
 }
 
 write_registry() {
@@ -73,7 +36,7 @@ reap_dead() {
         KEY="$(jq -r '.key' <<<"$ENTRY")"
         PID_VALUE="$(jq -r '.value.pid // empty' <<<"$ENTRY")"
         START_VALUE="$(jq -r '.value.start // empty' <<<"$ENTRY")"
-        if ! lease_owner_live "$PID_VALUE" "$START_VALUE"; then
+        if ! owner_live "$PID_VALUE" "$START_VALUE"; then
             write_registry 'del(.[$key])' --arg key "$KEY"
         fi
     done < <(jq -c 'to_entries[]' "$REGISTRY")
@@ -251,7 +214,7 @@ case "$COMMAND" in
             BASE="$(jq -r '.value.base' <<<"$ENTRY")"
             HELD_PID="$(jq -r '.value.pid' <<<"$ENTRY")"
             HELD_START="$(jq -r '.value.start // empty' <<<"$ENTRY")"
-            if lease_owner_live "$HELD_PID" "$HELD_START"; then
+            if owner_live "$HELD_PID" "$HELD_START"; then
                 STATUS="alive"
             else
                 STATUS="dead"

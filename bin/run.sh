@@ -21,8 +21,10 @@
 # terminal records.
 #
 # Promote is a non-engine recovery path. It first fails closed on the existing
-# review CR, correlation ID, and review stamp, then records this launcher as the
-# live owner without leasing a port, rendering templates, spawning Emergent, or
+# review CR (an exact PROMOTION_READY line), correlation ID, and review stamp,
+# then takes an exclusive per-run promotion lock — only one launcher may ever
+# push and merge a given run — and records this launcher as the live owner
+# without leasing a port, rendering templates, spawning Emergent, or
 # fabricating a promote/review stamp. It invokes bin/promote-exec.sh with the
 # normal phase.request shape and records the result as a standalone terminal.
 # No standalone terminal claims operator verification: bin/operator.sh runs
@@ -55,9 +57,13 @@ forward_event() {
 
     # Dashboard delivery is parity-only. Detach all output and do not wait:
     # an unavailable or wedged shared sink must never stall this launcher.
+    # 8>&- keeps the promote path's exclusive lock out of this detached child,
+    # which may outlive the launcher; an inherited copy would hold the run's
+    # promotion ownership after exit. Closing an unopened fd is a no-op on the
+    # phases that never take it.
     printf '%s\n' "$PAYLOAD" \
         | "$ROOT/bin/sse-forward.sh" pipeline "$TOPIC" \
-            >/dev/null 2>&1 &
+            >/dev/null 2>&1 8>&- &
 }
 
 terminal_observation() {
@@ -382,7 +388,11 @@ if [ "$PHASE" = "promote" ]; then
         echo "error: promotion evidence missing $CR; run bin/run.sh $ISSUE --phase review" >&2
         exit 1
     fi
-    if ! grep -q 'PROMOTION_READY' "$CR"; then
+    # bin/promote.sh writes the sentinel on a line of its own. Match that line
+    # exactly: a substring match would accept NOT_PROMOTION_READY or review
+    # prose that merely names the token, opening the merge gate on evidence
+    # that never approved anything.
+    if ! grep -qx 'PROMOTION_READY' "$CR"; then
         echo "error: promotion evidence missing PROMOTION_READY in $CR; run bin/run.sh $ISSUE --phase review" >&2
         exit 1
     fi
@@ -393,6 +403,27 @@ if [ "$PHASE" = "promote" ]; then
     fi
     if [ ! -f "$REVIEW_STAMP" ]; then
         echo "error: promotion evidence missing review stamp $REVIEW_STAMP; run bin/run.sh $ISSUE --phase review" >&2
+        exit 1
+    fi
+
+    # Promotion pushes a branch and merges a PR, so exactly one launcher may own
+    # it per run. The engine.pid check below cannot provide that: two same-issue
+    # launchers can both read the same stale PID file and both proceed. Take an
+    # atomic exclusive lock on the run first and hold it for the whole
+    # promotion. Non-blocking on purpose — a second promoter must refuse, not
+    # queue behind a merge that is already in flight.
+    mkdir -p "$RUN_DIR/state"
+    PROMOTE_LOCK="$RUN_DIR/state/promote.lock"
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "error: flock is missing — reinstall; promotion ownership depends on it" >&2
+        exit 1
+    fi
+    if ! exec 8>>"$PROMOTE_LOCK"; then
+        echo "error: cannot create the promotion lock: $PROMOTE_LOCK" >&2
+        exit 1
+    fi
+    if ! flock -n 8; then
+        echo "error: promotion for $RUN_SLUG is already owned by another launcher; wait for it to finish" >&2
         exit 1
     fi
 
@@ -499,7 +530,7 @@ if [ "$PHASE" = "promote" ]; then
 
     PROMOTE_STATUS=0
     if PROMOTE_OUTPUT="$(
-        printf '%s\n' "$REQUEST_PAYLOAD" | "$ROOT/bin/promote-exec.sh"
+        printf '%s\n' "$REQUEST_PAYLOAD" | "$ROOT/bin/promote-exec.sh" 8>&-
     )"; then
         :
     else
@@ -795,8 +826,22 @@ esac
 if [ "$PHASE" = "review" ] \
     && [ "$OUTCOME" = "ARTIFACT" ] \
     && ! fresh "$RUN_DIR/state/docs-sync.json"; then
-    DOCS_SYNC_GRACE="${SIGNALBOX_DOCS_SYNC_GRACE:-960}"
-    [[ "$DOCS_SYNC_GRACE" =~ ^[0-9]+$ ]] || DOCS_SYNC_GRACE=960
+    # Parse the grace explicitly as bounded base-10 seconds before any
+    # arithmetic uses it. A digit-only string is not automatically safe: "08"
+    # is an invalid octal constant and an unbounded value can overflow, and
+    # either aborts this loop under set -e — leaving the observed terminal
+    # unrecorded. Reject anything outside the bound and narrate the fallback.
+    DOCS_SYNC_GRACE_DEFAULT=960
+    DOCS_SYNC_GRACE_MAX=86400
+    DOCS_SYNC_GRACE_RAW="${SIGNALBOX_DOCS_SYNC_GRACE:-$DOCS_SYNC_GRACE_DEFAULT}"
+    if [[ "$DOCS_SYNC_GRACE_RAW" =~ ^[0-9]{1,6}$ ]] \
+        && [ "$((10#$DOCS_SYNC_GRACE_RAW))" -le "$DOCS_SYNC_GRACE_MAX" ]; then
+        DOCS_SYNC_GRACE=$((10#$DOCS_SYNC_GRACE_RAW))
+    else
+        printf '[standalone] ignoring invalid SIGNALBOX_DOCS_SYNC_GRACE=%s (expected 0-%s seconds); using %ss\n' \
+            "$DOCS_SYNC_GRACE_RAW" "$DOCS_SYNC_GRACE_MAX" "$DOCS_SYNC_GRACE_DEFAULT" >&2
+        DOCS_SYNC_GRACE=$DOCS_SYNC_GRACE_DEFAULT
+    fi
     DOCS_SYNC_ELAPSED=0
     DOCS_SYNC_RESULT="grace deadline elapsed without fresh docs-sync evidence"
     printf '[standalone] review artifact reached; waiting up to %ss for fresh docs-sync evidence required by bin/promote-exec.sh\n' \

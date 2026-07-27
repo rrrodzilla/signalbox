@@ -11,6 +11,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 
 PAYLOAD="$(cat)"
 STAGE_ID="$(jq -r '.stage' <<<"$PAYLOAD")"
+# The run's git namespace, derived exactly as in plan-seed.sh and
+# shard-worker.sh so this resolves the worktree shard-worker.sh created.
+FEATURE="$(jq -r '.feature // "feature"' "$RUN_DIR/plan.json" 2>/dev/null || echo feature)"
+export FEATURE
+
 mkdir -p "$ROOT/state"
 # Keep this lock scoped to each worktree command: concurrent runs share one
 # repository's worktree admin state.

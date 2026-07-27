@@ -6,6 +6,12 @@ set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 
+# The run's git namespace: branches are shard/<feature>/... and worktrees are
+# <feature>-<stage>-<shard>, so concurrent runs in one repo never collide.
+# shard-worker.sh and stage-merge.sh derive it the same way from the same file.
+FEATURE="$(jq -r '.feature // "feature"' "$RUN_DIR/plan.json" 2>/dev/null || echo feature)"
+export FEATURE
+
 mkdir -p "$ROOT/state"
 # Keep this lock scoped to each worktree command: concurrent runs share one
 # repository's worktree admin state.

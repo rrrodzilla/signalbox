@@ -27,6 +27,12 @@ MINE="$(jq -c --argjson me "$ME" --argjson n "$COUNT" \
 
 [ "$(jq 'length' <<<"$MINE")" -gt 0 ] || exit 0
 
+# The run's git namespace, derived exactly as in plan-seed.sh and
+# stage-merge.sh so the branches built here are the ones those scripts
+# clean up and merge.
+FEATURE="$(jq -r '.feature // "feature"' "$RUN_DIR/plan.json" 2>/dev/null || echo feature)"
+export FEATURE
+
 mkdir -p "$ROOT/state" "$RUN_DIR/logs"
 # Keep this lock scoped to each worktree command: concurrent runs share one
 # repository's worktree admin state.

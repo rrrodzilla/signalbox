@@ -94,6 +94,21 @@ ARTIFACTS = [
     "state/pipeline-review.stamp",
 ]
 
+PIPELINE_STAMPS = (
+    "state/pipeline-plan.stamp",
+    "state/pipeline-implement.stamp",
+    "state/pipeline-review.stamp",
+)
+
+ARTIFACT_GATES = {
+    "plan.json": "state/pipeline-plan.stamp",
+    "state/run.json": "state/pipeline-implement.stamp",
+    "state/gate.json": "state/pipeline-implement.stamp",
+    "results/CR.md": "state/pipeline-review.stamp",
+    "state/pending.json": "state/pipeline-review.stamp",
+    "state/docs-sync.json": "state/pipeline-review.stamp",
+}
+
 IDENTITY_FIELDS = (
     "repo",
     "repo_root",
@@ -141,6 +156,67 @@ def artifact_info(run_dir, rel):
             except (OSError, ValueError, RecursionError):
                 info["json"] = None
     return info
+
+
+def mark_stale(artifacts):
+    """Mark existing run artifacts older than their producing phase."""
+    if not isinstance(artifacts, dict):
+        return artifacts
+
+    def mtime(entry):
+        if not isinstance(entry, dict):
+            return None
+        value = entry.get("mtime")
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        try:
+            return value if math.isfinite(value) else None
+        except (OverflowError, TypeError, ValueError):
+            return None
+
+    for stamp in PIPELINE_STAMPS:
+        entry = artifacts.get(stamp)
+        if isinstance(entry, dict):
+            entry["stale"] = False
+
+    newest_stamp = None
+    newest_clock_valid = True
+    for stamp in PIPELINE_STAMPS:
+        entry = artifacts.get(stamp)
+        if not isinstance(entry, dict) or entry.get("exists") is not True:
+            continue
+        stamp_mtime = mtime(entry)
+        if stamp_mtime is None:
+            newest_clock_valid = False
+            break
+        newest_stamp = (stamp_mtime if newest_stamp is None
+                        else max(newest_stamp, stamp_mtime))
+
+    for artifact, stamp in ARTIFACT_GATES.items():
+        entry = artifacts.get(artifact)
+        if not isinstance(entry, dict) or entry.get("exists") is not True:
+            continue
+        gate = artifacts.get(stamp)
+        entry_mtime = mtime(entry)
+        gate_mtime = (mtime(gate) if isinstance(gate, dict)
+                      and gate.get("exists") is True else None)
+        entry["stale"] = (
+            entry_mtime is None
+            or gate_mtime is None
+            or entry_mtime < gate_mtime
+        )
+
+    escalated = artifacts.get("state/escalated.json")
+    if isinstance(escalated, dict) and escalated.get("exists") is True:
+        escalated_mtime = mtime(escalated)
+        escalated["stale"] = (
+            escalated_mtime is None
+            or not newest_clock_valid
+            or newest_stamp is None
+            or escalated_mtime < newest_stamp
+        )
+
+    return artifacts
 
 
 def log_info(run_dir):
@@ -470,6 +546,7 @@ def status():
             entry = provenance.get(artifact)
             if entry is not None:
                 info["provenance"] = entry
+        mark_stale(artifacts)
         logs = log_info(run_dir)
         for info in logs:
             entry = provenance.get("logs/" + info["file"])
@@ -734,6 +811,9 @@ table { width:100%; border-collapse:collapse; font-size:11px; }
 td { padding:2px 6px 2px 0; vertical-align:top; overflow-wrap:anywhere; }
 td.age, td.size { color:var(--faint); white-space:nowrap; text-align:right; }
 .miss { color:var(--faint); }
+.stale { color:var(--faint); opacity:.65; }
+.badge-stale { margin-left:4px; padding:0 5px; border:1px solid var(--seam);
+  border-radius:8px; color:var(--faint); font-size:10px; white-space:nowrap; }
 .ok { color:var(--green); } .bad { color:var(--red); }
 
 /* ── provenance pills (asserted by tests: keep class names) ── */
@@ -896,12 +976,17 @@ function derive(run) {
 function artifactRows(run, now) {
   return Object.values(run.artifacts).map(x => {
     let extra = "";
+    const stale = x.exists && x.stale === true;
+    if (stale) {
+      extra = ' <span class="badge-stale">' + esc("previous run") + "</span>";
+    }
     if (x.exists && x.json && x.json.verdict) {
       const verdictClass = x.json.verdict === "GREEN" ? "ok" : "bad";
-      extra = ' <span class="' + verdictClass + '">' + esc(x.json.verdict) + "</span>";
+      extra += ' <span class="' + verdictClass + '">' + esc(x.json.verdict) + "</span>";
     }
     extra += provenancePills(x.provenance);
-    return "<tr><td class='" + (x.exists ? "" : "miss") + "'>" + esc(x.file) + extra + "</td>" +
+    return "<tr class='" + (stale ? "stale" : "") + "'><td class='" +
+      (x.exists ? "" : "miss") + "'>" + esc(x.file) + extra + "</td>" +
       "<td class='age'>" + (x.exists ? age(now, x.mtime) : "—") + "</td>" +
       "<td class='size'>" + (x.exists ? x.size + "b" : "") + "</td></tr>";
   }).join("");
@@ -945,14 +1030,14 @@ function verdictFor(run, states) {
   const escArt = run.artifacts["state/escalated.json"];
   const escPhase = PHASES.find(p => states[p] === "escalated");
   if (escPhase) {
-    const why = escArt.exists && escArt.json &&
+    const why = escArt.exists && escArt.stale !== true && escArt.json &&
       (escArt.json.reason || escArt.json.summary);
     return { cls:"v-red", label:"ESCALATED IN " + escPhase.toUpperCase(),
              text:why || "escalation recorded" };
   }
   if (states.review === "parked") {
     const pend = run.artifacts["state/pending.json"];
-    const j = pend.exists && pend.json ? pend.json : null;
+    const j = pend.exists && pend.stale !== true && pend.json ? pend.json : null;
     const bits = [];
     if (j && j.floor !== undefined) bits.push("floor R" + j.floor);
     if (j && j.earned !== undefined) bits.push("earned R" + j.earned);
@@ -962,13 +1047,16 @@ function verdictFor(run, states) {
   }
   const gate = run.artifacts["state/gate.json"];
   const cr = run.artifacts["results/CR.md"];
-  if (gate.exists && gate.json && gate.json.verdict && gate.json.verdict !== "GREEN") {
+  if (gate.exists && gate.stale !== true && gate.json &&
+      gate.json.verdict && gate.json.verdict !== "GREEN") {
     return { cls:"v-red", label:"GATE " + gate.json.verdict,
              text:"tip " + (gate.json.tip || "?") };
   }
-  if (cr.exists && states.review === "done" && states.promote === "pending") {
+  if (cr.exists && cr.stale !== true &&
+      states.review === "done" && states.promote === "pending") {
     return { cls:"v-white", label:"PROMOTION READY",
-             text:"CR.md written" + (gate.exists && gate.json && gate.json.tip
+             text:"CR.md written" + (gate.exists && gate.stale !== true &&
+               gate.json && gate.json.tip
                ? " · gate GREEN at " + gate.json.tip : "") };
   }
   const activePhase = PHASES.find(p => states[p] === "active");
@@ -1014,10 +1102,12 @@ function runCard(run, now, states, verdict, attention) {
   const engines = Object.entries(run.engines || {}).map(([label, engine]) =>
     esc(label) + "=" + esc(engine)).join(" · ") || "no engines registered";
   const runJson = run.artifacts["state/run.json"];
-  const correlation = runJson.exists && runJson.json && runJson.json.correlation_id
+  const correlation = runJson.exists && runJson.stale !== true &&
+    runJson.json && runJson.json.correlation_id
     ? '<div class="idline">correlation ' + esc(runJson.json.correlation_id) + "</div>" : "";
   const docs = run.artifacts["state/docs-sync.json"];
-  const docsLine = docs.exists && docs.json && Array.isArray(docs.json.updated)
+  const docsLine = docs.exists && docs.stale !== true &&
+    docs.json && Array.isArray(docs.json.updated)
     ? '<div class="idline">docs-sync: ' + esc(docs.json.updated.join(", ") || "none") + "</div>" : "";
   return '<article class="run ' + (attention ? "attention " : "") +
       (selectedKey === run.key ? "selected" : "") + '" data-key="' + esc(run.key) + '">' +

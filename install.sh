@@ -4,10 +4,11 @@
 # Stamps a rendered copy of the topologies, scripts, and prompts into
 # <repo>/.claude/emergent/ — the TRIP convention: local-only tooling under
 # .claude, kept out of git via info/exclude, never committed to the target.
-# The rendered copy is self-contained: absolute paths baked into the TOMLs,
-# engine names namespaced by repo (so sockets and event-store logs never
-# collide across repos), and a target-mode _env.sh that derives everything
-# from where it lives:
+# The rendered copy contains absolute paths baked into the TOMLs, engine names
+# namespaced by repo (so sockets and event-store logs never collide across
+# repos), and a target-mode _env.sh that derives everything from where it
+# lives. Observability uses one machine-wide shared sink service rather than
+# per-repo SSE ports:
 #
 #   concurrent runs <dest>/runs/<slug>/ (plan, state, results, logs, configs)
 #   feature branch  feat/<run plan.json .feature>
@@ -111,6 +112,8 @@ need codex    "reviewers/implementers run codex exec"
 need claude   "fixers/assessor/operator run headless Claude"
 need gh       "plan seed and promotion use the GitHub CLI"
 need jq       "every topology transform is jq"
+need python3  "the shared sink service and dashboard are python3"
+need curl     "topology sinks POST their events to the shared sink service"
 if [ -z "$GATE_CMD" ]; then
     GATE_CMD="$(detect_gate "$TARGET" || true)"
 fi
@@ -154,12 +157,10 @@ cp "$SRC"/prompts/*.md "$DEST/prompts/"
 # Target mode reviews the feature diff, not a whole demo crate.
 mv "$DEST/prompts/review-target.md" "$DEST/prompts/review.md"
 
-# Per-repo watchtower ports: two repos running signalbox at once must not
-# fight over the SSE ports — a colliding sse-sink dies at startup with an
-# uncaught AddrInUse and that run silently loses its event stream. Each
-# repo gets a stable base from a tiny registry; offsets are pipeline+0,
-# plan+1, implement+2, review+3, init+4. bin/watch.sh discovers the
-# rendered ports from the harness TOMLs, so nothing else hardcodes them.
+# SSE ports are gone: every instance pushes to the shared sink service on one
+# fixed known port (default 8099, configurable with SIGNALBOX_SINK_PORT). The
+# only per-repo reservation left is the approval webhook, which remains
+# per-run/per-repo by nature. PORT_BASE is that approval port.
 PORT_REG="$HOME/.local/share/signalbox/ports.json"
 mkdir -p "$(dirname "$PORT_REG")"
 [ -s "$PORT_REG" ] || echo '{}' >"$PORT_REG"
@@ -182,16 +183,11 @@ for t in emergent.toml implement.toml init.toml plan.toml pipeline.toml; do
 done
 
 # Render the single-run topologies: bake the install path, namespace the
-# engines, assign the allocated watchtower ports, and use no run suffix.
+# engines, assign the reserved approval port, and use no run suffix.
 for t in emergent.toml implement.toml init.toml plan.toml pipeline.toml; do
     sed -e "s|__SIGNALBOX_ROOT__|$DEST|g" \
         -e "s|__SIGNALBOX_RUN_SUFFIX__||g" \
-        -e "s|__SIGNALBOX_PORT_PIPELINE__|$PORT_BASE|g" \
-        -e "s|__SIGNALBOX_PORT_PLAN__|$((PORT_BASE + 1))|g" \
-        -e "s|__SIGNALBOX_PORT_IMPLEMENT__|$((PORT_BASE + 2))|g" \
-        -e "s|__SIGNALBOX_PORT_REVIEW__|$((PORT_BASE + 3))|g" \
-        -e "s|__SIGNALBOX_PORT_INIT__|$((PORT_BASE + 4))|g" \
-        -e "s|__SIGNALBOX_PORT_APPROVAL__|$((PORT_BASE + 5))|g" \
+        -e "s|__SIGNALBOX_PORT_APPROVAL__|$PORT_BASE|g" \
         -e "s|signalbox-review-loop|$REPO-review-loop|g" \
         -e "s|signalbox-implement-stream|$REPO-implement-stream|g" \
         -e "s|signalbox-init|$REPO-init|g" \
@@ -240,13 +236,18 @@ if [ -z "$APPROVAL_PORT" ]; then
 fi
 if [ -z "$APPROVAL_PORT" ]; then
 ENV
-printf '    APPROVAL_PORT=%q\n' "$((PORT_BASE + 5))" >>"$DEST/bin/_env.sh"
+printf '    APPROVAL_PORT=%q\n' "$PORT_BASE" >>"$DEST/bin/_env.sh"
 cat >>"$DEST/bin/_env.sh" <<'ENV'
 fi
 export ROOT RUN_SLUG RUN_DIR LEDGER_DIR REPO_ROOT WT_BASE FEATURE BASE_BRANCH INT_BRANCH INT_WT GATE_DIR ENGINE_PREFIX SEED_WORKDIR GATE_CMD APPROVAL_PORT
 ENV
 
 chmod +x "$DEST"/bin/*.sh
+
+# The sink service is machine-wide and shared by every repo and run, so a
+# second repo install simply refreshes the canonical copy. Observability must
+# never fail a harness install if the user systemd service cannot be ensured.
+"$DEST/bin/sink-service.sh" ensure || true
 
 # User-level launcher skill (/signalbox): install once, never overwrite —
 # an existing copy may carry the user's own customizations.
@@ -265,7 +266,7 @@ grep -qxF '.claude' "$GIT_COMMON/info/exclude" 2>/dev/null \
 echo "installed: $DEST"
 echo "engines:   $REPO-pipeline (+ $REPO-init, $REPO-plan, $REPO-implement-stream, $REPO-review-loop)"
 echo "gate:      $GATE_CMD"
-echo "watch:     SSE ports $PORT_BASE-$((PORT_BASE + 4)), approval webhook $((PORT_BASE + 5)) ($PORT_REG); dashboard: $DEST/bin/watch.sh"
+echo "observe:   shared dashboard http://127.0.0.1:8099/ (SIGNALBOX_SINK_PORT); unit signalbox-sink.service; status: $DEST/bin/sink-service.sh status; approval webhook port $PORT_BASE reserved in $PORT_REG"
 echo "next:      $DEST/bin/init-run.sh                                 (fill the vault once; stops itself when all three docs land)"
 echo "           $DEST/bin/run.sh <issue>                              (concurrent run; artifacts under $DEST/runs/<slug>/)"
 echo "single:    SIGNALBOX_ISSUE=<n> emergent --config $DEST/pipeline.toml"

@@ -19,7 +19,10 @@ if [ -z "${GATE_CMD:-}" ]; then
     echo "GATE CONFIGURATION ERROR: no GATE_CMD in bin/_env.sh — reinstall the harness or add one; install.sh --gate '<command>' sets it" >&2
     echo "GATE RED — inspect $INT_WT"
 else
-    if GATE_OUTPUT="$(bash -c "$GATE_CMD" 2>&1)"; then
+    # -o pipefail: a pipeline gate ("tests | tee log") must fail on the
+    # producer's failure, not just the last stage's. bash -c starts a fresh
+    # shell, so the set -euo above does not carry into it.
+    if GATE_OUTPUT="$(bash -o pipefail -c "$GATE_CMD" 2>&1)"; then
         GATE_STATUS=0
     else
         GATE_STATUS=$?

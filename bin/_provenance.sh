@@ -21,15 +21,14 @@ provenance_object() {
     local PROVENANCE_EFFORT="${3:-}"
     local PROVENANCE_JSON=""
 
-    case "$PROVENANCE_AGENT" in
-        claude|codex)
-            ;;
-        *)
-            printf '%s\n' "[provenance] agent must be claude or codex" >&2 || true
-            printf '%s\n' "null" || true
-            return 0
-            ;;
-    esac
+    # Compare with [ ... ] rather than case/[[ ]]: a caller with
+    # `shopt -s nocasematch` set would otherwise make these checks accept
+    # variants such as CODEX and HIGH.
+    if [ "$PROVENANCE_AGENT" != "claude" ] && [ "$PROVENANCE_AGENT" != "codex" ]; then
+        printf '%s\n' "[provenance] agent must be claude or codex" >&2 || true
+        printf '%s\n' "null" || true
+        return 0
+    fi
 
     if [ -z "$PROVENANCE_MODEL" ] \
         || [ "${#PROVENANCE_MODEL}" -gt 128 ] \
@@ -39,15 +38,16 @@ provenance_object() {
         return 0
     fi
 
-    case "$PROVENANCE_EFFORT" in
-        ""|low|medium|high|xhigh|max)
-            ;;
-        *)
-            printf '%s\n' "[provenance] effort is invalid" >&2 || true
-            printf '%s\n' "null" || true
-            return 0
-            ;;
-    esac
+    if [ -n "$PROVENANCE_EFFORT" ] \
+        && [ "$PROVENANCE_EFFORT" != "low" ] \
+        && [ "$PROVENANCE_EFFORT" != "medium" ] \
+        && [ "$PROVENANCE_EFFORT" != "high" ] \
+        && [ "$PROVENANCE_EFFORT" != "xhigh" ] \
+        && [ "$PROVENANCE_EFFORT" != "max" ]; then
+        printf '%s\n' "[provenance] effort is invalid" >&2 || true
+        printf '%s\n' "null" || true
+        return 0
+    fi
 
     if [ -n "$PROVENANCE_EFFORT" ]; then
         PROVENANCE_JSON="$(
@@ -131,7 +131,9 @@ stamp_provenance() {
     fi
 
     (
-        if ! exec 9>"$PROVENANCE_LOCK"; then
+        # >| rather than >: a caller with `set -o noclobber` would otherwise
+        # fail to open the already-existing lock, silently skipping the stamp.
+        if ! exec 9>|"$PROVENANCE_LOCK"; then
             printf '%s\n' "[provenance] could not open provenance lock" >&2 || true
             exit 0
         fi
@@ -186,7 +188,9 @@ stamp_provenance() {
             exit 0
         fi
 
-        if ! printf '%s\n' "$PROVENANCE_MERGED" >"$PROVENANCE_TEMP"; then
+        # >| because mktemp already created this file, which plain > would
+        # refuse to truncate under noclobber.
+        if ! printf '%s\n' "$PROVENANCE_MERGED" >|"$PROVENANCE_TEMP"; then
             printf '%s\n' "[provenance] could not write temporary provenance map" >&2 || true
             rm -f -- "$PROVENANCE_TEMP" 2>/dev/null || true
             exit 0
@@ -225,7 +229,8 @@ reset_provenance() {
     fi
 
     (
-        if ! exec 9>"$PROVENANCE_LOCK"; then
+        # >| for the same noclobber reason as in stamp_provenance.
+        if ! exec 9>|"$PROVENANCE_LOCK"; then
             printf '%s\n' "[provenance] could not open provenance lock for reset" >&2 || true
             exit 0
         fi

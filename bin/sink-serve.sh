@@ -873,6 +873,24 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 @keyframes pulse { 50% { box-shadow:0 0 10px 3px rgba(230,162,60,.65); } }
 @media (prefers-reduced-motion: reduce) { .block.active .lamp { animation:none; } }
 
+/* ── sub-state within a track block: review rounds, shard sidings ── */
+.block .sub { display:block; text-align:center; margin-top:3px; font-size:9px;
+  letter-spacing:.08em; color:var(--dim); text-transform:none; }
+.block .sub .rounds { color:var(--blue); }
+.block .sub .fixing { color:var(--amber); }
+.sidings { display:flex; justify-content:center; align-items:center; gap:4px;
+  margin-top:4px; flex-wrap:wrap; padding:0 4px; }
+.sidings .bar { width:8px; height:2px; background:var(--seam); flex:none; }
+.shard-lamp { width:8px; height:8px; border-radius:2px; flex:none;
+  background:transparent; border:1px solid var(--faint); }
+.shard-lamp.s-building { background:var(--amber); border-color:var(--amber); }
+.shard-lamp.s-review { background:var(--blue); border-color:var(--blue); }
+.shard-lamp.s-fixing { background:var(--red); border-color:var(--red); }
+.shard-lamp.s-done { background:var(--green); border-color:var(--green); }
+.shard-lamp.s-escalated { background:var(--red); border-color:var(--red);
+  animation:pulse 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .shard-lamp.s-escalated { animation:none; } }
+
 /* ── status line: why this run is where it is ── */
 .verdict { display:flex; gap:8px; align-items:baseline; padding:8px 12px 10px;
   font-size:12px; color:var(--dim); }
@@ -970,6 +988,8 @@ const PHASES = ["plan","implement","review","promote"];
 const promoteStates = Object.create(null);
 const haltInfo = Object.create(null);      // key -> {phase, reason} from pipeline.halted
 const completeInfo = Object.create(null);  // key -> {parked, reason} from pipeline.complete
+const reviewLoop = Object.create(null);    // key -> {mode, round} from the review-phase cycle
+const shardYard = Object.create(null);     // key -> stage -> shard -> {state, round}
 const instanceColours = Object.create(null);
 const openDrawers = new Set();             // run keys whose detail drawer is open
 let stoppedOpen = false;                   // the collapsed STOPPED section
@@ -1160,7 +1180,19 @@ function verdictFor(run, states) {
     return { cls:"v-amber", label:"PROMOTING", text:"push, PR, merge in flight" };
   }
   if (activePhase) {
-    return { cls:"v-amber", label:activePhase.toUpperCase() + " IN PROGRESS", text:"" };
+    let text = "";
+    if (activePhase === "review" && reviewLoop[run.key]) {
+      const rl = reviewLoop[run.key];
+      text = "round " + rl.round + (rl.mode === "fixing"
+        ? " · fixer addressing feedback"
+        : rl.mode === "approved" ? " approved · gate and docs-sync"
+        : " · reviewer at work");
+    }
+    if (activePhase === "implement") {
+      const counts = yardCounts(run);
+      if (counts) text = counts.done + "/" + counts.total + " shards approved";
+    }
+    return { cls:"v-amber", label:activePhase.toUpperCase() + " IN PROGRESS", text };
   }
   if (PHASES.every(p => states[p] === "pending")) {
     return { cls:"", label:"WAITING", text:"no phase started yet" };
@@ -1186,15 +1218,104 @@ function headLamp(run, verdict) {
   return "";
 }
 
+function shardName(s) {
+  if (s && typeof s === "object") {
+    if (typeof s.shard === "string" && s.shard) return s.shard;
+    if (typeof s.id === "string" && s.id) return s.id;
+    return null;
+  }
+  return typeof s === "string" && s ? s : null;
+}
+
+function markShard(key, stage, name, state, round) {
+  if (!name) return;
+  const yard = shardYard[key] || (shardYard[key] = Object.create(null));
+  const st = yard[stage] || (yard[stage] = Object.create(null));
+  const prev = st[name];
+  st[name] = { state, round: round || (prev && prev.round) || 0 };
+}
+
+// One lamp per planned shard, in plan order, with a barrier bar between
+// stages: the fan-out and the fan-in points made visible. plan.json names
+// every shard up front; live states arrive from the implement engine's
+// shard events, so a shard with no event yet renders hollow.
+function yardCounts(run) {
+  const pj = run.artifacts["plan.json"];
+  const stages = pj.exists && pj.json && Array.isArray(pj.json.stages)
+    ? pj.json.stages : [];
+  const yard = shardYard[run.key] || {};
+  let done = 0, total = 0;
+  for (const stg of stages) {
+    if (!stg || typeof stg !== "object" || !Array.isArray(stg.shards)) continue;
+    for (const s of stg.shards) {
+      const n = shardName(s);
+      if (!n) continue;
+      total++;
+      const info = yard[stg.id] && yard[stg.id][n];
+      if (info && info.state === "done") done++;
+    }
+  }
+  return total ? { done, total } : null;
+}
+
+function sidings(run, states) {
+  if (states.implement !== "active" && states.implement !== "failed"
+      && states.implement !== "escalated") return "";
+  const pj = run.artifacts["plan.json"];
+  const stages = pj.exists && pj.json && Array.isArray(pj.json.stages)
+    ? pj.json.stages : [];
+  const yard = shardYard[run.key] || {};
+  const parts = [];
+  for (const stg of stages) {
+    if (!stg || typeof stg !== "object" || !Array.isArray(stg.shards)) continue;
+    const lamps = [];
+    for (const s of stg.shards) {
+      const n = shardName(s);
+      if (!n) continue;
+      const info = yard[stg.id] && yard[stg.id][n];
+      const state = info ? info.state : "pending";
+      const roundText = info && info.round > 1 ? " · R" + info.round : "";
+      lamps.push('<span class="shard-lamp s-' + esc(state) + '" title="' +
+        esc(n) + " · " + esc(state) + esc(roundText) + '"></span>');
+    }
+    if (!lamps.length) continue;
+    if (parts.length) parts.push('<span class="bar"></span>');
+    parts.push(lamps.join(""));
+  }
+  if (!parts.length) return "";
+  const counts = yardCounts(run);
+  return '<span class="sub">' + (counts ? counts.done + "/" + counts.total +
+      " shards" : "") + "</span>" +
+    '<div class="sidings">' + parts.join("") + "</div>";
+}
+
+// The review phase is a loop, not a line: reviewer -> fixer -> reviewer until
+// approved or escalated. Name the round and whose hands the work is in.
+function reviewSub(run, states) {
+  if (states.review !== "active") return "";
+  const rl = reviewLoop[run.key];
+  if (!rl) return "";
+  const mode = rl.mode === "fixing"
+      ? '<span class="fixing">fix in flight</span>'
+    : rl.mode === "approved" ? "approved · gate + docs"
+    : rl.mode === "escalated" ? "escalated"
+    : "reviewer at work";
+  return '<span class="sub"><span class="rounds">&#8635; R' + rl.round +
+    "</span> · " + mode + "</span>";
+}
+
 function runCard(run, now, states, verdict, attention) {
   const feature = run.feature || run.slug || "run " + run.key;
   const issue = run.issue === null || run.issue === undefined ? "" : " #" + run.issue;
   const repo = run.repo || "repo unknown";
-  const track = PHASES.map(p =>
-    '<div class="block ' + states[p] + '"><span class="lamp ' +
-    ({done:"on-green", active:"on-amber", failed:"on-red", escalated:"on-red",
-      parked:"on-violet"}[states[p]] || "") + '"></span>' +
-    '<span class="bname">' + p + "</span></div>").join("");
+  const track = PHASES.map(p => {
+    const extra = p === "implement" ? sidings(run, states)
+      : p === "review" ? reviewSub(run, states) : "";
+    return '<div class="block ' + states[p] + '"><span class="lamp ' +
+      ({done:"on-green", active:"on-amber", failed:"on-red", escalated:"on-red",
+        parked:"on-violet"}[states[p]] || "") + '"></span>' +
+      '<span class="bname">' + p + "</span>" + extra + "</div>";
+  }).join("");
   const engines = Object.entries(run.engines || {}).map(([label, engine]) =>
     esc(label) + "=" + esc(engine)).join(" · ") || "no engines registered";
   const runJson = run.artifacts["state/run.json"];
@@ -1349,6 +1470,42 @@ function addEvent(topic, dataText) {
   const key = instance.key || "";
   const pl = obj && obj.payload !== undefined ? obj.payload : obj;
   if (t === "phase.request" && pl && pl.phase === "promote") promoteStates[key] = "active";
+  // A phase (re)start clears that phase's cycle state so a rerun of the same
+  // run key never wears the previous attempt's rounds or shard lamps.
+  if (t === "phase.request" && pl && pl.phase === "implement") delete shardYard[key];
+  if (t === "phase.request" && pl && pl.phase === "review") delete reviewLoop[key];
+  const round = pl && typeof pl.round === "number" ? pl.round : 1;
+  // The review phase is a cycle (review -> fix -> review), not one long state.
+  // Track whose hands the work is in and which round it is on.
+  if (obj && obj.engine_label === "review") {
+    if (t === "review.requested") reviewLoop[key] = { mode:"review", round };
+    if (t === "fix.requested") reviewLoop[key] = { mode:"fixing", round };
+    if (t === "review.approved") reviewLoop[key] = { mode:"approved", round };
+    if (t === "review.escalated") reviewLoop[key] = { mode:"escalated", round };
+  }
+  // Implement fan-out: per-shard states keyed by the plan's shard ids.
+  if (t === "stage.item" && pl && typeof pl.id === "string" && Array.isArray(pl.shards)) {
+    for (const s of pl.shards) markShard(key, pl.id, shardName(s), "building");
+  }
+  if (t === "shard.built" && pl && typeof pl.stage === "string") {
+    for (const s of (Array.isArray(pl.pending) ? pl.pending : []))
+      markShard(key, pl.stage, shardName(s), "review");
+    for (const s of (Array.isArray(pl.done) ? pl.done : []))
+      markShard(key, pl.stage, shardName(s), "done");
+  }
+  if ((t === "shard.review.raw" || t === "shard.fix.requested")
+      && pl && typeof pl.stage === "string" && pl.current) {
+    const n = shardName(pl.current);
+    if (t === "shard.review.raw" && pl.verdict === "APPROVED")
+      markShard(key, pl.stage, n, "done", round);
+    else if (pl.verdict === "REQUEST_CHANGES" && round >= 3)
+      markShard(key, pl.stage, n, "escalated", round);
+    else markShard(key, pl.stage, n, "fixing", round);
+  }
+  if (t === "shard.done" && pl && typeof pl.stage === "string") {
+    for (const s of (Array.isArray(pl.done) ? pl.done : []))
+      markShard(key, pl.stage, shardName(s), "done");
+  }
   if (t === "pipeline.complete") {
     promoteStates[key] = pl && pl.parked ? "parked" : "done";
     completeInfo[key] = {

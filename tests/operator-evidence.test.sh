@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Self-contained test runner for bin/operator.sh's worktree-evidence seam and
-# read-only git grants. Every harness and git repository lives in its own
-# mktemp -d; the model is always a local stub, so no repository or network
-# state is touched. Prints PASS/FAIL per case and exits non-zero on failure.
+# Self-contained test runner for bin/operator.sh's harness-captured worktree,
+# branch, and park-hold evidence plus read-only git grants. Every harness and
+# git repository lives in its own mktemp -d; the model is always a local stub,
+# so no repository or network state is touched. Prints PASS/FAIL per case and
+# exits non-zero on failure.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,6 +12,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # either length rather than failing correct output from a SHA-256 repository.
 OID_RE='[0-9a-fA-F]{40}|[0-9a-fA-F]{64}'
 FIXTURES=()
+CHILD_PIDS=()
 TESTS_RUN=0
 TESTS_PASSED=0
 RUN_STATUS=0
@@ -26,14 +28,97 @@ ARGV_CAPTURE=""
 PROMPT_CAPTURE=""
 SUBJECT_STDOUT=""
 SUBJECT_STDERR=""
+SPAWNED_PID=""
+ZOMBIE_PID=""
+APPROVE_URL="http://127.0.0.1:8240/approve"
+APPROVE_COMMAND="curl -s -X POST $APPROVE_URL -H 'Content-Type: application/json' --data @/fixture/state/pending.json"
 
 cleanup() {
-    local FIXTURE
+    local FIXTURE PID_VALUE
+    for PID_VALUE in ${CHILD_PIDS[@]+"${CHILD_PIDS[@]}"}; do
+        kill "$PID_VALUE" 2>/dev/null || true
+        wait "$PID_VALUE" 2>/dev/null || true
+    done
     for FIXTURE in "${FIXTURES[@]}"; do
         rm -rf -- "$FIXTURE"
     done
 }
 trap cleanup EXIT
+
+# The park cases assert on a hold the operator re-checks against /proc and the
+# clock, so they need real processes rather than invented pids: a live child
+# whose start identity can be recorded exactly, and one that has exited.
+# shellcheck source=../bin/_liveness.sh
+source "$ROOT/bin/_liveness.sh"
+
+spawn_child() {
+    sleep 300 &
+    SPAWNED_PID=$!
+    CHILD_PIDS+=("$SPAWNED_PID")
+}
+
+# The state character from /proc/<pid>/stat, read the same way the subject does:
+# fields 3+ follow the LAST ')', because comm may itself hold spaces and parens.
+proc_state_of() {
+    local STAT_LINE=""
+    local -a FIELDS=()
+
+    STAT_LINE="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+    read -ra FIELDS <<<"${STAT_LINE##*)}"
+    printf '%s\n' "${FIELDS[0]:-}"
+}
+
+# A process that has exited but has not been reaped: it still answers kill(0)
+# and keeps its start identity, which is precisely the case the state check
+# exists for. The parent execs `sleep` — a process that never waits — so the
+# corpse persists for the whole case, and killing that parent (via CHILD_PIDS)
+# hands the zombie to init, which reaps it. Returns 1 if no zombie could be
+# staged, so a case can fail loudly instead of passing vacuously.
+spawn_zombie() {
+    local PID_FILE="$1"
+    local WAITED=0
+
+    ZOMBIE_PID=""
+    bash -c 'sleep 0.2 & printf "%s\n" "$!" >"$1"; exec sleep 300' _ "$PID_FILE" &
+    CHILD_PIDS+=("$!")
+    while [ "$WAITED" -lt 200 ]; do
+        if [ -s "$PID_FILE" ]; then
+            ZOMBIE_PID="$(<"$PID_FILE")"
+            if [ "$(proc_state_of "$ZOMBIE_PID")" = "Z" ]; then
+                return 0
+            fi
+        fi
+        sleep 0.05
+        WAITED=$((WAITED + 1))
+    done
+    return 1
+}
+
+# A park record as the supervisor writes one, dated now so the deadline it
+# carries has not elapsed.
+park_record() {
+    local HELD="$1" PID_VALUE="$2" START_VALUE="$3" DEADLINE="$4"
+
+    jq -n \
+        --argjson held "$HELD" \
+        --arg approve_url "$APPROVE_URL" \
+        --arg approve_command "$APPROVE_COMMAND" \
+        --argjson pid "${PID_VALUE:-null}" \
+        --arg start_id "$START_VALUE" \
+        --argjson deadline "$DEADLINE" \
+        --arg since "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{
+            held: $held,
+            approve_url: $approve_url,
+            approve_command: $approve_command,
+            pid: $pid,
+            start_id: $start_id,
+            deadline: $deadline,
+            since: $since,
+            lease_transferred: $held,
+            reason: null
+        }' >"$RUN_DIR_PATH/state/park.json"
+}
 
 fixture() {
     local DIR
@@ -80,6 +165,7 @@ setup_harness() {
     cp "$ROOT/bin/operator.sh" "$CASE_ROOT/bin/operator.sh"
     cp "$ROOT/bin/worktree-evidence.sh" "$CASE_ROOT/bin/worktree-evidence.sh"
     cp "$ROOT/bin/_provenance.sh" "$CASE_ROOT/bin/_provenance.sh"
+    cp "$ROOT/bin/_liveness.sh" "$CASE_ROOT/bin/_liveness.sh"
 
     cat >"$CASE_ROOT/bin/_env.sh" <<EOF
 # Fixture-local constants. Sourced, not executed.
@@ -458,7 +544,202 @@ fi
 report_case "unparseable model output fails safe to HALT" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 200 "$SUBJECT_STDOUT")"
 
-# 6. Read-only git rules are invariant across all phases: every granted git
+# 6. Park hold evidence is captured by the harness at review time, not inferred
+# from the engine log — and a hold is presented as live only when the recorded
+# engine is still that exact running process and its deadline has time left.
+# The live case exposes the exact endpoint, command, PID, and human-scaled
+# deadline without adding any permission grant.
+setup_harness
+spawn_child
+LIVE_PARK_PID="$SPAWNED_PID"
+LIVE_PARK_ID="$(proc_identity "$LIVE_PARK_PID")"
+park_record true "$LIVE_PARK_PID" "$LIVE_PARK_ID" 86400
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if grep -Fx \
+        '## Park hold evidence (harness-captured live at operator time)' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- held: true' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- recorded_held: true' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -F -- '- hold_check: pid '"$LIVE_PARK_PID"' is running under its recorded start identity' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- "- approve_url: \"$APPROVE_URL\"" \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- "- approve_command: \"$APPROVE_COMMAND\"" \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- "- pid: $LIVE_PARK_PID" "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- "- start_id: \"$LIVE_PARK_ID\"" "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- deadline: 86400' "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "review injects the live park hold record" "$OK" \
+    "status=$RUN_STATUS prompt=$(tail -n 16 "$PROMPT_CAPTURE" | tr '\n' ' ')"
+
+# 6a. A recorded hold whose engine has exited is a closed window, however
+# confidently the record still claims otherwise: the recorded claim stays
+# visible, but the presented hold is the harness's own re-check.
+setup_harness
+spawn_child
+DEAD_PARK_PID="$SPAWNED_PID"
+DEAD_PARK_ID="$(proc_identity "$DEAD_PARK_PID")"
+kill "$DEAD_PARK_PID" 2>/dev/null || true
+wait "$DEAD_PARK_PID" 2>/dev/null || true
+park_record true "$DEAD_PARK_PID" "$DEAD_PARK_ID" 86400
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if grep -Fx -- '- held: false' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- recorded_held: true' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -F -- 'is no longer running, so the approval window is closed' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "an exited engine is presented as a closed window" "$OK" \
+    "status=$RUN_STATUS prompt=$(tail -n 16 "$PROMPT_CAPTURE" | tr '\n' ' ')"
+
+# 6b. A live engine whose park deadline has already run out is equally closed:
+# liveness alone never makes the approval webhook reachable.
+setup_harness
+spawn_child
+EXPIRED_PARK_PID="$SPAWNED_PID"
+EXPIRED_PARK_ID="$(proc_identity "$EXPIRED_PARK_PID")"
+park_record true "$EXPIRED_PARK_PID" "$EXPIRED_PARK_ID" 0
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if grep -Fx -- '- held: false' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- recorded_held: true' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -F -- 'the park deadline elapsed' "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "an elapsed deadline is presented as a closed window" "$OK" \
+    "status=$RUN_STATUS prompt=$(tail -n 16 "$PROMPT_CAPTURE" | tr '\n' ' ')"
+
+# 6c. A hold recorded without a start identity cannot be told apart from a
+# recycled pid, so it is not presented as live even while that pid runs.
+setup_harness
+spawn_child
+UNIDENTIFIED_PARK_PID="$SPAWNED_PID"
+park_record true "$UNIDENTIFIED_PARK_PID" "" 86400
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if grep -Fx -- '- held: false' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -F -- 'carries no start identity' "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "a hold without a start identity is never called live" "$OK" \
+    "status=$RUN_STATUS prompt=$(tail -n 16 "$PROMPT_CAPTURE" | tr '\n' ' ')"
+
+# 6d. The exited-engine check cannot stop at kill(0). A process that has exited
+# but has not been reaped answers it and still carries its recorded start
+# identity, while its approval socket is already gone — so the recorded pid and
+# the recorded identity both agree with a hold that no longer exists. Only the
+# process state separates that corpse from the running engine.
+setup_harness
+ZOMBIE_CASE="an unreaped exited engine is presented as a closed window"
+OK=1
+if spawn_zombie "$CASE_ROOT/zombie.pid"; then
+    ZOMBIE_ID="$(proc_identity "$ZOMBIE_PID")"
+    park_record true "$ZOMBIE_PID" "$ZOMBIE_ID" 86400
+    run_operator "review" "$PROCEED_OUTPUT"
+    if grep -Fx -- '- held: false' "$PROMPT_CAPTURE" >/dev/null \
+        && grep -Fx -- '- recorded_held: true' "$PROMPT_CAPTURE" >/dev/null \
+        && grep -F -- 'has already exited (process state Z)' \
+            "$PROMPT_CAPTURE" >/dev/null \
+        && valid_proceed_payload; then
+        OK=0
+    fi
+    report_case "$ZOMBIE_CASE" "$OK" \
+        "status=$RUN_STATUS prompt=$(tail -n 16 "$PROMPT_CAPTURE" | tr '\n' ' ')"
+else
+    report_case "$ZOMBIE_CASE" "$OK" "no zombie process could be staged"
+fi
+
+# 7. A declined hold is still evidence: the operator must receive the recorded
+# closed-window reason instead of repeating a dead endpoint from narration.
+setup_harness
+jq -n '{
+    held: false,
+    approve_url: "http://127.0.0.1:8240/approve",
+    approve_command: "dead command",
+    pid: null,
+    start_id: null,
+    deadline: null,
+    since: "2026-07-27T23:42:35Z",
+    lease_transferred: false,
+    reason: "engine identity was unreadable"
+}' >"$RUN_DIR_PATH/state/park.json"
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if grep -Fx -- '- held: false' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- recorded_held: false' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- reason: "engine identity was unreadable"' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "review injects a declined hold and its closed-window reason" \
+    "$OK" "status=$RUN_STATUS"
+
+# 8. A torn record must become explicit negative input while normal operator
+# verdict parsing continues unaffected.
+setup_harness
+printf '%s\n' '{"held": true, "approve_url":' \
+    >"$RUN_DIR_PATH/state/park.json"
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if grep -Fx \
+        '## Park hold evidence (harness-captured live at operator time)' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx '(park record unavailable or malformed)' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "malformed park record is explicit and non-fatal" "$OK" \
+    "status=$RUN_STATUS"
+
+# 9. Absence means there was no park-hold record to inject; it must not create a
+# misleading unavailable section.
+setup_harness
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if ! grep -Fx \
+        '## Park hold evidence (harness-captured live at operator time)' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "review without a park record omits the park section" "$OK" \
+    "status=$RUN_STATUS"
+
+# 10. Park state belongs only to the review seam. A stale file must never leak into
+# another phase's operator prompt.
+setup_harness
+jq -n '{
+    held: true,
+    approve_url: "http://127.0.0.1:8240/approve",
+    approve_command: "stale command",
+    pid: 12345,
+    deadline: 86400,
+    since: "2026-07-27T23:42:35Z",
+    lease_transferred: true,
+    reason: null
+}' >"$RUN_DIR_PATH/state/park.json"
+run_operator "plan" "$PROCEED_OUTPUT"
+OK=1
+if ! grep -Fx \
+        '## Park hold evidence (harness-captured live at operator time)' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "non-review phase never receives park hold evidence" "$OK" \
+    "status=$RUN_STATUS"
+
+# 11. Read-only git rules are invariant across all phases: every granted git
 # command is one exact read-only invocation with no trailing wildcard, the
 # ref-bearing forms come from the run's own plan, and the only optional git -C
 # rule is the exact integration porcelain form.
@@ -506,7 +787,7 @@ done
 report_case "git grants stay exact and read-only in every phase" "$RULES_OK" \
     "$RULES_DETAIL"
 
-# 7. The ref-bearing rules are interpolated from plan.json, so a slug that is
+# 12. The ref-bearing rules are interpolated from plan.json, so a slug that is
 # not a kebab-case token must yield no rule at all rather than an unbounded or
 # argument-bearing one.
 RULES_OK=0
@@ -527,7 +808,7 @@ done
 report_case "a non-slug plan feature grants no ref-bearing rule" "$RULES_OK" \
     "$RULES_DETAIL"
 
-# 8. A rule is one exact command string, and git accepts branch names carrying
+# 13. A rule is one exact command string, and git accepts branch names carrying
 # shell metacharacters, so a base branch that is not a plain ref token must
 # yield no rule bearing it — neither the origin/<base> forms nor the two
 # feature rules built from it — instead of a rule parsed as shell syntax.
@@ -554,7 +835,7 @@ done
 report_case "a non-token base branch grants no rule bearing it" "$RULES_OK" \
     "$RULES_DETAIL"
 
-# 9. The implement terminal's commit and diff checks must stay completable for
+# 14. The implement terminal's commit and diff checks must stay completable for
 # every base branch git accepts, including one no exact rule can spell. The
 # harness compares the branches itself — refs as arguments, never shell words —
 # and injects the same two facts, so the omitted rules cost no verification.
@@ -592,7 +873,7 @@ done
 report_case "implement carries harness-captured branch evidence for any base" \
     "$RULES_OK" "$RULES_DETAIL"
 
-# 10. Branch evidence is honest about its own gaps: when the refs do not
+# 15. Branch evidence is honest about its own gaps: when the refs do not
 # resolve the operator must still emit a verdict payload, carrying an explicit
 # error rather than a silently empty commit list that reads as a clean diff.
 setup_harness
@@ -617,7 +898,7 @@ fi
 report_case "unresolvable branches become explicit negative branch evidence" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.200s' "$BRANCH_EVIDENCE")"
 
-# 11. gitrevisions resolves a bare name through refs/tags before refs/heads,
+# 16. gitrevisions resolves a bare name through refs/tags before refs/heads,
 # so a tag named after either configured branch would substitute its history
 # while the evidence still reads resolved. The harness pins both names inside
 # refs/heads: with the tags deliberately crossed (tag main at the feature tip,
@@ -649,7 +930,7 @@ fi
 report_case "tags named after the branches cannot shadow branch evidence" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.200s' "$BRANCH_EVIDENCE")"
 
-# 12. A worktree path is not a token either — git accepts spaces and shell
+# 17. A worktree path is not a token either — git accepts spaces and shell
 # metacharacters in one — and a rule is an exact command string, so the path
 # must be embedded already escaped. Unescaped, the granted text parses as
 # several words (or as shell syntax) when run verbatim, while the quoting the
@@ -688,7 +969,7 @@ done
 report_case "a worktree path carrying shell characters is granted escaped" \
     "$RULES_OK" "$RULES_DETAIL"
 
-# 13. Regression for issue #36: the primary checkout remains on main, whose
+# 18. Regression for issue #36: the primary checkout remains on main, whose
 # copy has 2 lines, while review evidence must describe the feature tip's
 # 20-line blob instead of accidentally reading the working tree.
 setup_harness
@@ -718,7 +999,7 @@ fi
 report_case "issue #36 review evidence reads the feature tip, not main" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
 
-# 14. The evidence-published command is the granted command, and executing it
+# 19. The evidence-published command is the granted command, and executing it
 # from the operator's repo-root cwd reads the pinned feature blob.
 setup_harness
 seed_plan "fixture-feature"
@@ -756,7 +1037,7 @@ fi
 report_case "tip-pinned reads are granted exactly and read tip content" \
     "$OK" "status=$RUN_STATUS pinned=${PINNED_READS[*]:-none}"
 
-# 15. Paths that cannot be one safe rule token remain visible as content
+# 20. Paths that cannot be one safe rule token remain visible as content
 # evidence, but neither their published entries nor allowedTools grant a read.
 # The quoted path also pins the listing format: git C-quotes a path carrying a
 # double quote in line-delimited output, and that spelling names no tree entry,
@@ -808,7 +1089,7 @@ fi
 report_case "non-token paths are described without granting a command" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
 
-# 16. A path removed by the feature diff has no branch-tip blob to identify or
+# 21. A path removed by the feature diff has no branch-tip blob to identify or
 # read, so its evidence is the minimal exact negative object.
 setup_harness
 seed_plan "fixture-feature"
@@ -837,7 +1118,7 @@ fi
 report_case "deleted feature files carry exact negative tip evidence" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
 
-# 17. The cap is part of the evidence contract so a large diff cannot look
+# 22. The cap is part of the evidence contract so a large diff cannot look
 # complete after its content identities and grants are intentionally bounded.
 setup_harness
 seed_plan "fixture-feature"
@@ -872,7 +1153,7 @@ fi
 report_case "tip-file truncation is explicit and caps pinned grants" \
     "$OK" "status=$RUN_STATUS pinned_rules=$PINNED_RULE_COUNT"
 
-# 18. A changed gitlink is a present tree entry whose target commit normally
+# 23. A changed gitlink is a present tree entry whose target commit normally
 # lives in the submodule's object store rather than this repository's, so the
 # entry's own type — not what the object database can answer about the target —
 # decides its evidence: present as a gitlink, with none of the blob claims
@@ -914,7 +1195,7 @@ fi
 report_case "a changed gitlink is present evidence without blob claims" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
 
-# 19. Git imposes no encoding on a pathname, but JSON is UTF-8 and jq's --arg
+# 24. Git imposes no encoding on a pathname, but JSON is UTF-8 and jq's --arg
 # substitutes U+FFFD for every byte that is not part of a valid sequence. Two
 # paths differing only in those bytes would then publish as one identical
 # string: one real file described twice, the other not at all, under an

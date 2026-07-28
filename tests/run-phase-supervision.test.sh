@@ -32,6 +32,7 @@ SUBJECT_PID=""
 OUT=""
 ERR=""
 PROMOTE_MARKER=""
+REAPER_PID_FILE=""
 
 cleanup() {
     local PID_VALUE
@@ -63,6 +64,13 @@ skip_all() {
         "plan artifact records complete"
         "review artifact records correlation"
         "review pending records parked"
+        "park record holds detached engine"
+        "park launcher leaves engine alive"
+        "park launcher preserves engine pid file"
+        "park terminal reason names approve URL"
+        "park reaper exits after engine"
+        "dead parked engine closes approval window"
+        "live park refuses relaunch"
         "review docs-sync grace expires complete"
         "implement red gate records halted"
         "escalation records halted"
@@ -95,13 +103,15 @@ run_subject() {
     local ENGINE_MODE="${3:-idle}"
     local PROMOTE_MODE="${4:-artifact}"
     local DOCS_GRACE="${5:-}"
+    local PARK_GRACE="${6:-4}"
     local CASE_DIR="$FIX/case-$ISSUE_VALUE-$PHASE_VALUE-$ENGINE_MODE-$PROMOTE_MODE"
-    local PID_INDEX
+    local PID_INDEX RUN_PATH HELD_PID REAPER_PID_VALUE
 
     mkdir -p "$CASE_DIR" || fatal "case directory could not be created: $CASE_DIR"
     OUT="$CASE_DIR/stdout"
     ERR="$CASE_DIR/stderr"
     PROMOTE_MARKER="$CASE_DIR/promote-invoked.json"
+    REAPER_PID_FILE="$CASE_DIR/reaper.pid"
 
     PATH="$STUB_BIN:$PATH" \
         SIGNALBOX_LEASE_REGISTRY="$LEASE_REGISTRY" \
@@ -110,6 +120,8 @@ run_subject() {
         SIGNALBOX_PROMOTE_MODE="$PROMOTE_MODE" \
         SIGNALBOX_PROMOTE_MARKER="$PROMOTE_MARKER" \
         SIGNALBOX_DOCS_SYNC_GRACE="$DOCS_GRACE" \
+        SIGNALBOX_PARK_GRACE="$PARK_GRACE" \
+        SIGNALBOX_REAPER_PID_FILE="$REAPER_PID_FILE" \
         "$SUBJECT" "$ISSUE_VALUE" --phase "$PHASE_VALUE" \
         >"$OUT" 2>"$ERR" &
     SUBJECT_PID=$!
@@ -118,6 +130,35 @@ run_subject() {
     wait "$SUBJECT_PID" 2>/dev/null
     SUBJECT_STATUS=$?
     CHILD_PIDS[$PID_INDEX]=""
+
+    RUN_PATH="$HARNESS/runs/issue-$ISSUE_VALUE"
+    if jq -e '.held == true' "$RUN_PATH/state/park.json" >/dev/null 2>&1; then
+        HELD_PID="$(jq -r '.pid // empty' "$RUN_PATH/state/park.json" 2>/dev/null)"
+        [ -n "$HELD_PID" ] && CHILD_PIDS+=("$HELD_PID")
+        await_file "$REAPER_PID_FILE"
+        REAPER_PID_VALUE="$(head -n 1 "$REAPER_PID_FILE" 2>/dev/null || true)"
+        [ -n "$REAPER_PID_VALUE" ] && CHILD_PIDS+=("$REAPER_PID_VALUE")
+    fi
+}
+
+await_file() {
+    local FILE_VALUE="$1" ATTEMPT
+
+    for ATTEMPT in {1..100}; do
+        [ -s "$FILE_VALUE" ] && return 0
+        sleep 0.05
+    done
+    return 1
+}
+
+await_process_exit() {
+    local PID_VALUE="$1" ATTEMPT
+
+    for ATTEMPT in {1..200}; do
+        kill -0 "$PID_VALUE" 2>/dev/null || return 0
+        sleep 0.05
+    done
+    return 1
 }
 
 write_review_evidence() {
@@ -161,6 +202,17 @@ mkdir -p "$HARNESS" "$STUB_BIN" "$HARNESS/templates" \
     || fatal 'the fixture harness directories could not be created'
 cp -r "$ROOT/bin" "$HARNESS/" \
     || fatal 'bin/ could not be copied into the fixture harness'
+mv "$HARNESS/bin/engine-reaper.sh" "$HARNESS/bin/engine-reaper-real.sh" \
+    || fatal 'the fixture reaper could not be wrapped'
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'printf '"'"'%s\n'"'"' "$$" >"$SIGNALBOX_REAPER_PID_FILE"' \
+    'exec "$(dirname "${BASH_SOURCE[0]}")/engine-reaper-real.sh" "$@"' \
+    >"$HARNESS/bin/engine-reaper.sh" \
+    || fatal 'the fixture reaper wrapper could not be written'
+chmod +x "$HARNESS/bin/engine-reaper.sh" \
+    || fatal 'the fixture reaper wrapper could not be made executable'
 [ -x "$SUBJECT" ] || fatal "the fixture subject $SUBJECT is missing"
 [ -x "$HARNESS/bin/ports.sh" ] \
     || fatal 'the fixture harness is missing bin/ports.sh'
@@ -179,6 +231,7 @@ printf '%s\n' \
     '#!/usr/bin/env bash' \
     'set -euo pipefail' \
     'RUN_DIR="$SIGNALBOX_TEST_HARNESS/runs/$SIGNALBOX_RUN_SLUG"' \
+    'ENGINE_LIFETIME=120' \
     'mkdir -p "$RUN_DIR/state" "$RUN_DIR/results"' \
     'case "${SIGNALBOX_TEST_MODE:-idle}" in' \
     '    plan)' \
@@ -190,9 +243,15 @@ printf '%s\n' \
     '        ;;' \
     '    review-parked)' \
     '        jq -n '"'"'{decision: "human"}'"'"' >"$RUN_DIR/state/pending.json"' \
+    '        ENGINE_LIFETIME=3' \
     '        ;;' \
     '    review-parked-cid)' \
     '        jq -n --arg correlation_id pending-correlation '"'"'{decision: "human", correlation_id: $correlation_id}'"'"' >"$RUN_DIR/state/pending.json"' \
+    '        ENGINE_LIFETIME=3' \
+    '        ;;' \
+    '    review-parked-dead)' \
+    '        jq -n '"'"'{decision: "human"}'"'"' >"$RUN_DIR/state/pending.json"' \
+    '        exit 0' \
     '        ;;' \
     '    review-no-sync)' \
     '        printf '"'"'# CR\ncorrelation_id: grace-correlation\nPROMOTION_READY\n'"'"' >"$RUN_DIR/results/CR.md"' \
@@ -212,7 +271,7 @@ printf '%s\n' \
     '        exit 64' \
     '        ;;' \
     'esac' \
-    'exec sleep 120' >"$STUB_BIN/emergent" \
+    'exec sleep "$ENGINE_LIFETIME"' >"$STUB_BIN/emergent" \
     || fatal 'the emergent stub could not be written'
 chmod +x "$STUB_BIN/emergent" \
     || fatal 'the emergent stub could not be made executable'
@@ -321,6 +380,166 @@ if [ "$SUBJECT_STATUS" -eq 0 ] \
 fi
 report_case "review pending records parked" "$OK" \
     "status=$SUBJECT_STATUS stderr=$(head -c 200 "$ERR")"
+
+# The held record names the still-live engine and the detached reaper.
+PARK_PID="$(jq -r '.pid // empty' "$RUN_DIR/state/park.json" 2>/dev/null)"
+PARK_START_ID="$(jq -r '.start_id // empty' "$RUN_DIR/state/park.json" 2>/dev/null)"
+await_file "$REAPER_PID_FILE"
+REAPER_READY=$?
+REAPER_PID="$(head -n 1 "$REAPER_PID_FILE" 2>/dev/null || true)"
+[ -n "$PARK_PID" ] && CHILD_PIDS+=("$PARK_PID")
+[ -n "$REAPER_PID" ] && CHILD_PIDS+=("$REAPER_PID")
+
+# The pending path in the recorded command must be one shell word, whatever the
+# fixture path contains, so the expectation is the printf %q form rather than
+# the raw path.
+PENDING_ARG="$(printf '%q' "$RUN_DIR/state/pending.json")"
+OK=1
+if [ "$REAPER_READY" -eq 0 ] \
+    && jq -e \
+        --arg run_dir "$RUN_DIR" \
+        --arg pending_arg "$PENDING_ARG" \
+        '
+        .held == true
+        and .issue == 3203
+        and .phase == "review"
+        and .holder == "standalone"
+        and (.port | type) == "number"
+        and .approve_url == ("http://127.0.0.1:" + (.port | tostring) + "/approve")
+        and .approve_command == (
+            "curl -s -X POST " + .approve_url
+            + " -H '\''Content-Type: application/json'\'' --data @"
+            + $pending_arg
+        )
+        and .pending == ($run_dir + "/state/pending.json")
+        and (.pid | type) == "number"
+        and (.start_id | type) == "string"
+        and (.start_id | contains(":"))
+        and .pid_file == ($run_dir + "/state/engine.pid")
+        and .watch == ($run_dir + "/state/docs-sync.json")
+        and .deadline == 4
+        and (.lease_transferred | type) == "boolean"
+        and .reason == null
+        ' "$RUN_DIR/state/park.json" >/dev/null 2>&1; then
+    OK=0
+fi
+report_case "park record holds detached engine" "$OK" \
+    "record=$(jq -c . "$RUN_DIR/state/park.json" 2>/dev/null) reaper=$REAPER_PID"
+
+OK=1
+if [[ "$PARK_PID" =~ ^[1-9][0-9]*$ ]] \
+    && kill -0 "$PARK_PID" 2>/dev/null; then
+    OK=0
+fi
+report_case "park launcher leaves engine alive" "$OK" \
+    "engine_pid=$PARK_PID status=$SUBJECT_STATUS"
+
+OK=1
+if [ -f "$RUN_DIR/state/engine.pid" ] \
+    && [ "$(head -n 1 "$RUN_DIR/state/engine.pid" 2>/dev/null)" = "$PARK_PID" ]; then
+    OK=0
+fi
+report_case "park launcher preserves engine pid file" "$OK" \
+    "engine_pid=$PARK_PID pid_file=$(head -n 1 "$RUN_DIR/state/engine.pid" 2>/dev/null)"
+
+APPROVE_URL="$(jq -r '.approve_url // empty' "$RUN_DIR/state/park.json" 2>/dev/null)"
+OK=1
+if jq -e \
+    --arg approve_url "$APPROVE_URL" \
+    '
+    .reason
+    | contains($approve_url)
+      and contains("webhook stays live")
+      and contains("SIGTERMing recorded engine pid")
+    ' "$RUN_DIR/state/complete.json" >/dev/null 2>&1; then
+    OK=0
+fi
+report_case "park terminal reason names approve URL" "$OK" \
+    "reason=$(jq -r '.reason // empty' "$RUN_DIR/state/complete.json" 2>/dev/null)"
+
+await_process_exit "$PARK_PID"
+ENGINE_EXITED=$?
+await_process_exit "$REAPER_PID"
+REAPER_EXITED=$?
+OK=1
+if [ "$ENGINE_EXITED" -eq 0 ] \
+    && [ "$REAPER_EXITED" -eq 0 ] \
+    && [ ! -e "$RUN_DIR/state/engine.pid" ]; then
+    OK=0
+fi
+report_case "park reaper exits after engine" "$OK" \
+    "engine_exit=$ENGINE_EXITED reaper_exit=$REAPER_EXITED pid_file=$([ -e "$RUN_DIR/state/engine.pid" ] && printf present || printf absent)"
+
+# A pending artifact written immediately before engine exit still records a
+# complete parked terminal, but its approval window is explicitly closed.
+ISSUE=3301
+RUN_DIR="$HARNESS/runs/issue-$ISSUE"
+run_subject "$ISSUE" review review-parked-dead
+OK=1
+if [ "$SUBJECT_STATUS" -eq 0 ] \
+    && jq -e '
+        .held == false
+        and .pid == null
+        and .start_id == null
+        and .deadline == null
+        and .lease_transferred == false
+        and (.reason | contains("approval window is closed"))
+    ' "$RUN_DIR/state/park.json" >/dev/null 2>&1 \
+    && jq -e '
+        .terminal == "complete"
+        and .phase == "review"
+        and .parked == true
+        and (.reason | contains("approval window is already closed"))
+    ' "$RUN_DIR/state/complete.json" >/dev/null 2>&1; then
+    OK=0
+fi
+report_case "dead parked engine closes approval window" "$OK" \
+    "status=$SUBJECT_STATUS record=$(jq -c . "$RUN_DIR/state/park.json" 2>/dev/null)"
+
+# A live held record gets the actionable park refusal before leasing or
+# overwriting any state for a new engine-backed launch.
+ISSUE=3302
+RUN_DIR="$HARNESS/runs/issue-$ISSUE"
+mkdir -p "$RUN_DIR/state" \
+    || fatal 'the live-park guard state directory could not be created'
+sleep 15 &
+GUARD_PID=$!
+CHILD_PIDS+=("$GUARD_PID")
+GUARD_INDEX=$((${#CHILD_PIDS[@]} - 1))
+GUARD_START_ID="$(
+    bash -c 'source "$1"; proc_identity "$2"' \
+        fixture "$HARNESS/bin/_liveness.sh" "$GUARD_PID"
+)" || fatal 'the live-park guard identity could not be read'
+printf '%s\n' "$GUARD_PID" >"$RUN_DIR/state/engine.pid" \
+    || fatal 'the live-park guard pid file could not be written'
+jq -n \
+    --arg issue "$ISSUE" \
+    --argjson pid "$GUARD_PID" \
+    --arg start_id "$GUARD_START_ID" \
+    --arg approve_url "http://127.0.0.1:8240/approve" \
+    '{
+        held: true,
+        issue: ($issue | tonumber),
+        phase: "review",
+        pid: $pid,
+        start_id: $start_id,
+        approve_url: $approve_url
+    }' >"$RUN_DIR/state/park.json" \
+    || fatal 'the live-park guard record could not be written'
+run_subject "$ISSUE" plan idle
+OK=1
+if [ "$SUBJECT_STATUS" -eq 1 ] \
+    && grep -q "run issue-$ISSUE is parked awaiting approval" "$ERR" \
+    && grep -q 'http://127.0.0.1:8240/approve' "$ERR" \
+    && grep -q "engine pid $GUARD_PID" "$ERR" \
+    && grep -q 'port is still leased' "$ERR"; then
+    OK=0
+fi
+kill -TERM "$GUARD_PID" 2>/dev/null || true
+wait "$GUARD_PID" 2>/dev/null || true
+CHILD_PIDS[$GUARD_INDEX]=""
+report_case "live park refuses relaunch" "$OK" \
+    "status=$SUBJECT_STATUS stderr=$(head -c 320 "$ERR")"
 
 # 4. Missing docs-sync waits only for the injected grace and retains the
 # already-observed CR terminal.

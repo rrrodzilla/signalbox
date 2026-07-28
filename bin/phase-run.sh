@@ -6,18 +6,22 @@
 # PID in the run's state, and watches run-scoped DISK ARTIFACTS (never engine
 # claims) for the phase's terminal condition. It then stops the child
 # gracefully (SIGTERM by PID — never pkill by name, other engines may be alive)
-# so its event trail flushes. Exception: at a review ARTIFACT terminal with
-# docs-sync still in flight, ownership passes to bin/engine-reaper.sh so the
-# sync can finish after the pipeline advances; the reaper performs the same
-# graceful stop under a hard deadline, targeted at the engine's PID *and* the
-# start time recorded here so a recycled PID is never signalled. The normal
-# shutdown also runs from an EXIT/INT/TERM trap, so a runner killed mid-watch
-# still reaps its engine and clears its PID file rather than orphaning both.
+# so its event trail flushes. Exception: at a parked review terminal, or at a
+# review ARTIFACT terminal with docs-sync still in flight, ownership passes to
+# bin/engine-reaper.sh. A park deliberately keeps the approval webhook live;
+# the artifact handoff lets sync finish after the pipeline advances. The reaper
+# performs the same graceful stop under a hard deadline, targeted at the
+# engine's PID *and* the start time recorded here so a recycled PID is never
+# signalled. The normal shutdown also runs from an EXIT/INT/TERM trap, so a
+# runner killed mid-watch still reaps its engine and clears its PID file rather
+# than orphaning both.
 # The runner reports what it OBSERVED; judging whether the phase actually
 # succeeded is the operator's job.
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+# shellcheck source=_liveness.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_liveness.sh"
 
 PAYLOAD="$(cat)"
 PHASE="$(jq -r '.phase' <<<"$PAYLOAD")"
@@ -105,6 +109,7 @@ printf '%s\n' "$PID" >"$PID_FILE"
 ENGINE_STARTTIME="$(awk '{ sub(/^.*\) /, ""); print $20 }' \
     "/proc/$PID/stat" 2>/dev/null || true)"
 [[ "$ENGINE_STARTTIME" =~ ^[0-9]+$ ]] || ENGINE_STARTTIME=""
+ENGINE_START_ID="$(proc_identity "$PID" || true)"
 
 echo "[pipeline] $PHASE engine up (pid $PID), watching artifacts" >&2
 
@@ -114,6 +119,61 @@ echo "[pipeline] $PHASE engine up (pid $PID), watching artifacts" >&2
 # a successful phase into its timeout. The log is kept for humans and the
 # operator's tail; nothing here greps it.
 fresh() { [ -f "$1" ] && [ "$1" -nt "$STAMP" ]; }
+
+write_park_record() {
+    local HELD_VALUE="$1" PID_VALUE="$2" START_ID_VALUE="$3"
+    local DEADLINE_VALUE="$4" LEASE_VALUE="$5" REASON_VALUE="$6"
+    local PARK_FILE="$RUN_DIR/state/park.json"
+    local PARK_TEMP="$PARK_FILE.tmp.$$"
+    local PENDING="$RUN_DIR/state/pending.json"
+    local WATCH="$RUN_DIR/state/docs-sync.json"
+    local APPROVE_URL="http://127.0.0.1:$APPROVAL_PORT/approve"
+    local APPROVE_COMMAND
+    local SINCE
+
+    # The recorded command is meant to be pasted and run verbatim, so the
+    # pending path has to survive as a single shell word: a harness installed
+    # under a path with a space would otherwise split `--data @` across
+    # arguments and curl would post the wrong file (or none). printf %q yields
+    # exactly one word for any path.
+    APPROVE_COMMAND="curl -s -X POST $APPROVE_URL -H 'Content-Type: application/json' --data @$(printf '%q' "$PENDING")"
+    SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq -n \
+        --argjson held "$HELD_VALUE" \
+        --arg issue "$ISSUE" \
+        --arg holder "phase-run" \
+        --argjson port "$APPROVAL_PORT" \
+        --arg approve_url "$APPROVE_URL" \
+        --arg approve_command "$APPROVE_COMMAND" \
+        --arg pending "$PENDING" \
+        --argjson pid "$PID_VALUE" \
+        --arg start_id "$START_ID_VALUE" \
+        --arg pid_file "$PID_FILE" \
+        --arg watch "$WATCH" \
+        --argjson deadline "$DEADLINE_VALUE" \
+        --arg since "$SINCE" \
+        --argjson lease_transferred "$LEASE_VALUE" \
+        --arg reason "$REASON_VALUE" \
+        '{
+            held: $held,
+            issue: ($issue | tonumber),
+            phase: "review",
+            holder: $holder,
+            port: $port,
+            approve_url: $approve_url,
+            approve_command: $approve_command,
+            pending: $pending,
+            pid: $pid,
+            start_id: (if $held then $start_id else null end),
+            pid_file: $pid_file,
+            watch: $watch,
+            deadline: $deadline,
+            since: $since,
+            lease_transferred: $lease_transferred,
+            reason: (if $reason == "" then null else $reason end)
+        }' >"$PARK_TEMP"
+    mv "$PARK_TEMP" "$PARK_FILE"
+}
 
 OUTCOME="TIMEOUT"
 SECS=0
@@ -140,11 +200,46 @@ while [ "$SECS" -lt "$TIMEOUT" ]; do
     SECS=$((SECS + 5))
 done
 
-if [ "$PHASE" = "review" ] \
+HOLD_REASON=""
+HOLD_DEADLINE=""
+PARK_HELD=false
+if [ "$PHASE" = "review" ] && [ "$OUTCOME" = "PARKED" ]; then
+    PARK_GRACE_DEFAULT=86400
+    PARK_GRACE_MAX=86400
+    PARK_GRACE_RAW="${SIGNALBOX_PARK_GRACE:-$PARK_GRACE_DEFAULT}"
+    if [[ "$PARK_GRACE_RAW" =~ ^[0-9]{1,6}$ ]] \
+        && [ "$((10#$PARK_GRACE_RAW))" -ge 1 ] \
+        && [ "$((10#$PARK_GRACE_RAW))" -le "$PARK_GRACE_MAX" ]; then
+        PARK_GRACE=$((10#$PARK_GRACE_RAW))
+    else
+        printf '[pipeline] ignoring invalid SIGNALBOX_PARK_GRACE=%s (expected 1-%s seconds); using %ss\n' \
+            "$PARK_GRACE_RAW" "$PARK_GRACE_MAX" "$PARK_GRACE_DEFAULT" >&2
+        PARK_GRACE=$PARK_GRACE_DEFAULT
+    fi
+    HOLD_REASON="park"
+    HOLD_DEADLINE="$PARK_GRACE"
+elif [ "$PHASE" = "review" ] \
     && [ "$OUTCOME" = "ARTIFACT" ] \
-    && [ -n "$ENGINE_STARTTIME" ] \
-    && kill -0 "$PID" 2>/dev/null \
     && ! fresh "$RUN_DIR/state/docs-sync.json"; then
+    HOLD_REASON="docs-sync"
+    HOLD_DEADLINE=960
+fi
+
+HANDOFF_READY=false
+if [ -n "$HOLD_REASON" ] \
+    && [ -n "$ENGINE_STARTTIME" ] \
+    && kill -0 "$PID" 2>/dev/null; then
+    HANDOFF_READY=true
+fi
+if [ "$HOLD_REASON" = "park" ]; then
+    ENGINE_PROC_STATE="$(awk '{ sub(/^.*\) /, ""); print $1 }' \
+        "/proc/$PID/stat" 2>/dev/null || true)"
+    if [ -z "$ENGINE_START_ID" ] || [ "$ENGINE_PROC_STATE" = "Z" ]; then
+        HANDOFF_READY=false
+    fi
+fi
+
+if [ "$HANDOFF_READY" = true ]; then
     TRANSFERRED_PID="$PID"
     # Keep the traps armed across the launch: clearing them first would open a
     # window where a signal kills this runner with the engine still unowned,
@@ -153,13 +248,46 @@ if [ "$PHASE" = "review" ] \
     # would hold EOF open and stall the exec-handler; all reaper narration
     # belongs in the phase log.
     setsid "$(dirname "${BASH_SOURCE[0]}")/engine-reaper.sh" \
-        "$PID" "$PID_FILE" "$RUN_DIR/state/docs-sync.json" "$STAMP" 960 \
+        "$PID" "$PID_FILE" "$RUN_DIR/state/docs-sync.json" "$STAMP" "$HOLD_DEADLINE" \
         "$ENGINE_STARTTIME" \
         </dev/null >>"$LOG" 2>&1 &
+
+    if [ "$HOLD_REASON" = "park" ]; then
+        LEASE_TRANSFERRED=false
+        if "$(dirname "${BASH_SOURCE[0]}")/ports.sh" transfer \
+            "$RUN_SLUG" "$TRANSFERRED_PID" >/dev/null 2>&1; then
+            LEASE_TRANSFERRED=true
+        else
+            echo "[pipeline] port lease could not be transferred to the held engine; the registry entry may be released while the webhook is still listening" >&2
+        fi
+
+        # Spawning the reaper and transferring the lease both take time, and the
+        # engine can exit or be stopped inside that window — a transfer refused
+        # for a dead target is one symptom of exactly that. The record and the
+        # narration may only claim a live webhook if this exact process is still
+        # running now; otherwise the park is a closed window and says so.
+        if engine_running "$TRANSFERRED_PID" "$ENGINE_START_ID"; then
+            PARK_HELD=true
+            write_park_record true "$TRANSFERRED_PID" "$ENGINE_START_ID" \
+                "$HOLD_DEADLINE" "$LEASE_TRANSFERRED" ""
+        else
+            PARK_REASON="The approval window is closed because the review engine exited while ownership of it was being transferred."
+            write_park_record false null "" null "$LEASE_TRANSFERRED" \
+                "$PARK_REASON"
+            echo "[pipeline] $PARK_REASON" >&2
+        fi
+    fi
+
     # Ownership has passed to the reaper: emptying PID makes stop_engine a no-op,
     # so the still-armed traps can no longer terminate the transferred engine.
     PID=""
-    echo "[pipeline] review terminal reached with docs-sync in flight; handed engine pid $TRANSFERRED_PID to deferred reaper (deadline: 960s)" >&2
+    if [ "$HOLD_REASON" = "park" ]; then
+        if [ "$PARK_HELD" = true ]; then
+            echo "[pipeline] review parked; deliberately leaving idle engine pid $TRANSFERRED_PID open at http://127.0.0.1:$APPROVAL_PORT/approve for approval (deadline: ${HOLD_DEADLINE}s)" >&2
+        fi
+    else
+        echo "[pipeline] review terminal reached with docs-sync in flight; handed engine pid $TRANSFERRED_PID to deferred reaper (deadline: 960s)" >&2
+    fi
 else
     # Without a readable start time the reaper could not distinguish the engine
     # from a later process reusing its number, so the handoff is declined and
@@ -168,6 +296,15 @@ else
     if [ "$PHASE" = "review" ] && [ "$OUTCOME" = "ARTIFACT" ] \
         && [ -z "$ENGINE_STARTTIME" ]; then
         echo "[pipeline] engine identity unreadable; declining the deferred docs-sync handoff" >&2
+    fi
+    if [ "$HOLD_REASON" = "park" ]; then
+        if [ -z "$ENGINE_STARTTIME" ] || [ -z "$ENGINE_START_ID" ]; then
+            PARK_REASON="The approval window is closed because the review engine identity was unreadable, so a safe deferred handoff was impossible."
+        else
+            PARK_REASON="The approval window is closed because the review engine exited before ownership could be transferred."
+        fi
+        write_park_record false null "" null false "$PARK_REASON"
+        echo "[pipeline] $PARK_REASON" >&2
     fi
 
     # Let in-flight sinks finish narrating, then stop ONLY our child, gracefully.

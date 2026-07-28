@@ -6,14 +6,16 @@
 # the runner's outcome, verify the phase's disk artifacts first-hand, then
 # PROCEED or HALT. Review and implement prompts carry harness-captured branch
 # evidence including tip-pinned file content identity, and the operator is
-# granted exact `git show <tip>:<path>` reads for those files. Review and
-# promote also carry live integration-worktree evidence. Fail-safe: an
-# unparseable verdict is a HALT — when the operator can't be understood, the
-# pipeline stops.
+# granted exact `git show <tip>:<path>` reads for those files. Review also
+# carries the park hold re-verified at operator time; review and promote carry
+# live integration-worktree evidence. Fail-safe: an unparseable verdict is a
+# HALT — when the operator can't be understood, the pipeline stops.
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
+# shellcheck source=_liveness.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_liveness.sh"
 
 # Bound prompt and permission-rule growth when a branch changes many files.
 TIP_FILES_LIMIT=40
@@ -84,6 +86,241 @@ if [ "$PHASE" = "review" ] || [ "$PHASE" = "promote" ]; then
 - integration worktree: $INT_WT
 - captured: $CAPTURED_AT
 $WORKTREE_EVIDENCE"
+fi
+
+# The fields the hold re-check needs, read out of one snapshot of the record. A
+# value of the wrong type reads as absent rather than being coerced: a claim
+# that a webhook is live must never rest on a coerced field. Empty columns are
+# emitted as "-" because tab is IFS whitespace and adjacent empties would
+# otherwise collapse into one another.
+park_record_fields() {
+    jq -er '
+        if type != "object" then
+            error("park record is not an object")
+        else
+            .
+        end
+        | [
+            (if .held == true then "true" else "false" end),
+            (.pid
+             | if type == "number" and . > 0 and floor == . then
+                   (floor | tostring)
+               elif type == "string" and test("^[1-9][0-9]*$") then
+                   .
+               else
+                   "-"
+               end),
+            (.start_id | if type == "string" and length > 0 then . else "-" end),
+            (.since | if type == "string" and length > 0 then . else "-" end),
+            (.deadline
+             | if type == "number" and . >= 0 and floor == . then
+                   (floor | tostring)
+               elif type == "string" and length > 0 then
+                   .
+               else
+                   "-"
+               end)
+        ]
+        | @tsv
+    ' 2>/dev/null
+}
+
+# A process that has exited but has not yet been reaped stays in /proc as a
+# zombie: kill(0) still succeeds and its start identity is unchanged, so pid
+# liveness paired with start identity cannot tell it apart from the running
+# engine — while its listening socket is already gone. The held engine's parent
+# is the detached reaper, which collects it only at its own deadline, so that
+# window is real rather than theoretical. The state field in /proc/<pid>/stat is
+# what separates them. Fields 3+ follow the LAST ')', because comm (field 2) may
+# itself hold spaces and parens; the state is the first of those. Prints nothing
+# and returns 1 when /proc cannot answer.
+proc_state() {
+    local PID_VALUE="${1:-}" STAT_LINE=""
+    local -a FIELDS=()
+
+    [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] || return 1
+    STAT_LINE="$(cat "/proc/$PID_VALUE/stat" 2>/dev/null)" || return 1
+    read -ra FIELDS <<<"${STAT_LINE##*)}"
+    [ "${#FIELDS[@]}" -ge 1 ] && [ -n "${FIELDS[0]}" ] || return 1
+    printf '%s\n' "${FIELDS[0]}"
+}
+
+# park.json records what the supervisor observed when it made the hold, so a
+# recorded `held: true` is evidence of a past claim, never of a live endpoint:
+# by the time this operator runs the held engine may have exited, its pid may
+# have been recycled onto an unrelated process, or the park deadline may have
+# elapsed, and the record on disk still reads the same. The hold is therefore
+# re-established here from /proc and the clock: the recorded pid must still be
+# the same process by start identity, must not merely be its own unreaped
+# corpse, and must still have park deadline left. One sentence describing the
+# outcome is printed either way; status 0 means the approval window is open at
+# this instant. Anything that cannot be established — no pid, no recorded start
+# identity, unreadable /proc, an unevaluable deadline — is a closed window
+# rather than a hopeful one, because handing a human a dead endpoint costs more
+# than an unnecessary relaunch of the review phase.
+park_hold_status() {
+    local RECORDED="$1" PID_VALUE="$2" START_VALUE="$3"
+    local SINCE="$4" DEADLINE="$5"
+    local CURRENT_IDENTITY="" CURRENT_STATE=""
+    local NOW_EPOCH="" SINCE_EPOCH="" EXPIRES_EPOCH=""
+
+    if [ "$RECORDED" != "true" ]; then
+        printf 'the record itself reports no hold, so no approval window was opened'
+        return 1
+    fi
+    if [ -z "$PID_VALUE" ]; then
+        printf 'the record claims a hold but carries no usable pid, so no holding engine can be established'
+        return 1
+    fi
+    if ! pid_alive "$PID_VALUE"; then
+        printf 'the holding engine (pid %s) is no longer running, so the approval window is closed' \
+            "$PID_VALUE"
+        return 1
+    fi
+    if [ -z "$START_VALUE" ]; then
+        printf 'pid %s is alive but the record carries no start identity, so a recycled pid cannot be ruled out and the window cannot be called live' \
+            "$PID_VALUE"
+        return 1
+    fi
+    CURRENT_IDENTITY="$(proc_identity "$PID_VALUE" 2>/dev/null || true)"
+    if [ -z "$CURRENT_IDENTITY" ]; then
+        printf '/proc cannot supply a current start identity for pid %s, so the hold cannot be confirmed live' \
+            "$PID_VALUE"
+        return 1
+    fi
+    if [ "$CURRENT_IDENTITY" != "$START_VALUE" ]; then
+        printf 'pid %s now names a different process (start identity %s, recorded %s), so the approval window is closed' \
+            "$PID_VALUE" "$CURRENT_IDENTITY" "$START_VALUE"
+        return 1
+    fi
+    CURRENT_STATE="$(proc_state "$PID_VALUE" 2>/dev/null || true)"
+    if [ -z "$CURRENT_STATE" ]; then
+        printf '/proc cannot supply a current state for pid %s, so the hold cannot be confirmed live' \
+            "$PID_VALUE"
+        return 1
+    fi
+    # Z is an exited process still held open by its unreaped exit status; X and
+    # x are one already being torn down. All three keep answering kill(0) and
+    # keep their recorded start identity, and none of them still holds a socket.
+    # A state that is not a single letter is not the kernel's state field at
+    # all, so it decides nothing and the hold stays unconfirmed.
+    case "$CURRENT_STATE" in
+        Z | X | x)
+            printf 'pid %s has already exited (process state %s) and only awaits reaping, so its approval socket is closed and the window with it' \
+                "$PID_VALUE" "$CURRENT_STATE"
+            return 1
+            ;;
+        [A-Za-z]) ;;
+        *)
+            printf '/proc did not yield a readable process state for pid %s, so the hold cannot be confirmed live' \
+                "$PID_VALUE"
+            return 1
+            ;;
+    esac
+
+    NOW_EPOCH="$(date -u +%s 2>/dev/null || true)"
+    case "$NOW_EPOCH" in
+        "" | *[!0-9]*)
+            printf 'the current time could not be read, so the park deadline cannot be checked and the window cannot be called live'
+            return 1
+            ;;
+    esac
+    # The deadline is recorded as the grace in seconds that runs from `since`;
+    # an absolute instant is read as one too, so whichever form the record
+    # carries is evaluated as itself instead of being mistaken for the other.
+    case "$DEADLINE" in
+        "") ;;
+        *[!0-9]*)
+            EXPIRES_EPOCH="$(date -u -d "$DEADLINE" +%s 2>/dev/null || true)"
+            ;;
+        *)
+            if [ -n "$SINCE" ]; then
+                SINCE_EPOCH="$(date -u -d "$SINCE" +%s 2>/dev/null || true)"
+                case "$SINCE_EPOCH" in
+                    "" | *[!0-9]*) SINCE_EPOCH="" ;;
+                esac
+                if [ -n "$SINCE_EPOCH" ]; then
+                    EXPIRES_EPOCH="$((SINCE_EPOCH + DEADLINE))"
+                fi
+            fi
+            ;;
+    esac
+    case "$EXPIRES_EPOCH" in
+        "" | *[!0-9]*)
+            printf 'the park deadline could not be evaluated (since %s, deadline %s), so the window cannot be called live' \
+                "${SINCE:-unrecorded}" "${DEADLINE:-unrecorded}"
+            return 1
+            ;;
+    esac
+    if [ "$NOW_EPOCH" -ge "$EXPIRES_EPOCH" ]; then
+        printf 'the park deadline elapsed %ss ago, so the approval window is closed' \
+            "$((NOW_EPOCH - EXPIRES_EPOCH))"
+        return 1
+    fi
+    printf 'pid %s is running under its recorded start identity and %ss of the park deadline remain, so the approval webhook is live' \
+        "$PID_VALUE" "$((EXPIRES_EPOCH - NOW_EPOCH))"
+    return 0
+}
+
+# At a review park the supervisor writes the engine hold record before the
+# operator runs. Capture it in the harness shell instead of asking the model to
+# infer liveness from an engine log — and re-verify the hold here, because the
+# record says what was true when the park was made, not what is true now. The
+# presented `held` is this re-verification; the record's own claim stays visible
+# as `recorded_held`, and `hold_check` states the basis either way. As with
+# worktree evidence, a present record that cannot be read as an object becomes
+# explicit unavailable evidence rather than failing this handler.
+if [ "$PHASE" = "review" ] && [ -e "$RUN_DIR/state/park.json" ]; then
+    PARK_EVIDENCE="(park record unavailable or malformed)"
+    # One read, so the re-check and the presented lines describe the same
+    # record even if the supervisor replaces it meanwhile.
+    PARK_RECORD="$(cat "$RUN_DIR/state/park.json" 2>/dev/null || true)"
+    if PARK_FIELDS="$(park_record_fields <<<"$PARK_RECORD")"; then
+        IFS=$'\t' read -r \
+            RECORDED_HELD PARK_PID PARK_START PARK_SINCE PARK_DEADLINE \
+            <<<"$PARK_FIELDS" || true
+        # The "-" sentinels stand for columns the record did not usably carry.
+        [ "$PARK_PID" != "-" ] || PARK_PID=""
+        [ "$PARK_START" != "-" ] || PARK_START=""
+        [ "$PARK_SINCE" != "-" ] || PARK_SINCE=""
+        [ "$PARK_DEADLINE" != "-" ] || PARK_DEADLINE=""
+
+        HELD_NOW="false"
+        if HOLD_CHECK="$(
+            park_hold_status "$RECORDED_HELD" "$PARK_PID" "$PARK_START" \
+                "$PARK_SINCE" "$PARK_DEADLINE"
+        )"; then
+            HELD_NOW="true"
+        fi
+        HOLD_CHECKED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        if CAPTURED_PARK_EVIDENCE="$(
+            jq -er \
+                --arg held "$HELD_NOW" \
+                --arg hold_check "$HOLD_CHECK" \
+                --arg hold_checked_at "$HOLD_CHECKED_AT" \
+                '[
+                    "- held: \($held)",
+                    "- recorded_held: \(.held | tojson)",
+                    "- hold_checked_at: \($hold_checked_at)",
+                    "- hold_check: \($hold_check)",
+                    "- approve_url: \(.approve_url | tojson)",
+                    "- approve_command: \(.approve_command | tojson)",
+                    "- pid: \(.pid | tojson)",
+                    "- start_id: \(.start_id | tojson)",
+                    "- deadline: \(.deadline | tojson)",
+                    "- since: \(.since | tojson)",
+                    "- lease_transferred: \(.lease_transferred | tojson)",
+                    "- reason: \(.reason | tojson)"
+                ] | join("\n")' <<<"$PARK_RECORD" 2>/dev/null
+        )" && [ -n "$CAPTURED_PARK_EVIDENCE" ]; then
+            PARK_EVIDENCE="$CAPTURED_PARK_EVIDENCE"
+        fi
+    fi
+    PROMPT="$PROMPT
+
+## Park hold evidence (harness-captured live at operator time)
+
+$PARK_EVIDENCE"
 fi
 
 # The worktrees this operator must inspect are siblings of REPO_ROOT, so the

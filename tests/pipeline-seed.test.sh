@@ -103,7 +103,7 @@ fixture
 mkdir -p "$RUN_PATH/results" "$RUN_PATH/state/stages" "$RUN_PATH/logs"
 printf '%s\n' '{"issue":3,"feature":"old-feature"}' >"$RUN_PATH/plan.json"
 printf '%s\n' "old review" >"$RUN_PATH/results/CR.md"
-for STATE_NAME in run gate pending escalated docs-sync worktree provenance; do
+for STATE_NAME in run gate pending park escalated docs-sync worktree provenance; do
     printf '%s\n' "$STATE_NAME-old" >"$RUN_PATH/state/$STATE_NAME.json"
 done
 printf '%s\n' "plan-stamp-old" >"$RUN_PATH/state/pipeline-plan.stamp"
@@ -126,6 +126,7 @@ ARCHIVED_PATHS=(
     "state/run.json"
     "state/gate.json"
     "state/pending.json"
+    "state/park.json"
     "state/escalated.json"
     "state/docs-sync.json"
     "state/worktree.json"

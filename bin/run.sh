@@ -13,15 +13,17 @@
 # concurrent install.sh --reinstall cannot refresh the tree around a run its
 # liveness scan never saw. Because the run directory is reused across launches
 # of the same issue, it also removes the previous launch's terminal evidence
-# (state/complete.json, state/halted.json) before the engine starts.
+# (state/complete.json, state/halted.json, state/park.json) before the engine
+# starts.
 #
 # Standalone plan, implement, and review launches stamp their phase, supervise
 # fresh disk artifacts rather than buffered engine narration, stop only their
 # own child PID, and publish normalized complete/halted terminal evidence whose
-# correlation ID is read from the fresh artifact that settled the terminal. The
-# pipeline launch deliberately keeps the original bare wait contract: its
-# topology owns phase stamps, artifact supervision, operator verification, and
-# terminal records.
+# correlation ID is read from the fresh artifact that settled the terminal. A
+# parked review transfers that child to a bounded detached reaper instead, so
+# the announced approval webhook remains live. The pipeline launch deliberately
+# keeps the original bare wait contract: its topology owns phase stamps,
+# artifact supervision, operator verification, and terminal records.
 #
 # Promote is a non-engine recovery path. It first fails closed on the existing
 # review CR (an exact PROMOTION_READY line), correlation ID, and review stamp,
@@ -67,6 +69,61 @@ forward_event() {
             >/dev/null 2>&1 8>&- &
 }
 
+write_park_record() {
+    local HELD_VALUE="$1" PID_VALUE="$2" START_ID_VALUE="$3"
+    local DEADLINE_VALUE="$4" LEASE_VALUE="$5" REASON_VALUE="$6"
+    local PARK_FILE="$RUN_DIR/state/park.json"
+    local PARK_TEMP="$PARK_FILE.tmp.$$"
+    local PENDING="$RUN_DIR/state/pending.json"
+    local WATCH="$RUN_DIR/state/docs-sync.json"
+    local APPROVE_URL="http://127.0.0.1:$PORT_APPROVAL/approve"
+    local APPROVE_COMMAND
+    local SINCE
+
+    # The recorded command is meant to be pasted and run verbatim, so the
+    # pending path has to survive as a single shell word: a harness installed
+    # under a path with a space would otherwise split `--data @` across
+    # arguments and curl would post the wrong file (or none). printf %q yields
+    # exactly one word for any path.
+    APPROVE_COMMAND="curl -s -X POST $APPROVE_URL -H 'Content-Type: application/json' --data @$(printf '%q' "$PENDING")"
+    SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq -n \
+        --argjson held "$HELD_VALUE" \
+        --arg issue "$ISSUE" \
+        --arg holder "standalone" \
+        --argjson port "$PORT_APPROVAL" \
+        --arg approve_url "$APPROVE_URL" \
+        --arg approve_command "$APPROVE_COMMAND" \
+        --arg pending "$PENDING" \
+        --argjson pid "$PID_VALUE" \
+        --arg start_id "$START_ID_VALUE" \
+        --arg pid_file "$PID_FILE" \
+        --arg watch "$WATCH" \
+        --argjson deadline "$DEADLINE_VALUE" \
+        --arg since "$SINCE" \
+        --argjson lease_transferred "$LEASE_VALUE" \
+        --arg reason "$REASON_VALUE" \
+        '{
+            held: $held,
+            issue: ($issue | tonumber),
+            phase: "review",
+            holder: $holder,
+            port: $port,
+            approve_url: $approve_url,
+            approve_command: $approve_command,
+            pending: $pending,
+            pid: $pid,
+            start_id: (if $held then $start_id else null end),
+            pid_file: $pid_file,
+            watch: $watch,
+            deadline: $deadline,
+            since: $since,
+            lease_transferred: $lease_transferred,
+            reason: (if $reason == "" then null else $reason end)
+        }' >"$PARK_TEMP"
+    mv "$PARK_TEMP" "$PARK_FILE"
+}
+
 terminal_observation() {
     case "$PHASE:$OUTCOME" in
         plan:ARTIFACT)
@@ -82,7 +139,11 @@ terminal_observation() {
             printf 'a fresh results/CR.md artifact'
             ;;
         review:PARKED)
-            printf 'a fresh state/pending.json artifact'
+            if [ "${PARK_HELD:-false}" = true ]; then
+                printf 'a fresh state/pending.json artifact, and the review engine is deliberately held open so its approval webhook stays live'
+            else
+                printf 'a fresh state/pending.json artifact, but the approval window is already closed'
+            fi
             ;;
         promote:ARTIFACT)
             printf 'an ARTIFACT phase.done result from bin/promote-exec.sh'
@@ -117,7 +178,15 @@ terminal_next_step() {
             printf 'verify the review artifacts first-hand, then run bin/run.sh %s --phase promote' "$ISSUE"
             ;;
         review:PARKED)
-            printf 'inspect state/pending.json, resolve the approval, then run bin/run.sh %s --phase review' "$ISSUE"
+            if [ "${PARK_HELD:-false}" = true ]; then
+                # Same single-shell-word requirement as the recorded command in
+                # write_park_record: the operator pastes this line as-is.
+                printf "curl -s -X POST http://127.0.0.1:%s/approve -H 'Content-Type: application/json' --data @%s; the webhook stays live until that POST or the %ss park deadline; abandoning the park means SIGTERMing recorded engine pid %s" \
+                    "$PORT_APPROVAL" "$(printf '%q' "$RUN_DIR/state/pending.json")" \
+                    "$PARK_DEADLINE" "$PARK_ENGINE_PID"
+            else
+                printf 'inspect state/pending.json, then relaunch bin/run.sh %s --phase review' "$ISSUE"
+            fi
             ;;
         promote:ARTIFACT)
             printf 'inspect the merge evidence and run bin/run.sh --list'
@@ -250,7 +319,9 @@ format_age() {
 list_runs() {
     local LAUNCH RUN_PATH RECORD ISSUE_VALUE SLUG_VALUE PHASE_VALUE
     local PID_VALUE START_VALUE STATUS ENGINES PORTS NEWEST NEWEST_PATH NEWEST_EPOCH
-    local NOW AGE
+    local NOW AGE PARK_FILE PARK_RECORD PARK_HELD_VALUE PARK_PID_VALUE
+    local PARK_START_VALUE PARK_URL_VALUE PARK_SINCE_VALUE PARK_REASON_VALUE
+    local PARK_DETAIL
     local -a LAUNCH_FILES
 
     shopt -s nullglob
@@ -289,6 +360,62 @@ list_runs() {
             STATUS="dead"
         fi
 
+        PARK_DETAIL=""
+        PARK_FILE="$RUN_PATH/state/park.json"
+        if [ -f "$PARK_FILE" ]; then
+            if ! PARK_RECORD="$(jq -er '
+                def nullable_text($name):
+                    .[$name] as $value
+                    | if $value == null or $value == "" then "-"
+                      elif ($value | type) == "string" then $value
+                      else error("\($name) is not text")
+                      end;
+                def park_pid:
+                    .pid as $value
+                    | if $value == null then "-"
+                      elif ($value | type) == "number"
+                          and ($value | floor) == $value
+                          and $value > 0
+                      then ($value | floor | tostring)
+                      else error("pid is not a positive whole number or null")
+                      end;
+                if type != "object" then error("record is not an object") else . end
+                | if (.held | type) != "boolean"
+                    then error("held is not boolean") else . end
+                | if (.approve_url | type) != "string"
+                    then error("approve_url is not text") else . end
+                | if (.since | type) != "string"
+                    then error("since is not text") else . end
+                | [
+                    (.held | tostring),
+                    park_pid,
+                    nullable_text("start_id"),
+                    .approve_url,
+                    .since,
+                    nullable_text("reason")
+                ]
+                | @tsv
+            ' "$PARK_FILE" 2>/dev/null)"; then
+                echo "warning: invalid park metadata: $PARK_FILE" >&2
+            else
+                IFS=$'\t' read -r \
+                    PARK_HELD_VALUE PARK_PID_VALUE PARK_START_VALUE \
+                    PARK_URL_VALUE PARK_SINCE_VALUE PARK_REASON_VALUE \
+                    <<<"$PARK_RECORD"
+                [ "$PARK_PID_VALUE" != "-" ] || PARK_PID_VALUE=""
+                [ "$PARK_START_VALUE" != "-" ] || PARK_START_VALUE=""
+                [ "$PARK_REASON_VALUE" != "-" ] || PARK_REASON_VALUE=""
+                if [ "$PARK_HELD_VALUE" = true ] \
+                    && owner_live "$PARK_PID_VALUE" "$PARK_START_VALUE"; then
+                    STATUS="parked"
+                    PARK_DETAIL="awaiting approval — POST $PARK_URL_VALUE (engine pid $PARK_PID_VALUE, held since $PARK_SINCE_VALUE)"
+                else
+                    [ -n "$PARK_REASON_VALUE" ] || PARK_REASON_VALUE="engine gone"
+                    PARK_DETAIL="park window closed ($PARK_REASON_VALUE) — relaunch bin/run.sh $ISSUE_VALUE --phase review"
+                fi
+            fi
+        fi
+
         NEWEST="$(
             find "$RUN_PATH" -type f \
                 ! -path "$RUN_PATH/logs/*" \
@@ -314,6 +441,9 @@ list_runs() {
         printf '  engines: %s\n' "$ENGINES"
         printf '  ports:   %s\n' "$PORTS"
         printf '  newest:  %s\n' "$NEWEST"
+        if [ -n "$PARK_DETAIL" ]; then
+            printf '  park:    %s\n' "$PARK_DETAIL"
+        fi
     done
 }
 
@@ -471,7 +601,10 @@ if [ "$PHASE" = "promote" ]; then
     fi
 
     mkdir -p "$RUN_DIR/state" "$RUN_DIR/logs" "$RUN_DIR/results"
-    rm -f -- "$RUN_DIR/state/complete.json" "$RUN_DIR/state/halted.json"
+    rm -f -- \
+        "$RUN_DIR/state/complete.json" \
+        "$RUN_DIR/state/halted.json" \
+        "$RUN_DIR/state/park.json"
 
     CHILD_PID=""
     CHILD_REAPED=0
@@ -645,22 +778,57 @@ claim_run_ownership
 install_lock "$ROOT" shared || exit 1
 
 PID_FILE="$RUN_DIR/state/engine.pid"
+EXISTING_LIVE_PID=""
 if [ -f "$PID_FILE" ]; then
     EXISTING_PID="$(head -n 1 "$PID_FILE" 2>/dev/null || true)"
     if pid_alive "$EXISTING_PID"; then
-        echo "error: run $RUN_SLUG is already active with pid $EXISTING_PID; choose a different issue" >&2
-        exit 1
+        EXISTING_LIVE_PID="$EXISTING_PID"
     fi
 fi
 
 mkdir -p "$RUN_DIR/state" "$RUN_DIR/logs" "$RUN_DIR/results"
 
-# A run directory is reused across launches of the same issue, so terminal
-# evidence from the previous launch would otherwise be read as this one's.
-# Invalidate both files here — after the "already active" check, before the
-# engine starts — so a supervisor that finds state/complete.json or
-# state/halted.json is always looking at evidence this launch produced.
-rm -f -- "$RUN_DIR/state/complete.json" "$RUN_DIR/state/halted.json"
+PARK_FILE="$RUN_DIR/state/park.json"
+if [ -f "$PARK_FILE" ]; then
+    PARK_GUARD_RECORD="$(
+        jq -er '
+            if type == "object"
+                and .held == true
+                and (.pid | type) == "number"
+                and (.pid | floor) == .pid
+                and .pid > 0
+                and (.start_id | type) == "string"
+                and (.approve_url | type) == "string"
+            then [(.pid | floor | tostring), .start_id, .approve_url] | @tsv
+            else empty
+            end
+        ' "$PARK_FILE" 2>/dev/null || true
+    )"
+    if [ -n "$PARK_GUARD_RECORD" ]; then
+        IFS=$'\t' read -r PARK_GUARD_PID PARK_GUARD_START PARK_GUARD_URL \
+            <<<"$PARK_GUARD_RECORD"
+        if owner_live "$PARK_GUARD_PID" "$PARK_GUARD_START"; then
+            echo "error: run $RUN_SLUG is parked awaiting approval at $PARK_GUARD_URL with engine pid $PARK_GUARD_PID; the approval port is still leased — POST the pending approval or SIGTERM the recorded engine before relaunching" >&2
+            exit 1
+        fi
+    fi
+fi
+
+if [ -n "$EXISTING_LIVE_PID" ]; then
+    echo "error: run $RUN_SLUG is already active with pid $EXISTING_LIVE_PID; choose a different issue" >&2
+    exit 1
+fi
+
+# A run directory is reused across launches of the same issue, so terminal and
+# park evidence from the previous launch would otherwise be read as this one's.
+# Invalidate all three files here — after the "already active" check, before the
+# engine starts — so a supervisor that finds state/complete.json,
+# state/halted.json, or state/park.json is always looking at evidence this
+# launch produced.
+rm -f -- \
+    "$RUN_DIR/state/complete.json" \
+    "$RUN_DIR/state/halted.json" \
+    "$RUN_DIR/state/park.json"
 
 CHILD_PID=""
 CHILD_REAPED=0
@@ -784,6 +952,9 @@ fi
 # The engine's redirected stdout is buffered, so its narration is never a
 # terminal signal. Freshness is relative to this launch's phase stamp.
 STAMP="$RUN_DIR/state/pipeline-$PHASE.stamp"
+PARK_HELD=false
+PARK_DEADLINE=""
+PARK_ENGINE_PID=""
 fresh() {
     [ -f "$1" ] && [ "$1" -nt "$STAMP" ]
 }
@@ -908,17 +1079,106 @@ if [ "$PHASE" = "review" ] \
         "$DOCS_SYNC_RESULT" >&2
 fi
 
-# Unlike bin/phase-run.sh, this operator entry point remains in the foreground
-# for the entire standalone run. It therefore waits for review docs-sync itself
-# instead of detaching engine-reaper.sh: promote-exec.sh requires docs-sync
-# evidence newer than the review stamp. After that seam, let in-flight sinks
-# narrate briefly, then stop only this launcher's exact child PID.
-if kill -0 "$CHILD_PID" 2>/dev/null; then
-    sleep 5
+if [ "$PHASE" = "review" ] && [ "$OUTCOME" = "PARKED" ]; then
+    PARK_GRACE_DEFAULT=86400
+    PARK_GRACE_MAX=86400
+    PARK_GRACE_RAW="${SIGNALBOX_PARK_GRACE:-$PARK_GRACE_DEFAULT}"
+    if [[ "$PARK_GRACE_RAW" =~ ^[0-9]{1,6}$ ]] \
+        && [ "$((10#$PARK_GRACE_RAW))" -ge 1 ] \
+        && [ "$((10#$PARK_GRACE_RAW))" -le "$PARK_GRACE_MAX" ]; then
+        PARK_GRACE=$((10#$PARK_GRACE_RAW))
+    else
+        printf '[standalone] ignoring invalid SIGNALBOX_PARK_GRACE=%s (expected 1-%s seconds); using %ss\n' \
+            "$PARK_GRACE_RAW" "$PARK_GRACE_MAX" "$PARK_GRACE_DEFAULT" >&2
+        PARK_GRACE=$PARK_GRACE_DEFAULT
+    fi
+
+    PARK_START_ID="$(proc_identity "$CHILD_PID" || true)"
+    PARK_STARTTIME="${PARK_START_ID#*:}"
+    [[ "$PARK_STARTTIME" =~ ^[0-9]+$ ]] || PARK_STARTTIME=""
+    PARK_PROC_STATE="$(awk '{ sub(/^.*\) /, ""); print $1 }' \
+        "/proc/$CHILD_PID/stat" 2>/dev/null || true)"
+
+    if kill -0 "$CHILD_PID" 2>/dev/null \
+        && [ "$PARK_PROC_STATE" != "Z" ] \
+        && [ -n "$PARK_START_ID" ] \
+        && [ -n "$PARK_STARTTIME" ]; then
+        PARK_ENGINE_PID="$CHILD_PID"
+        PARK_DEADLINE="$PARK_GRACE"
+        # Both lock descriptors must be closed in a detached process that
+        # outlives this launcher. Otherwise it would retain either this run's
+        # exclusive launcher claim or the shared harness lock, blocking a later
+        # launcher or install.sh --reinstall after this shell exits.
+        setsid "$(dirname "${BASH_SOURCE[0]}")/engine-reaper.sh" \
+            "$CHILD_PID" "$PID_FILE" "$RUN_DIR/state/docs-sync.json" "$STAMP" \
+            "$PARK_DEADLINE" "$PARK_STARTTIME" \
+            </dev/null >>"$LOG" 2>&1 8>&- 9>&- &
+
+        LEASE_TRANSFERRED=false
+        if "$(dirname "${BASH_SOURCE[0]}")/ports.sh" transfer \
+            "$RUN_SLUG" "$PARK_ENGINE_PID" >/dev/null 2>&1; then
+            LEASE_TRANSFERRED=true
+        else
+            echo "[standalone] port lease could not be transferred to the held engine; the registry entry may be released while the webhook is still listening" >&2
+        fi
+
+        # Spawning the reaper and transferring the lease both take time, and the
+        # engine can exit or be stopped inside that window — a transfer refused
+        # for a dead target is one symptom of exactly that. Only a process that
+        # is still exactly this engine, and still running, may be recorded and
+        # narrated as a held webhook; anything else is a closed park window,
+        # which leaves PARK_HELD false so the launcher reaps below and cleanup
+        # releases the lease it still owns.
+        if engine_running "$PARK_ENGINE_PID" "$PARK_START_ID"; then
+            if [ "$LEASE_TRANSFERRED" = true ]; then
+                # The lease now names the held engine, so this launcher's
+                # cleanup must no longer release it on the way out.
+                LEASED=0
+            fi
+            write_park_record true "$PARK_ENGINE_PID" "$PARK_START_ID" \
+                "$PARK_DEADLINE" "$LEASE_TRANSFERRED" ""
+
+            CHILD_REAPED=1
+            PID_FILE_OWNED=0
+            # This prevents an interactive shell from HUPing the held child as
+            # this launcher exits. The engine still shares its terminal session,
+            # so a park that must outlive that terminal should be launched under
+            # nohup/setsid, as the operator narration explains.
+            disown "$CHILD_PID" 2>/dev/null || true
+            PARK_HELD=true
+            printf '[standalone] review parked; deliberately leaving idle engine pid %s open at http://127.0.0.1:%s/approve for approval (deadline: %ss); use nohup/setsid when the park must outlive this terminal\n' \
+                "$PARK_ENGINE_PID" "$PORT_APPROVAL" "$PARK_DEADLINE" >&2
+        else
+            PARK_REASON="The approval window is closed because the review engine exited while ownership of it was being transferred."
+            write_park_record false null "" null "$LEASE_TRANSFERRED" \
+                "$PARK_REASON"
+            printf '[standalone] %s\n' "$PARK_REASON" >&2
+        fi
+    else
+        if [ -z "$PARK_START_ID" ] || [ -z "$PARK_STARTTIME" ]; then
+            PARK_REASON="The approval window is closed because the review engine identity was unreadable, so a safe deferred handoff was impossible."
+        else
+            PARK_REASON="The approval window is closed because the review engine exited before ownership could be transferred."
+        fi
+        write_park_record false null "" null false "$PARK_REASON"
+        printf '[standalone] %s\n' "$PARK_REASON" >&2
+    fi
 fi
-stop_child
-printf '[standalone] %s engine stopped, outcome: %s\n' \
-    "$PHASE" "$OUTCOME" >&2
+
+if [ "$PARK_HELD" != true ]; then
+    # Unlike bin/phase-run.sh, this operator entry point remains in the
+    # foreground for an ARTIFACT terminal. It therefore waits for review
+    # docs-sync itself instead of detaching engine-reaper.sh: promote-exec.sh
+    # requires docs-sync evidence newer than the review stamp. After that seam,
+    # let in-flight sinks narrate briefly, then stop only this launcher's exact
+    # child PID.
+    if kill -0 "$CHILD_PID" 2>/dev/null; then
+        sleep 5
+    fi
+    stop_child
+    printf '[standalone] %s engine stopped, outcome: %s\n' \
+        "$PHASE" "$OUTCOME" >&2
+fi
 
 case "$OUTCOME" in
     ARTIFACT)

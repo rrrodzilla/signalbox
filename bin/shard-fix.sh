@@ -9,6 +9,11 @@
 # the review request — same thread, round + 1. Worker-tagged like the
 # reviewer so fixes for different shards run concurrently.
 #
+# Each round resolves this shard's complete declared file ownership from the
+# run's plan.json and injects it into the fixer prompt. A failed lookup warns
+# on stderr and falls back to branch-local guidance without changing the event
+# contract or stalling the shard; the review gate remains authoritative.
+#
 # Rounds 2+ resume the fixer's own session (fix_session_id, minted here in
 # round 1) so it can recognize code it wrote in an earlier round instead of
 # patching it blind — the same symmetry with the resumed reviewer thread that
@@ -19,6 +24,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_lang.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_scope.sh"
 
 ME="${1:?worker index}"
 PAYLOAD="$(cat)"
@@ -26,6 +32,37 @@ PAYLOAD="$(cat)"
 
 STAGE_ID="$(jq -r '.stage' <<<"$PAYLOAD")"
 SHARD_ID="$(jq -r '.current.shard' <<<"$PAYLOAD")"
+DECLARED_FILES=""
+OWNERSHIP_SECTION=""
+SCOPE_LOOKUP=""
+if SCOPE_LOOKUP="$(
+    shard_declared_files "$RUN_DIR/plan.json" "$STAGE_ID" "$SHARD_ID" 2>&1
+)"; then
+    DECLARED_FILES="$SCOPE_LOOKUP"
+    OWNERSHIP_SECTION="## Complete set of files this shard may change"$'\n\n'
+    while IFS= read -r DECLARED_PATH || [ -n "$DECLARED_PATH" ]; do
+        OWNERSHIP_SECTION+="- $DECLARED_PATH"$'\n'
+    done <<<"$DECLARED_FILES"
+    OWNERSHIP_RULE="- Edit only the files in the complete ownership list above. Every other
+  file in the repository belongs to a concurrent shard in the same stage, and
+  writing to it collides at the fan-in merge. If the feedback cannot be
+  addressed without another file, make no change and use the SCOPE-CONFLICT
+  response the next rule describes."
+    RESUME_OWNERSHIP="$OWNERSHIP_SECTION
+Files outside this list are off limits."
+else
+    SCOPE_REASON="${SCOPE_LOOKUP//$'\n'/; }"
+    printf '%s\n' \
+        "[shard-fix] $STAGE_ID/$SHARD_ID: ownership lookup failed: $SCOPE_REASON" >&2
+    OWNERSHIP_RULE="- Edit only the files this shard's own branch already created or changed.
+  Anything else belongs to a concurrent shard in the same stage, and writing
+  to it collides at the fan-in merge. If the feedback cannot be addressed
+  without another file, make no change and use the SCOPE-CONFLICT response the
+  next rule describes."
+    RESUME_OWNERSHIP="The declared ownership list is unavailable this round. Edit only the files
+this shard's own branch already created or changed; every other file belongs
+to a concurrent shard in the same stage and is off limits."
+fi
 BRANCH="$(jq -r '.current.branch' <<<"$PAYLOAD")"
 ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 REVIEW="$(jq -r '.review' <<<"$PAYLOAD")"
@@ -55,17 +92,18 @@ is ONE shard of a larger change, on its own git branch in this worktree.
 
 $REVIEW
 
+$OWNERSHIP_SECTION
 ## Rules
 
 - If .claude/docs/ARCHI-rules.md exists here, your changes must conform to it.
 - Address every issue the reviewer raised, with minimal correct changes.
 - $LANG_FIX_RULE
+$OWNERSHIP_RULE
 - If addressing the feedback correctly would require a mechanism this shard's
   scope does not cover, do not build it: make no change and end your reply
   with a line reading SCOPE-CONFLICT followed by one paragraph naming the
   decision required. Raising it is correct; growing an unplanned mechanism one
   exception at a time is not.
-- Only edit the files this shard owns per the review's scope (the files it created or changed).
 - Do not refactor beyond the feedback. Do not add features.
 - Do not run build, test, git, or any other command.
 - Keep tests and doc comments accurate to the new behavior."
@@ -73,6 +111,8 @@ $REVIEW
 RESUME_PROMPT="## Reviewer feedback (round $ROUND)
 
 $REVIEW
+
+$RESUME_OWNERSHIP
 
 This is the same per-shard review loop, continued — the earlier rounds in this
 session are yours. Before editing, check whether this finding sits in code YOU

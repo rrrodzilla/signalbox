@@ -138,14 +138,14 @@ plan.done ─> finisher (configured gate in the integration worktree)
 
 ## Feature audit trails (`correlation_id`)
 
-Every run stamps a `correlation_id` (`<feature>-<timestamp>`) at its entry point (the review loop's seed unwrap, the implement stream's plan seed, which also stamps every stage item since stream-runner emits them verbatim) and it travels **in the payload** through every hop, exactly like `thread_id`. Nothing downstream needs to know it exists: pass-through handlers carry it for free, and the few explicit payload constructors copy it forward.
+The pipeline seed mints one `correlation_id` per run, `pipe-<issue>-<UTC timestamp>`, and `bin/phase-run.sh` passes it to every child engine in `SIGNALBOX_CORRELATION_ID`, so plan, implement, and review all stamp the same id and `bin/audit.sh <id>` returns the whole run. A phase launched directly (`bin/run.sh --phase`, `dev.sh`) has no parent id and mints its own phase-prefixed id: `plan-<issue>-`, `impl-<feature>-`, or `review-<feature>-`; the standalone init topology uses `init-<repo>-`. Every timestamp comes from UTC (`date -u`), so ids minted on one machine are orderable and a non-UTC developer machine no longer produces ids that disagree with a CI run's. The id travels **in the payload** through every hop, exactly like `thread_id`. Nothing downstream needs to know it exists: pass-through handlers carry it for free, and the few explicit payload constructors copy it forward.
 
 The payoff is that Emergent's event store already remembers everything, so the audit trail is one filter, not an instrumentation project. Launcher-created engine names carry the run suffix (`<repo>-pipeline-issue-42`, and likewise for the child engines), which gives each run a separate `socket_path = "auto"` socket and event-store log directory. `bin/audit.sh` discovers both those suffixed engines and the unsuffixed single-run engines:
 
 ```bash
 bin/audit.sh                                              # list correlation ids across every run
-bin/audit.sh demo-greeting-20260726-154029                # full trail across matching engines
-bin/audit.sh --run issue-42 demo-greeting-20260726-154029 # restrict the engine set to one run
+bin/audit.sh pipe-42-20260727-231704                      # full trail across matching engines
+bin/audit.sh --run issue-42 pipe-42-20260727-231704       # restrict the engine set to one run
 ```
 
 The trail spans every engine in scope and prints one line per event: timestamp, topic, source, and the load-bearing payload fields (stage, shard, round, verdict, decision, merge tip). The run's `results/CR.md` and the finisher's gate banner cite the id, so any artifact can be traced back to the exact sequence of events that produced it without mixing attribution between concurrent runs.

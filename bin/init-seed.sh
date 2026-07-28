@@ -6,6 +6,8 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+# shellcheck source=_correlation.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_correlation.sh"
 
 DOCS="$REPO_ROOT/.claude/docs"
 if [ ! -d "$DOCS" ]; then
@@ -13,7 +15,7 @@ if [ ! -d "$DOCS" ]; then
     exit 1
 fi
 
-CID="init-$(basename "$REPO_ROOT")-$(date +%Y%m%d-%H%M%S)"
+CID="$(mint_correlation_id init "$(basename "$REPO_ROOT")")"
 echo "[init-seed] correlation_id: $CID" >&2
 
 jq -n \

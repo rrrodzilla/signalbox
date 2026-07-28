@@ -22,6 +22,17 @@ source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 PAYLOAD="$(cat)"
 PHASE="$(jq -r '.phase' <<<"$PAYLOAD")"
 ISSUE="$(jq -r '.issue' <<<"$PAYLOAD")"
+# The id is only worth forwarding if the phase's own seed will accept it back:
+# the shared inherited_correlation_id (bin/_correlation.sh) takes a string of
+# at most 128 [A-Za-z0-9._-] characters and containing no "..". Anything looser
+# here — a JSON number that jq -r would stringify, or a traversal-shaped id —
+# is forwarded, rejected downstream, and reminted, which is exactly the broken
+# correlation the id exists to prevent.
+CID="$(jq -r 'if (.correlation_id | type) == "string"
+              then .correlation_id else empty end' <<<"$PAYLOAD")"
+if ! [[ "$CID" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || [[ "$CID" == *".."* ]]; then
+    CID=""
+fi
 
 case "$PHASE" in
     plan)      CFG="plan.toml";      TIMEOUT=2400 ;;
@@ -76,7 +87,11 @@ trap stop_engine EXIT
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
+# The pipeline mints one id per run and every phase engine stamps that same id,
+# so bin/audit.sh <id> reconstructs the whole run (issue #42). A phase launched
+# directly by bin/run.sh --phase gets no id here and mints a phase-prefixed one.
 SIGNALBOX_ISSUE="$ISSUE" SIGNALBOX_RUN_SLUG="$RUN_SLUG" \
+    SIGNALBOX_CORRELATION_ID="$CID" \
     emergent --config "$CONFIG" >"$LOG" 2>&1 &
 PID=$!
 printf '%s\n' "$PID" >"$PID_FILE"

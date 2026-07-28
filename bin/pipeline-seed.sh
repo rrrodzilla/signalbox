@@ -10,6 +10,8 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+# shellcheck source=_correlation.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_correlation.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 ISSUE="${SIGNALBOX_ISSUE:?set SIGNALBOX_ISSUE=<issue-number> when launching the engine}"
@@ -20,7 +22,9 @@ if [ ! -d "$DOCS" ] || [ ! -f "$DOCS/ARCHI.md" ]; then
     exit 1
 fi
 
-CID="pipe-$ISSUE-$(date +%Y%m%d-%H%M%S)"
+# The pipeline seed mints the run key; phase-run.sh hands it to every child
+# engine so one correlation id covers the whole run.
+CID="$(mint_correlation_id pipe "$ISSUE")"
 mkdir -p "$RUN_DIR/state" "$RUN_DIR/logs" "$RUN_DIR/results"
 
 ARCHIVE_PATHS=(
@@ -53,7 +57,7 @@ if [ "${#PRIOR_PATHS[@]}" -gt 0 ]; then
             "$RUN_DIR/state/pipeline.json" 2>/dev/null || true
     )"
     if [ -z "$PRIOR_ID" ] || [[ ! "$PRIOR_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
-        PRIOR_ID="prev-$(date -u +%Y%m%d-%H%M%S)"
+        PRIOR_ID="prev-$(correlation_stamp)"
     fi
 
     ARCHIVE_ID="$PRIOR_ID"

@@ -24,10 +24,13 @@ path = "~/.local/share/emergent/primitives/bin/exec-source"
 args = ["--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/seed.sh"]
 publishes = ["exec.output"]
 
+# jq's clock formatting is always UTC while seed scripts stamped local time, so
+# one run minted two indistinguishable ids (issue #42). bin/seed.sh is now the
+# sole generator; this handler only unwraps the envelope.
 [[handlers]]
 name = "unwrap-seed"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "exec.output", "--publish-as", "review.requested", "--", "jq", "-c", ".stdout | fromjson | . + {correlation_id: (.feature + \"-\" + (now | strftime(\"%Y%m%d-%H%M%S\")))}"]
+args = ["-s", "exec.output", "--publish-as", "review.requested", "--", "jq", "-c", ".stdout | fromjson"]
 subscribes = ["exec.output"]
 publishes = ["review.requested"]
 

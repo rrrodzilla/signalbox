@@ -7,6 +7,8 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+# shellcheck source=_correlation.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_correlation.sh"
 
 ISSUE="${SIGNALBOX_ISSUE:?set SIGNALBOX_ISSUE=<issue-number> when launching the engine}"
 
@@ -26,7 +28,9 @@ for n in $(jq -r '.body' <<<"$CONTEXT" | grep -oiE 'blocked by[^#]*#[0-9]+' | gr
     BLOCKERS="$(jq -c --argjson b "$B" '. + [$b]' <<<"$BLOCKERS")"
 done
 
-CID="plan-$ISSUE-$(date +%Y%m%d-%H%M%S)"
+# Use the pipeline's id when the phase runner supplied one; a direct launch
+# mints its own plan-prefixed UTC id.
+CID="$(resolve_correlation_id plan "$ISSUE")"
 echo "[plan-request] issue #$ISSUE, $(jq 'length' <<<"$BLOCKERS") blocker(s), correlation_id: $CID" >&2
 
 jq -n \

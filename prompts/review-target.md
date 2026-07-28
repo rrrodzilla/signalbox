@@ -9,8 +9,7 @@ under review.
 
 ## In scope
 
-- Panics reachable from non-test code (`unwrap`, `expect`, indexing, slicing,
-  division, arithmetic overflow) introduced or made reachable by this diff
+- __SIGNALBOX_LANG_PANICS__ introduced or made reachable by this diff
 - Wrong results on valid input; unhandled edge cases the diff introduces
 - Behavior that contradicts the doc comments, commit messages, or test names
   in the diff

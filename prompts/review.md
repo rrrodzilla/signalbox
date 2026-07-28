@@ -1,10 +1,10 @@
 # Code Review — correctness only
 
-Review the Rust crate in the current directory. Read every file under `src/` fully before judging.
+Review __SIGNALBOX_LANG_SUBJECT__. Read __SIGNALBOX_LANG_SOURCE_SCOPE__ fully before judging.
 
 ## In scope
 
-- Panics reachable from library code (`unwrap`, `expect`, indexing, division, arithmetic overflow)
+- __SIGNALBOX_LANG_PANICS__
 - Wrong results on valid input; unhandled edge cases (empty input, missing separators, duplicate separators)
 - Behavior that contradicts the doc comments
 

@@ -12,6 +12,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # either length rather than failing correct output from a SHA-256 repository.
 OID_RE='[0-9a-fA-F]{40}|[0-9a-fA-F]{64}'
 FIXTURES=()
+CHILD_PIDS=()
 TESTS_RUN=0
 TESTS_PASSED=0
 RUN_STATUS=0
@@ -27,14 +28,59 @@ ARGV_CAPTURE=""
 PROMPT_CAPTURE=""
 SUBJECT_STDOUT=""
 SUBJECT_STDERR=""
+SPAWNED_PID=""
+APPROVE_URL="http://127.0.0.1:8240/approve"
+APPROVE_COMMAND="curl -s -X POST $APPROVE_URL -H 'Content-Type: application/json' --data @/fixture/state/pending.json"
 
 cleanup() {
-    local FIXTURE
+    local FIXTURE PID_VALUE
+    for PID_VALUE in ${CHILD_PIDS[@]+"${CHILD_PIDS[@]}"}; do
+        kill "$PID_VALUE" 2>/dev/null || true
+        wait "$PID_VALUE" 2>/dev/null || true
+    done
     for FIXTURE in "${FIXTURES[@]}"; do
         rm -rf -- "$FIXTURE"
     done
 }
 trap cleanup EXIT
+
+# The park cases assert on a hold the operator re-checks against /proc and the
+# clock, so they need real processes rather than invented pids: a live child
+# whose start identity can be recorded exactly, and one that has exited.
+# shellcheck source=../bin/_liveness.sh
+source "$ROOT/bin/_liveness.sh"
+
+spawn_child() {
+    sleep 300 &
+    SPAWNED_PID=$!
+    CHILD_PIDS+=("$SPAWNED_PID")
+}
+
+# A park record as the supervisor writes one, dated now so the deadline it
+# carries has not elapsed.
+park_record() {
+    local HELD="$1" PID_VALUE="$2" START_VALUE="$3" DEADLINE="$4"
+
+    jq -n \
+        --argjson held "$HELD" \
+        --arg approve_url "$APPROVE_URL" \
+        --arg approve_command "$APPROVE_COMMAND" \
+        --argjson pid "${PID_VALUE:-null}" \
+        --arg start_id "$START_VALUE" \
+        --argjson deadline "$DEADLINE" \
+        --arg since "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{
+            held: $held,
+            approve_url: $approve_url,
+            approve_command: $approve_command,
+            pid: $pid,
+            start_id: $start_id,
+            deadline: $deadline,
+            since: $since,
+            lease_transferred: $held,
+            reason: null
+        }' >"$RUN_DIR_PATH/state/park.json"
+}
 
 fixture() {
     local DIR
@@ -81,6 +127,7 @@ setup_harness() {
     cp "$ROOT/bin/operator.sh" "$CASE_ROOT/bin/operator.sh"
     cp "$ROOT/bin/worktree-evidence.sh" "$CASE_ROOT/bin/worktree-evidence.sh"
     cp "$ROOT/bin/_provenance.sh" "$CASE_ROOT/bin/_provenance.sh"
+    cp "$ROOT/bin/_liveness.sh" "$CASE_ROOT/bin/_liveness.sh"
 
     cat >"$CASE_ROOT/bin/_env.sh" <<EOF
 # Fixture-local constants. Sourced, not executed.
@@ -460,40 +507,91 @@ report_case "unparseable model output fails safe to HALT" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 200 "$SUBJECT_STDOUT")"
 
 # 6. Park hold evidence is captured by the harness at review time, not inferred
-# from the engine log. A live hold exposes the exact endpoint, command, PID,
-# and human-scaled deadline without adding any permission grant.
+# from the engine log — and a hold is presented as live only when the recorded
+# engine is still that exact running process and its deadline has time left.
+# The live case exposes the exact endpoint, command, PID, and human-scaled
+# deadline without adding any permission grant.
 setup_harness
-APPROVE_URL="http://127.0.0.1:8240/approve"
-APPROVE_COMMAND="curl -s -X POST $APPROVE_URL -H 'Content-Type: application/json' --data @/fixture/state/pending.json"
-jq -n \
-    --arg approve_url "$APPROVE_URL" \
-    --arg approve_command "$APPROVE_COMMAND" \
-    '{
-        held: true,
-        approve_url: $approve_url,
-        approve_command: $approve_command,
-        pid: 12345,
-        deadline: 86400,
-        since: "2026-07-27T23:42:35Z",
-        lease_transferred: true,
-        reason: null
-    }' >"$RUN_DIR_PATH/state/park.json"
+spawn_child
+LIVE_PARK_PID="$SPAWNED_PID"
+LIVE_PARK_ID="$(proc_identity "$LIVE_PARK_PID")"
+park_record true "$LIVE_PARK_PID" "$LIVE_PARK_ID" 86400
 run_operator "review" "$PROCEED_OUTPUT"
 OK=1
 if grep -Fx \
         '## Park hold evidence (harness-captured live at operator time)' \
         "$PROMPT_CAPTURE" >/dev/null \
     && grep -Fx -- '- held: true' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- recorded_held: true' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -F -- '- hold_check: pid '"$LIVE_PARK_PID"' is running under its recorded start identity' \
+        "$PROMPT_CAPTURE" >/dev/null \
     && grep -Fx -- "- approve_url: \"$APPROVE_URL\"" \
         "$PROMPT_CAPTURE" >/dev/null \
     && grep -Fx -- "- approve_command: \"$APPROVE_COMMAND\"" \
         "$PROMPT_CAPTURE" >/dev/null \
-    && grep -Fx -- '- pid: 12345' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- "- pid: $LIVE_PARK_PID" "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- "- start_id: \"$LIVE_PARK_ID\"" "$PROMPT_CAPTURE" >/dev/null \
     && grep -Fx -- '- deadline: 86400' "$PROMPT_CAPTURE" >/dev/null \
     && valid_proceed_payload; then
     OK=0
 fi
 report_case "review injects the live park hold record" "$OK" \
+    "status=$RUN_STATUS prompt=$(tail -n 16 "$PROMPT_CAPTURE" | tr '\n' ' ')"
+
+# 6a. A recorded hold whose engine has exited is a closed window, however
+# confidently the record still claims otherwise: the recorded claim stays
+# visible, but the presented hold is the harness's own re-check.
+setup_harness
+spawn_child
+DEAD_PARK_PID="$SPAWNED_PID"
+DEAD_PARK_ID="$(proc_identity "$DEAD_PARK_PID")"
+kill "$DEAD_PARK_PID" 2>/dev/null || true
+wait "$DEAD_PARK_PID" 2>/dev/null || true
+park_record true "$DEAD_PARK_PID" "$DEAD_PARK_ID" 86400
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if grep -Fx -- '- held: false' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- recorded_held: true' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -F -- 'is no longer running, so the approval window is closed' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "an exited engine is presented as a closed window" "$OK" \
+    "status=$RUN_STATUS prompt=$(tail -n 16 "$PROMPT_CAPTURE" | tr '\n' ' ')"
+
+# 6b. A live engine whose park deadline has already run out is equally closed:
+# liveness alone never makes the approval webhook reachable.
+setup_harness
+spawn_child
+EXPIRED_PARK_PID="$SPAWNED_PID"
+EXPIRED_PARK_ID="$(proc_identity "$EXPIRED_PARK_PID")"
+park_record true "$EXPIRED_PARK_PID" "$EXPIRED_PARK_ID" 0
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if grep -Fx -- '- held: false' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- recorded_held: true' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -F -- 'the park deadline elapsed' "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "an elapsed deadline is presented as a closed window" "$OK" \
+    "status=$RUN_STATUS prompt=$(tail -n 16 "$PROMPT_CAPTURE" | tr '\n' ' ')"
+
+# 6c. A hold recorded without a start identity cannot be told apart from a
+# recycled pid, so it is not presented as live even while that pid runs.
+setup_harness
+spawn_child
+UNIDENTIFIED_PARK_PID="$SPAWNED_PID"
+park_record true "$UNIDENTIFIED_PARK_PID" "" 86400
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if grep -Fx -- '- held: false' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -F -- 'carries no start identity' "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "a hold without a start identity is never called live" "$OK" \
     "status=$RUN_STATUS prompt=$(tail -n 16 "$PROMPT_CAPTURE" | tr '\n' ' ')"
 
 # 7. A declined hold is still evidence: the operator must receive the recorded
@@ -504,6 +602,7 @@ jq -n '{
     approve_url: "http://127.0.0.1:8240/approve",
     approve_command: "dead command",
     pid: null,
+    start_id: null,
     deadline: null,
     since: "2026-07-27T23:42:35Z",
     lease_transferred: false,
@@ -512,6 +611,7 @@ jq -n '{
 run_operator "review" "$PROCEED_OUTPUT"
 OK=1
 if grep -Fx -- '- held: false' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- recorded_held: false' "$PROMPT_CAPTURE" >/dev/null \
     && grep -Fx -- '- reason: "engine identity was unreadable"' \
         "$PROMPT_CAPTURE" >/dev/null \
     && valid_proceed_payload; then

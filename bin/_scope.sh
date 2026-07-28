@@ -23,8 +23,7 @@
 #   scope_report <shard-id> <declared-newline-list> <violations-newline-list>
 #     Print a Markdown shard-scope violation report. Return 64 unless given
 #     exactly three arguments, 1 with a `[scope]` diagnostic when the report
-#     cannot be written, and 0 otherwise. The report is written whole or not
-#     at all.
+#     cannot be written, and 0 otherwise.
 # shellcheck shell=bash
 
 shard_declared_files() {

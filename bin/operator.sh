@@ -4,14 +4,21 @@
 #
 # Headless Opus applies the phantom-run discipline as topology: never trust
 # the runner's outcome, verify the phase's disk artifacts first-hand, then
-# PROCEED or HALT. Review and promote prompts include harness-captured live
-# integration-worktree evidence; implement prompts include the harness-captured
-# live branch comparison. Fail-safe: an unparseable verdict is a HALT
-# — when the operator can't be understood, the pipeline stops.
+# PROCEED or HALT. Review and implement prompts carry harness-captured branch
+# evidence including tip-pinned file content identity, and the operator is
+# granted exact `git show <tip>:<path>` reads for those files. Review and
+# promote also carry live integration-worktree evidence. Fail-safe: an
+# unparseable verdict is a HALT — when the operator can't be understood, the
+# pipeline stops.
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
+
+# Bound prompt and permission-rule growth when a branch changes many files.
+TIP_FILES_LIMIT=40
+# Avoid streaming arbitrarily large blobs merely to count their lines.
+TIP_FILE_MAX_BYTES=1048576
 
 PAYLOAD="$(cat)"
 PHASE="$(jq -r '.phase' <<<"$PAYLOAD")"
@@ -128,6 +135,50 @@ case "$BASE_BRANCH" in
     *) SAFE_BASE="$BASE_BRANCH" ;;
 esac
 
+# A permission rule is one exact command string, so a path carrying whitespace,
+# quotes, `;`, `&`, or `$(...)` has no safe spelling inside it. Such files still
+# appear in evidence, but receive no injectable permission grant.
+plain_path_token() {
+    local PATH_TOKEN="$1"
+
+    case "$PATH_TOKEN" in
+        "" | -* | /* | *..* | *[!A-Za-z0-9._/-]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# Git imposes no encoding on a pathname — any byte but NUL and `/` is legal —
+# while jq speaks UTF-8 and its --arg replaces every byte that is not part of a
+# valid sequence with U+FFFD. Two distinct paths differing only in such bytes
+# would therefore publish as one identical string, so the evidence's exact-path
+# claim would be false precisely where it matters: one real file would be
+# described twice and the other not at all. This emits the path fields for one
+# entry, so every published path stays reversible to the bytes git holds.
+#
+# The test is a round trip through jq itself rather than any separate notion of
+# validity: jq is the encoder whose fidelity is in question, so nothing else can
+# be authoritative about what survives it. The sentinel is what makes the
+# comparison exact — command substitution strips trailing newlines, and a path
+# may end in one — so only a genuine substitution reads as a mismatch. A path
+# that survives is published literally under `path`; one that does not is
+# published as base64 of its exact bytes under `path_base64`, marked by
+# `path_encoding` so a reader knows which field it is holding and can invert it.
+# Both forms are published output only: every git lookup uses the raw value.
+path_fields() {
+    local RAW="$1"
+    local ROUND_TRIP=""
+
+    ROUND_TRIP="$(jq -nr --arg path "$RAW" '$path + "."' 2>/dev/null || true)"
+    if [ "$ROUND_TRIP" = "$RAW." ]; then
+        jq -nc --arg path "$RAW" '{path: $path}'
+        return 0
+    fi
+    jq -nc \
+        --arg path_base64 "$(printf '%s' "$RAW" | base64 | tr -d '\n')" \
+        --arg path_encoding "base64" \
+        '{path_base64: $path_base64, path_encoding: $path_encoding}'
+}
+
 # The implement terminal's two mandatory checks — at least one shard commit,
 # and a diff confined to plan.json's declared files — are both ref-bearing, and
 # a rule is one exact command string. A base branch spelled with `;`, `&`, or
@@ -149,8 +200,25 @@ branch_evidence() {
     local BRANCH_TIP=""
     local BRANCH_SHORT=""
     local COMMITS=""
-    local FILES=""
+    local FILES_JSON="[]"
     local DIFFSTAT=""
+    local FILE_COUNT=0
+    local FILE_PATH=""
+    local PATH_FIELDS=""
+    local ENTRY_META=""
+    local ENTRY_TYPE=""
+    local ENTRY_OID=""
+    local BLOB=""
+    local SIZE=""
+    local LINES=""
+    local LINES_JSON="null"
+    local PINNED_READ=""
+    local ENTRY=""
+    local TIP_FILES="[]"
+    local TIP_FILES_TRUNCATED="false"
+    local -a CHANGED_PATHS=()
+    local -a FILE_PATH_OBJECTS=()
+    local -a TIP_FILE_OBJECTS=()
 
     if ! BASE_TIP="$(
         git -C "$REPO_ROOT" rev-parse --verify --quiet \
@@ -178,11 +246,11 @@ branch_evidence() {
     fi
     if ! COMMITS="$(
         git -C "$REPO_ROOT" log --oneline "$BASE_TIP..$BRANCH_TIP" 2>/dev/null
-    )" || ! FILES="$(
-        git -C "$REPO_ROOT" diff --name-only "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
     )" || ! DIFFSTAT="$(
-        git -C "$REPO_ROOT" diff --stat "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
-    )"; then
+        git -C "$REPO_ROOT" -c core.quotePath=false \
+            diff --stat "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
+    )" || ! git -C "$REPO_ROOT" diff --name-only -z \
+        "$BASE_TIP...$BRANCH_TIP" >/dev/null 2>&1; then
         jq -nc \
             --arg base "$BASE" \
             --arg branch "$BRANCH" \
@@ -196,6 +264,169 @@ branch_evidence() {
         git -C "$REPO_ROOT" rev-parse --short "$BRANCH_TIP" 2>/dev/null || true
     )"
 
+    # Only -z lists paths verbatim. Line-delimited --name-only C-quotes any path
+    # carrying a quote, a backslash, a tab, or a newline (core.quotePath governs
+    # non-ASCII alone), and that spelling is not the tree's path: the lookup
+    # below would miss and call a real file absent, while the published list
+    # would name paths the branch does not contain. Command substitution cannot
+    # carry NUL bytes, so the records are read straight into an array, and every
+    # later use is built from those exact values. The probe above is what proves
+    # git could compare at all: a process substitution would hide git's exit
+    # status behind mapfile's own.
+    mapfile -t -d '' CHANGED_PATHS < <(
+        git -C "$REPO_ROOT" diff --name-only -z \
+            "$BASE_TIP...$BRANCH_TIP" 2>/dev/null
+    )
+
+    for FILE_PATH in ${CHANGED_PATHS[@]+"${CHANGED_PATHS[@]}"}; do
+        [ -n "$FILE_PATH" ] || continue
+        # The published list is encoded from the exact delimited value rather
+        # than re-split out of a rendering, so it stays the tree's own paths. A
+        # path jq can carry verbatim stays a bare string here, as the file set
+        # has always read; one it cannot becomes the same marked object the tip
+        # entries use, which is what keeps two such paths distinguishable.
+        PATH_FIELDS="$(path_fields "$FILE_PATH")"
+        FILE_PATH_OBJECTS+=("$(
+            jq -c 'if has("path") then .path else . end' <<<"$PATH_FIELDS"
+        )")
+        FILE_COUNT=$((FILE_COUNT + 1))
+        if [ "$FILE_COUNT" -gt "$TIP_FILES_LIMIT" ]; then
+            continue
+        fi
+
+        # The tree entry's own type decides what may be claimed about it. A
+        # gitlink is a present entry whose target commit normally lives in the
+        # submodule's object store rather than this one, so questioning the
+        # object database about it reads as absence; only a blob has a size, a
+        # line count, or content a pinned read can return. The pathspec is read
+        # against the whole tree, matching the diff's root-relative paths, and
+        # forced literal so a path carrying `*`, `?`, or `[` describes itself
+        # instead of matching its neighbours.
+        ENTRY_META=""
+        if ! ENTRY_META="$(
+            GIT_LITERAL_PATHSPECS=1 git -C "$REPO_ROOT" ls-tree \
+                --full-tree "$BRANCH_TIP" -- "$FILE_PATH" 2>/dev/null
+        )" || [ -z "$ENTRY_META" ]; then
+            TIP_FILE_OBJECTS+=("$(
+                jq -nc \
+                    --argjson path_fields "$PATH_FIELDS" \
+                    --argjson present false \
+                    '$path_fields + {present: $present}'
+            )")
+            continue
+        fi
+        # `<mode> SP <type> SP <object> TAB <path>`; the path is already known,
+        # and is the only field ls-tree may quote, so it is discarded here.
+        ENTRY_TYPE=""
+        ENTRY_OID=""
+        read -r _ ENTRY_TYPE ENTRY_OID <<<"${ENTRY_META%%$'\t'*}"
+
+        case "$ENTRY_TYPE" in
+            blob) ;;
+            commit)
+                TIP_FILE_OBJECTS+=("$(
+                    jq -nc \
+                        --argjson path_fields "$PATH_FIELDS" \
+                        --argjson present true \
+                        --arg type "gitlink" \
+                        --arg commit "$ENTRY_OID" \
+                        '$path_fields + {
+                            present: $present,
+                            type: $type,
+                            commit: $commit
+                        }'
+                )")
+                continue
+                ;;
+            *)
+                TIP_FILE_OBJECTS+=("$(
+                    jq -nc \
+                        --argjson path_fields "$PATH_FIELDS" \
+                        --argjson present true \
+                        --arg type "$ENTRY_TYPE" \
+                        '$path_fields + {present: $present, type: $type}'
+                )")
+                continue
+                ;;
+        esac
+
+        BLOB="$ENTRY_OID"
+        SIZE=""
+        if ! SIZE="$(
+            git -C "$REPO_ROOT" cat-file -s "$BLOB" 2>/dev/null
+        )"; then
+            # The entry is in the tree, so it is present whatever the object
+            # database can still say about it; it simply has no measurable size.
+            TIP_FILE_OBJECTS+=("$(
+                jq -nc \
+                    --argjson path_fields "$PATH_FIELDS" \
+                    --argjson present true \
+                    --arg type "blob" \
+                    --arg blob "$BLOB" \
+                    '$path_fields + {
+                        present: $present,
+                        type: $type,
+                        blob: $blob
+                    }'
+            )")
+            continue
+        fi
+
+        LINES_JSON="null"
+        if [ "$SIZE" -le "$TIP_FILE_MAX_BYTES" ]; then
+            LINES=""
+            if LINES="$(
+                git -C "$REPO_ROOT" show "$BRANCH_TIP:$FILE_PATH" 2>/dev/null \
+                    | wc -l
+            )"; then
+                LINES="${LINES//[[:space:]]/}"
+                case "$LINES" in
+                    "" | *[!0-9]*) ;;
+                    *) LINES_JSON="$LINES" ;;
+                esac
+            fi
+        fi
+
+        PINNED_READ=""
+        if plain_path_token "$FILE_PATH"; then
+            PINNED_READ="git show $BRANCH_TIP:$FILE_PATH"
+        fi
+        ENTRY="$(
+            jq -nc \
+                --argjson path_fields "$PATH_FIELDS" \
+                --argjson present true \
+                --arg type "blob" \
+                --arg blob "$BLOB" \
+                --argjson size "$SIZE" \
+                --argjson lines "$LINES_JSON" \
+                --arg pinned_read "$PINNED_READ" \
+                '$path_fields + {
+                    present: $present,
+                    type: $type,
+                    blob: $blob,
+                    size: $size,
+                    lines: $lines
+                } + if $pinned_read == "" then {}
+                    else {pinned_read: $pinned_read}
+                    end'
+        )"
+        TIP_FILE_OBJECTS+=("$ENTRY")
+    done
+
+    if [ "${#FILE_PATH_OBJECTS[@]}" -gt 0 ]; then
+        FILES_JSON="$(
+            printf '%s\n' "${FILE_PATH_OBJECTS[@]}" | jq -sc '.'
+        )"
+    fi
+    if [ "${#TIP_FILE_OBJECTS[@]}" -gt 0 ]; then
+        TIP_FILES="$(
+            printf '%s\n' "${TIP_FILE_OBJECTS[@]}" | jq -sc '.'
+        )"
+    fi
+    if [ "$FILE_COUNT" -gt "$TIP_FILES_LIMIT" ]; then
+        TIP_FILES_TRUNCATED="true"
+    fi
+
     jq -nc \
         --arg base "$BASE" \
         --arg branch "$BRANCH" \
@@ -204,8 +435,11 @@ branch_evidence() {
         --arg branch_tip "$BRANCH_TIP" \
         --arg branch_tip_short "$BRANCH_SHORT" \
         --arg commits "$COMMITS" \
-        --arg files "$FILES" \
+        --argjson files "$FILES_JSON" \
         --arg diffstat "$DIFFSTAT" \
+        --argjson tip_files "$TIP_FILES" \
+        --argjson tip_files_truncated "$TIP_FILES_TRUNCATED" \
+        --argjson tip_files_limit "$TIP_FILES_LIMIT" \
         '{
             base: $base,
             branch: $branch,
@@ -214,12 +448,17 @@ branch_evidence() {
             branch_tip: $branch_tip,
             branch_tip_short: $branch_tip_short,
             commits: ($commits | split("\n") | map(select(length > 0))),
-            files: ($files | split("\n") | map(select(length > 0))),
-            diffstat: $diffstat
+            files: $files,
+            diffstat: $diffstat,
+            tip_files: $tip_files,
+            tip_files_truncated: $tip_files_truncated,
+            tip_files_limit: $tip_files_limit
         }'
 }
 
-if [ "$PHASE" = "implement" ] && [ -n "$FEATURE_BRANCH" ]; then
+BRANCH_EVIDENCE=""
+if { [ "$PHASE" = "implement" ] || [ "$PHASE" = "review" ]; } \
+    && [ -n "$FEATURE_BRANCH" ]; then
     BRANCH_EVIDENCE="$(branch_evidence "$BASE_BRANCH" "$FEATURE_BRANCH")"
     BRANCH_CAPTURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     PROMPT="$PROMPT
@@ -258,6 +497,15 @@ if [ -n "$FEATURE_BRANCH" ]; then
 fi
 if [ -n "$INT_WT_STATUS_CMD" ]; then
     GIT_TOOLS+=("Bash($INT_WT_STATUS_CMD)")
+fi
+if [ -n "$BRANCH_EVIDENCE" ]; then
+    while IFS= read -r PINNED_READ; do
+        [ -n "$PINNED_READ" ] || continue
+        GIT_TOOLS+=("Bash($PINNED_READ)")
+    done < <(
+        jq -r '.tip_files[]? | .pinned_read // empty' \
+            <<<"$BRANCH_EVIDENCE" 2>/dev/null || true
+    )
 fi
 
 # Test-only binary seam for tests/operator-evidence.test.sh; production keeps

@@ -74,8 +74,11 @@ if [ -n "$VIOLATIONS" ]; then
             "[shard-review] cannot build scope report for stage $STAGE_ID shard $SHARD_ID" >&2
         exit 1
     fi
+    # --literal-pathspecs: violating paths are filenames, not patterns, so a
+    # valid name containing *, ?, [] or : must not widen or fail the diff.
     if ! OFFENDING_DIFF="$(
-        git -C "$WT" diff "$INT_BRANCH"...HEAD -- "${VIOLATING_PATHS[@]}"
+        git -C "$WT" --literal-pathspecs diff "$INT_BRANCH"...HEAD \
+            -- "${VIOLATING_PATHS[@]}"
     )"; then
         printf '%s\n' \
             "[shard-review] cannot render offending diff for stage $STAGE_ID shard $SHARD_ID" >&2

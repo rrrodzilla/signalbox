@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Self-contained test runner for bin/operator.sh's worktree-evidence seam and
-# read-only git grants. Every harness and git repository lives in its own
-# mktemp -d; the model is always a local stub, so no repository or network
-# state is touched. Prints PASS/FAIL per case and exits non-zero on failure.
+# Self-contained test runner for bin/operator.sh's harness-captured worktree,
+# branch, and park-hold evidence plus read-only git grants. Every harness and
+# git repository lives in its own mktemp -d; the model is always a local stub,
+# so no repository or network state is touched. Prints PASS/FAIL per case and
+# exits non-zero on failure.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -458,7 +459,124 @@ fi
 report_case "unparseable model output fails safe to HALT" "$OK" \
     "status=$RUN_STATUS stdout=$(head -c 200 "$SUBJECT_STDOUT")"
 
-# 6. Read-only git rules are invariant across all phases: every granted git
+# 6. Park hold evidence is captured by the harness at review time, not inferred
+# from the engine log. A live hold exposes the exact endpoint, command, PID,
+# and human-scaled deadline without adding any permission grant.
+setup_harness
+APPROVE_URL="http://127.0.0.1:8240/approve"
+APPROVE_COMMAND="curl -s -X POST $APPROVE_URL -H 'Content-Type: application/json' --data @/fixture/state/pending.json"
+jq -n \
+    --arg approve_url "$APPROVE_URL" \
+    --arg approve_command "$APPROVE_COMMAND" \
+    '{
+        held: true,
+        approve_url: $approve_url,
+        approve_command: $approve_command,
+        pid: 12345,
+        deadline: 86400,
+        since: "2026-07-27T23:42:35Z",
+        lease_transferred: true,
+        reason: null
+    }' >"$RUN_DIR_PATH/state/park.json"
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if grep -Fx \
+        '## Park hold evidence (harness-captured live at operator time)' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- held: true' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- "- approve_url: \"$APPROVE_URL\"" \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- "- approve_command: \"$APPROVE_COMMAND\"" \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- pid: 12345' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- deadline: 86400' "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "review injects the live park hold record" "$OK" \
+    "status=$RUN_STATUS prompt=$(tail -n 16 "$PROMPT_CAPTURE" | tr '\n' ' ')"
+
+# 7. A declined hold is still evidence: the operator must receive the recorded
+# closed-window reason instead of repeating a dead endpoint from narration.
+setup_harness
+jq -n '{
+    held: false,
+    approve_url: "http://127.0.0.1:8240/approve",
+    approve_command: "dead command",
+    pid: null,
+    deadline: null,
+    since: "2026-07-27T23:42:35Z",
+    lease_transferred: false,
+    reason: "engine identity was unreadable"
+}' >"$RUN_DIR_PATH/state/park.json"
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if grep -Fx -- '- held: false' "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx -- '- reason: "engine identity was unreadable"' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "review injects a declined hold and its closed-window reason" \
+    "$OK" "status=$RUN_STATUS"
+
+# 8. A torn record must become explicit negative input while normal operator
+# verdict parsing continues unaffected.
+setup_harness
+printf '%s\n' '{"held": true, "approve_url":' \
+    >"$RUN_DIR_PATH/state/park.json"
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if grep -Fx \
+        '## Park hold evidence (harness-captured live at operator time)' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && grep -Fx '(park record unavailable or malformed)' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "malformed park record is explicit and non-fatal" "$OK" \
+    "status=$RUN_STATUS"
+
+# 9. Absence means there was no park-hold record to inject; it must not create a
+# misleading unavailable section.
+setup_harness
+run_operator "review" "$PROCEED_OUTPUT"
+OK=1
+if ! grep -Fx \
+        '## Park hold evidence (harness-captured live at operator time)' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "review without a park record omits the park section" "$OK" \
+    "status=$RUN_STATUS"
+
+# 10. Park state belongs only to the review seam. A stale file must never leak into
+# another phase's operator prompt.
+setup_harness
+jq -n '{
+    held: true,
+    approve_url: "http://127.0.0.1:8240/approve",
+    approve_command: "stale command",
+    pid: 12345,
+    deadline: 86400,
+    since: "2026-07-27T23:42:35Z",
+    lease_transferred: true,
+    reason: null
+}' >"$RUN_DIR_PATH/state/park.json"
+run_operator "plan" "$PROCEED_OUTPUT"
+OK=1
+if ! grep -Fx \
+        '## Park hold evidence (harness-captured live at operator time)' \
+        "$PROMPT_CAPTURE" >/dev/null \
+    && valid_proceed_payload; then
+    OK=0
+fi
+report_case "non-review phase never receives park hold evidence" "$OK" \
+    "status=$RUN_STATUS"
+
+# 11. Read-only git rules are invariant across all phases: every granted git
 # command is one exact read-only invocation with no trailing wildcard, the
 # ref-bearing forms come from the run's own plan, and the only optional git -C
 # rule is the exact integration porcelain form.
@@ -506,7 +624,7 @@ done
 report_case "git grants stay exact and read-only in every phase" "$RULES_OK" \
     "$RULES_DETAIL"
 
-# 7. The ref-bearing rules are interpolated from plan.json, so a slug that is
+# 12. The ref-bearing rules are interpolated from plan.json, so a slug that is
 # not a kebab-case token must yield no rule at all rather than an unbounded or
 # argument-bearing one.
 RULES_OK=0
@@ -527,7 +645,7 @@ done
 report_case "a non-slug plan feature grants no ref-bearing rule" "$RULES_OK" \
     "$RULES_DETAIL"
 
-# 8. A rule is one exact command string, and git accepts branch names carrying
+# 13. A rule is one exact command string, and git accepts branch names carrying
 # shell metacharacters, so a base branch that is not a plain ref token must
 # yield no rule bearing it — neither the origin/<base> forms nor the two
 # feature rules built from it — instead of a rule parsed as shell syntax.
@@ -554,7 +672,7 @@ done
 report_case "a non-token base branch grants no rule bearing it" "$RULES_OK" \
     "$RULES_DETAIL"
 
-# 9. The implement terminal's commit and diff checks must stay completable for
+# 14. The implement terminal's commit and diff checks must stay completable for
 # every base branch git accepts, including one no exact rule can spell. The
 # harness compares the branches itself — refs as arguments, never shell words —
 # and injects the same two facts, so the omitted rules cost no verification.
@@ -592,7 +710,7 @@ done
 report_case "implement carries harness-captured branch evidence for any base" \
     "$RULES_OK" "$RULES_DETAIL"
 
-# 10. Branch evidence is honest about its own gaps: when the refs do not
+# 15. Branch evidence is honest about its own gaps: when the refs do not
 # resolve the operator must still emit a verdict payload, carrying an explicit
 # error rather than a silently empty commit list that reads as a clean diff.
 setup_harness
@@ -617,7 +735,7 @@ fi
 report_case "unresolvable branches become explicit negative branch evidence" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.200s' "$BRANCH_EVIDENCE")"
 
-# 11. gitrevisions resolves a bare name through refs/tags before refs/heads,
+# 16. gitrevisions resolves a bare name through refs/tags before refs/heads,
 # so a tag named after either configured branch would substitute its history
 # while the evidence still reads resolved. The harness pins both names inside
 # refs/heads: with the tags deliberately crossed (tag main at the feature tip,
@@ -649,7 +767,7 @@ fi
 report_case "tags named after the branches cannot shadow branch evidence" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.200s' "$BRANCH_EVIDENCE")"
 
-# 12. A worktree path is not a token either — git accepts spaces and shell
+# 17. A worktree path is not a token either — git accepts spaces and shell
 # metacharacters in one — and a rule is an exact command string, so the path
 # must be embedded already escaped. Unescaped, the granted text parses as
 # several words (or as shell syntax) when run verbatim, while the quoting the
@@ -688,7 +806,7 @@ done
 report_case "a worktree path carrying shell characters is granted escaped" \
     "$RULES_OK" "$RULES_DETAIL"
 
-# 13. Regression for issue #36: the primary checkout remains on main, whose
+# 18. Regression for issue #36: the primary checkout remains on main, whose
 # copy has 2 lines, while review evidence must describe the feature tip's
 # 20-line blob instead of accidentally reading the working tree.
 setup_harness
@@ -718,7 +836,7 @@ fi
 report_case "issue #36 review evidence reads the feature tip, not main" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
 
-# 14. The evidence-published command is the granted command, and executing it
+# 19. The evidence-published command is the granted command, and executing it
 # from the operator's repo-root cwd reads the pinned feature blob.
 setup_harness
 seed_plan "fixture-feature"
@@ -756,7 +874,7 @@ fi
 report_case "tip-pinned reads are granted exactly and read tip content" \
     "$OK" "status=$RUN_STATUS pinned=${PINNED_READS[*]:-none}"
 
-# 15. Paths that cannot be one safe rule token remain visible as content
+# 20. Paths that cannot be one safe rule token remain visible as content
 # evidence, but neither their published entries nor allowedTools grant a read.
 # The quoted path also pins the listing format: git C-quotes a path carrying a
 # double quote in line-delimited output, and that spelling names no tree entry,
@@ -808,7 +926,7 @@ fi
 report_case "non-token paths are described without granting a command" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
 
-# 16. A path removed by the feature diff has no branch-tip blob to identify or
+# 21. A path removed by the feature diff has no branch-tip blob to identify or
 # read, so its evidence is the minimal exact negative object.
 setup_harness
 seed_plan "fixture-feature"
@@ -837,7 +955,7 @@ fi
 report_case "deleted feature files carry exact negative tip evidence" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
 
-# 17. The cap is part of the evidence contract so a large diff cannot look
+# 22. The cap is part of the evidence contract so a large diff cannot look
 # complete after its content identities and grants are intentionally bounded.
 setup_harness
 seed_plan "fixture-feature"
@@ -872,7 +990,7 @@ fi
 report_case "tip-file truncation is explicit and caps pinned grants" \
     "$OK" "status=$RUN_STATUS pinned_rules=$PINNED_RULE_COUNT"
 
-# 18. A changed gitlink is a present tree entry whose target commit normally
+# 23. A changed gitlink is a present tree entry whose target commit normally
 # lives in the submodule's object store rather than this repository's, so the
 # entry's own type — not what the object database can answer about the target —
 # decides its evidence: present as a gitlink, with none of the blob claims
@@ -914,7 +1032,7 @@ fi
 report_case "a changed gitlink is present evidence without blob claims" \
     "$OK" "status=$RUN_STATUS evidence=$(printf '%.240s' "$BRANCH_EVIDENCE")"
 
-# 19. Git imposes no encoding on a pathname, but JSON is UTF-8 and jq's --arg
+# 24. Git imposes no encoding on a pathname, but JSON is UTF-8 and jq's --arg
 # substitutes U+FFFD for every byte that is not part of a valid sequence. Two
 # paths differing only in those bytes would then publish as one identical
 # string: one real file described twice, the other not at all, under an

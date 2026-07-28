@@ -6,10 +6,10 @@
 # the runner's outcome, verify the phase's disk artifacts first-hand, then
 # PROCEED or HALT. Review and implement prompts carry harness-captured branch
 # evidence including tip-pinned file content identity, and the operator is
-# granted exact `git show <tip>:<path>` reads for those files. Review and
-# promote also carry live integration-worktree evidence. Fail-safe: an
-# unparseable verdict is a HALT — when the operator can't be understood, the
-# pipeline stops.
+# granted exact `git show <tip>:<path>` reads for those files. Review also
+# carries the harness-recorded park hold when present; review and promote carry
+# live integration-worktree evidence. Fail-safe: an unparseable verdict is a
+# HALT — when the operator can't be understood, the pipeline stops.
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
@@ -84,6 +84,40 @@ if [ "$PHASE" = "review" ] || [ "$PHASE" = "promote" ]; then
 - integration worktree: $INT_WT
 - captured: $CAPTURED_AT
 $WORKTREE_EVIDENCE"
+fi
+
+# At a review park the supervisor writes the engine hold record before the
+# operator runs. Capture it in the harness shell instead of asking the model to
+# infer liveness from an engine log. As with worktree evidence, a present record
+# that cannot be read as an object becomes explicit unavailable evidence rather
+# than failing this handler.
+if [ "$PHASE" = "review" ] && [ -e "$RUN_DIR/state/park.json" ]; then
+    PARK_EVIDENCE="(park record unavailable or malformed)"
+    if CAPTURED_PARK_EVIDENCE="$(
+        jq -er '
+            if type != "object" then
+                error("park record is not an object")
+            else
+                [
+                    "- held: \(.held | tojson)",
+                    "- approve_url: \(.approve_url | tojson)",
+                    "- approve_command: \(.approve_command | tojson)",
+                    "- pid: \(.pid | tojson)",
+                    "- deadline: \(.deadline | tojson)",
+                    "- since: \(.since | tojson)",
+                    "- lease_transferred: \(.lease_transferred | tojson)",
+                    "- reason: \(.reason | tojson)"
+                ] | join("\n")
+            end
+        ' "$RUN_DIR/state/park.json" 2>/dev/null
+    )" && [ -n "$CAPTURED_PARK_EVIDENCE" ]; then
+        PARK_EVIDENCE="$CAPTURED_PARK_EVIDENCE"
+    fi
+    PROMPT="$PROMPT
+
+## Park hold evidence (harness-captured live at operator time)
+
+$PARK_EVIDENCE"
 fi
 
 # The worktrees this operator must inspect are siblings of REPO_ROOT, so the

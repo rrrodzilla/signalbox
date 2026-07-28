@@ -33,6 +33,7 @@ ARCHIVE_PATHS=(
     "state/run.json"
     "state/gate.json"
     "state/pending.json"
+    "state/park.json"
     "state/escalated.json"
     "state/docs-sync.json"
     "state/worktree.json"

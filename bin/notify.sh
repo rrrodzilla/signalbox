@@ -21,3 +21,7 @@ echo "APPROVAL REQUIRED — $ACTION assessed at floor R$FLOOR, readiness is R$LE
 echo "Review approved on round $ROUND."
 echo "Inspect: $RUN_DIR/state/pending.json"
 echo "Approve: curl -s -X POST http://127.0.0.1:$APPROVAL_PORT/approve -H 'Content-Type: application/json' --data @$RUN_DIR/state/pending.json"
+echo "At this review park, the runner deliberately holds the review engine open so this webhook keeps listening on 127.0.0.1:$APPROVAL_PORT until that POST arrives or the park deadline elapses."
+echo "The pipeline therefore reports PARKED and completes with one idle engine still running; this is intended and is not a leak."
+echo "Once the terminal is reached, $RUN_DIR/state/park.json records the holding engine's pid, approve URL, and deadline."
+echo "A park survives its launcher's exit but not destruction of the launcher's terminal session; to outlive the terminal, launch the runner under nohup or setsid."

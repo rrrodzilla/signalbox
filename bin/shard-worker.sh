@@ -3,7 +3,7 @@
 # stdin = stage.item payload {id, title, shards: [...]}
 # stdout = shard.built payload
 #   {stage, expected, worker, pending: [...], done: [], branches: [],
-#    correlation_id, provenance}
+#    provenance}
 # Built shards enter as a PENDING queue — nothing reaches the collector until
 # the per-shard delta review has approved each one.
 #
@@ -24,7 +24,6 @@ PAYLOAD="$(cat)"
 
 STAGE_ID="$(jq -r '.id' <<<"$PAYLOAD")"
 EXPECTED="$(jq -r '.shards | length' <<<"$PAYLOAD")"
-CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
 CODEX_MODEL_RESOLVED="${CODEX_MODEL:-gpt-5.6-sol}"
 CODEX_EFFORT_RESOLVED="${CODEX_EFFORT:-high}"
 MINE="$(jq -c --argjson me "$ME" --argjson n "$COUNT" \
@@ -95,6 +94,5 @@ jq -n \
     --argjson expected "$EXPECTED" \
     --argjson worker "$ME" \
     --argjson pending "$PENDING" \
-    --arg cid "$CID" \
     --argjson provenance "$PROVENANCE" \
-    '{stage: $stage, expected: $expected, worker: $worker, pending: $pending, done: [], branches: [], correlation_id: $cid, provenance: $provenance}'
+    '{stage: $stage, expected: $expected, worker: $worker, pending: $pending, done: [], branches: [], provenance: $provenance}'

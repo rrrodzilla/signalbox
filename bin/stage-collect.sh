@@ -28,7 +28,5 @@ printf '%s\n' "$MERGED" >"$STATE"
 
 ARRIVED="$(jq -r '.done | length' <<<"$MERGED")"
 if [ "$ARRIVED" -ge "$EXPECTED" ]; then
-    CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
-    jq -c --arg stage "$STAGE_ID" --arg cid "$CID" \
-        '. + {stage: $stage, correlation_id: $cid}' <<<"$MERGED"
+    jq -c --arg stage "$STAGE_ID" '. + {stage: $stage}' <<<"$MERGED"
 fi

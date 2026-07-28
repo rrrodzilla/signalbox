@@ -15,11 +15,13 @@ if [ ! -d "$DOCS" ]; then
     exit 1
 fi
 
-CID="$(mint_correlation_id init "$(basename "$REPO_ROOT")")"
+CID="$(correlation_id)" || {
+    echo "error: no correlation on the envelope; init-seed's source needs --correlate" >&2
+    exit 78
+}
 echo "[init-seed] correlation_id: $CID" >&2
 
 jq -n \
     --arg repo "$(basename "$REPO_ROOT")" \
     --arg vault "$(readlink -f "$DOCS")" \
-    --arg cid "$CID" \
-    '{repo: $repo, vault: $vault, correlation_id: $cid}'
+    '{repo: $repo, vault: $vault}'

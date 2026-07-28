@@ -2,7 +2,7 @@
 # Fixer handler: stdin = fix.requested payload
 #   {verdict, review, round, workdir, thread_id, fix_session_id?}
 # stdout = review.requested payload for the next round
-#   {workdir, round+1, feedback, thread_id, fix_session_id, correlation_id,
+#   {workdir, round+1, feedback, thread_id, fix_session_id,
 #    provenance}
 #
 # Runs headless Claude in $workdir to address the reviewer's feedback, then
@@ -33,7 +33,6 @@ ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 REVIEW="$(jq -r '.review' <<<"$PAYLOAD")"
 THREAD_ID="$(jq -r '.thread_id // ""' <<<"$PAYLOAD")"
 FIX_SESSION_ID="$(jq -r '.fix_session_id // ""' <<<"$PAYLOAD")"
-CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
 
 mkdir -p "$RUN_DIR/logs"
 
@@ -147,6 +146,5 @@ jq -n \
     --arg feedback "$REVIEW" \
     --arg thread_id "$THREAD_ID" \
     --arg fix_session_id "$FIX_SESSION_ID" \
-    --arg cid "$CID" \
     --argjson provenance "$PROVENANCE" \
-    '{workdir: $workdir, round: $round, feedback: $feedback, thread_id: $thread_id, fix_session_id: $fix_session_id, correlation_id: $cid, provenance: $provenance}'
+    '{workdir: $workdir, round: $round, feedback: $feedback, thread_id: $thread_id, fix_session_id: $fix_session_id, provenance: $provenance}'

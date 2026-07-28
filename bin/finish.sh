@@ -5,10 +5,13 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+# shellcheck source=_correlation.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_correlation.sh"
 
 PAYLOAD="$(cat)"
-# plan.done only carries {count}; the run manifest has the correlation id.
-CID="$(jq -r '.correlation_id // empty' <<<"$PAYLOAD" 2>/dev/null || true)"
+# The envelope carries the run's id; the run manifest is the fallback for a
+# sink invoked outside the fabric (bin/run.sh replays this script directly).
+CID="$(correlation_id_or_empty)"
 [ -n "$CID" ] || CID="$(jq -r '.correlation_id // empty' "$RUN_DIR/state/run.json" 2>/dev/null || true)"
 
 echo "ALL STAGES MERGED — running gate in $GATE_DIR: ${GATE_CMD:-}"

@@ -23,7 +23,7 @@ socket_path = "auto"
 [[sources]]
 name = "plan-seed"
 path = "~/.local/share/emergent/primitives/bin/exec-source"
-args = ["--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/plan-seed.sh"]
+args = ["--correlate", "--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/plan-seed.sh"]
 publishes = ["exec.output"]
 
 [[handlers]]
@@ -77,7 +77,7 @@ publishes = ["shard.review.requested"]
 [[handlers]]
 name = "slice-done"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "shard.built", "--publish-as", "shard.done", "--", "jq", "-c", "select((.pending | length) == 0) | {stage: .stage, expected: .expected, done: .done, branches: .branches, correlation_id: .correlation_id}"]
+args = ["-s", "shard.built", "--publish-as", "shard.done", "--", "jq", "-c", "select((.pending | length) == 0) | {stage: .stage, expected: .expected, done: .done, branches: .branches}"]
 subscribes = ["shard.built"]
 publishes = ["shard.done"]
 
@@ -100,7 +100,7 @@ env = { CODEX_MODEL = "gpt-5.6-sol", CODEX_EFFORT = "high" }
 [[handlers]]
 name = "shard-approved"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "shard.review.raw", "--publish-as", "shard.built", "--", "jq", "-c", "select(.verdict == \"APPROVED\") | {stage: .stage, expected: .expected, worker: .worker, pending: .pending, done: (.done + [.current.shard]), branches: (.branches + [.current.branch]), correlation_id: .correlation_id}"]
+args = ["-s", "shard.review.raw", "--publish-as", "shard.built", "--", "jq", "-c", "select(.verdict == \"APPROVED\") | {stage: .stage, expected: .expected, worker: .worker, pending: .pending, done: (.done + [.current.shard]), branches: (.branches + [.current.branch])}"]
 subscribes = ["shard.review.raw"]
 publishes = ["shard.built"]
 

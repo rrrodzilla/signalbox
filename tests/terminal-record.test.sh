@@ -26,14 +26,22 @@ fixture() {
     DIR="$(mktemp -d)"
     FIXTURES+=("$DIR")
     FIXTURE_PATH="$DIR"
+    # Absent unless a case supplies one: a recorder invoked without an
+    # envelope must write null, not the previous case's id.
+    TEST_CORRELATION_ID=""
 }
+
+# The run id reaches the recorder on the envelope the exec-sink exports, not
+# in the payload; TEST_CORRELATION_ID stands in for that export.
+TEST_CORRELATION_ID=""
 
 run_subject() {
     local INPUT_FILE="$1"
     local STDOUT_FILE="$2"
     local STDERR_FILE="$3"
     shift 3
-    "$SUBJECT" "$@" <"$INPUT_FILE" >"$STDOUT_FILE" 2>"$STDERR_FILE"
+    EMERGENT_CORRELATION_ID="$TEST_CORRELATION_ID" \
+        "$SUBJECT" "$@" <"$INPUT_FILE" >"$STDOUT_FILE" 2>"$STDERR_FILE"
     RUN_STATUS=$?
 }
 
@@ -57,8 +65,9 @@ FIXTURES+=("$OUT" "$ERR" "$INPUT")
 fixture
 DIR="$FIXTURE_PATH"
 printf '%s' \
-    '{"issue":4,"phase":"promote","parked":true,"reason":"merged","correlation_id":"c1"}' \
+    '{"issue":4,"phase":"promote","parked":true,"reason":"merged"}' \
     >"$INPUT"
+TEST_CORRELATION_ID="c1"
 run_subject "$INPUT" "$OUT" "$ERR" complete "$DIR"
 ACTUAL="$(jq -r \
     '[.terminal, (.issue | tostring), .phase, (.parked | tostring),
@@ -91,8 +100,9 @@ report_case "complete defaults missing parked to false" "$OK" \
 fixture
 DIR="$FIXTURE_PATH"
 printf '%s' \
-    '{"issue":4,"phase":"review","outcome":"TIMEOUT","reason":"stale CR","correlation_id":"c3"}' \
+    '{"issue":4,"phase":"review","outcome":"TIMEOUT","reason":"stale CR"}' \
     >"$INPUT"
+TEST_CORRELATION_ID="c3"
 run_subject "$INPUT" "$OUT" "$ERR" halted "$DIR"
 ACTUAL="$(jq -r \
     '[.terminal, (.issue | tostring), .phase, (.parked | tostring),

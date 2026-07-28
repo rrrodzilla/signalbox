@@ -32,7 +32,7 @@ socket_path = "auto"
 [[sources]]
 name = "plan-request"
 path = "~/.local/share/emergent/primitives/bin/exec-source"
-args = ["--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/plan-request.sh"]
+args = ["--correlate", "--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/plan-request.sh"]
 publishes = ["exec.output"]
 
 [[handlers]]
@@ -73,7 +73,7 @@ publishes = ["plan.requested"]
 [[handlers]]
 name = "escalation-guard"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "plan.validated", "--publish-as", "plan.escalated", "--", "jq", "-c", "select(.verdict == \"BLOCKED\" or (.verdict == \"INVALID\" and .round >= 3)) | {issue, verdict, feedback, round, correlation_id}"]
+args = ["-s", "plan.validated", "--publish-as", "plan.escalated", "--", "jq", "-c", "select(.verdict == \"BLOCKED\" or (.verdict == \"INVALID\" and .round >= 3)) | {issue, verdict, feedback, round}"]
 subscribes = ["plan.validated"]
 publishes = ["plan.escalated"]
 

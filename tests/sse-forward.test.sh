@@ -22,6 +22,7 @@ TEST_ISSUE="14"
 TEST_CURL_STATUS="0"
 TEST_SINK_PORT=""
 TEST_USE_DEFAULT_PORT=1
+TEST_CORRELATION_ID=""
 
 cleanup() {
     local FIXTURE
@@ -86,6 +87,9 @@ EOF
     chmod +x "$FIXTURE_ROOT/stub/curl"
 }
 
+# The forwarder reads the run's id from the envelope the exec-sink exports;
+# TEST_CORRELATION_ID stands in for it. The payload is passed through verbatim
+# and is no longer where the id comes from.
 run_subject() {
     local STDOUT_FILE="$FIXTURE_ROOT/stdout"
     local STDERR_FILE="$FIXTURE_ROOT/stderr"
@@ -103,6 +107,7 @@ run_subject() {
             CURL_EXIT_STATUS="$TEST_CURL_STATUS" \
             SIGNALBOX_RUN_SLUG="$TEST_RUN_SLUG" \
             SIGNALBOX_ISSUE="$TEST_ISSUE" \
+            EMERGENT_CORRELATION_ID="$TEST_CORRELATION_ID" \
             "$FIXTURE_SUBJECT" "$@" \
             <"$STDIN_FILE" >"$STDOUT_FILE" 2>"$STDERR_FILE"
     else
@@ -112,6 +117,7 @@ run_subject() {
             SIGNALBOX_RUN_SLUG="$TEST_RUN_SLUG" \
             SIGNALBOX_ISSUE="$TEST_ISSUE" \
             SIGNALBOX_SINK_PORT="$TEST_SINK_PORT" \
+            EMERGENT_CORRELATION_ID="$TEST_CORRELATION_ID" \
             "$FIXTURE_SUBJECT" "$@" \
             <"$STDIN_FILE" >"$STDOUT_FILE" 2>"$STDERR_FILE"
     fi
@@ -136,12 +142,14 @@ reset_case() {
     TEST_CURL_STATUS="0"
     TEST_SINK_PORT=""
     TEST_USE_DEFAULT_PORT=1
+    TEST_CORRELATION_ID=""
     fixture
 }
 
 # 1. A valid object payload is preserved exactly with its event identity.
 reset_case
 TEST_INPUT='{"correlation_id":"cid-123","nested":{"ok":true},"count":2}'
+TEST_CORRELATION_ID="cor_01kyk5bd3xfcgbvh2tacztktzb"
 run_subject pipeline phase.request
 BODY="$FIXTURE_ROOT/curl-record/body"
 OK=1
@@ -152,7 +160,7 @@ if [ "$RUN_STATUS" -eq 0 ] \
         '
         .type == "phase.request"
         and .engine_label == "pipeline"
-        and .correlation_id == "cid-123"
+        and .correlation_id == "cor_01kyk5bd3xfcgbvh2tacztktzb"
         and .payload == {
             correlation_id: "cid-123",
             nested: {ok: true},
@@ -320,13 +328,14 @@ LARGE_VALUE="$(head -c 200000 /dev/zero | tr '\0' 'a')"
 TEST_INPUT="$(
     printf '%s' "$LARGE_VALUE" | jq -Rsc '{correlation_id: "cid-big", blob: .}'
 )"
+TEST_CORRELATION_ID="cor_01kyk5bd3xfcgbvh2tacztktzb"
 run_subject pipeline phase.request
 BODY="$FIXTURE_ROOT/curl-record/body"
 OK=1
 if [ "$RUN_STATUS" -eq 0 ] \
     && [ ! -s "$FIXTURE_ROOT/stderr" ] \
     && jq -e '
-        .correlation_id == "cid-big"
+        .correlation_id == "cor_01kyk5bd3xfcgbvh2tacztktzb"
         and .payload.correlation_id == "cid-big"
         and (.payload.blob | length) == 200000
         and (.payload.blob | test("^a+$"))

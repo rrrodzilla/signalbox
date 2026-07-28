@@ -14,10 +14,12 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+# shellcheck source=_correlation.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_correlation.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 PAYLOAD="$(cat)"
-CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
+CID="$(correlation_id_or_empty)"
 WORKDIR="$(jq -r '.workdir // empty' <<<"$PAYLOAD")"
 [ -n "$WORKDIR" ] || WORKDIR="$INT_WT"
 FEATURE="$(jq -r '.feature // empty' <<<"$PAYLOAD")"

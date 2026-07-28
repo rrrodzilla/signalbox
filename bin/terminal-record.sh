@@ -73,6 +73,7 @@ TEMP="$(mktemp "$STATE_DIR/.$TERMINAL.json.tmp.XXXXXX")"
 printf '%s\n' "$PAYLOAD" \
     | jq -n \
         --arg terminal "$TERMINAL" \
+        --arg correlation_id "${EMERGENT_CORRELATION_ID:-}" \
         '
         def integer_or_null($value):
             if (($value | type) == "number") and (($value | floor) == $value)
@@ -99,7 +100,11 @@ printf '%s\n' "$PAYLOAD" \
                 end
             ),
             reason: string_or_null($payload.reason),
-            correlation_id: string_or_null($payload.correlation_id),
+            # The envelope carries the run id; the exec-sink that invoked
+            # this script exported it.
+            correlation_id: (
+                if $correlation_id == "" then null else $correlation_id end
+            ),
             payload: $payload,
             ts: (now | todate)
         }

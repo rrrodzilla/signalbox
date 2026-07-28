@@ -5,9 +5,15 @@
 # (or only the selected run's engines when --run is supplied).
 #
 # Reconstructs everything that happened to a feature across Emergent's
-# per-engine JSON event logs. The correlation_id travels in every payload
-# (event-carried state, like thread_id), so the trail is one jq filter over
-# the store: no instrumentation, no extra bookkeeping, the fabric remembered.
+# per-engine JSON event logs. The correlation_id rides the message ENVELOPE:
+# exec-source mints one per run and every exec-handler copies it onto what it
+# publishes, so the trail is one filter on a field the fabric maintains itself
+# -- no instrumentation, no bookkeeping in the payload.
+#
+# The event store also indexes this column in SQLite (events.correlation_id),
+# which is the faster path when a store is large; the JSONL logs are read here
+# because a run's engines each keep their own store directory and the logs are
+# the only view that spans them without opening several databases.
 set -euo pipefail
 
 # shellcheck source=_env.sh
@@ -55,7 +61,7 @@ logs() {
 # each line defensively instead of letting one bad record kill the trail.
 if [ $# -eq 0 ]; then
     echo "correlation ids in the event store:"
-    logs | jq -Rr 'fromjson? // empty | .message.payload | objects | .correlation_id // empty' |
+    logs | jq -Rr 'fromjson? // empty | .message.correlation_id // empty' |
         sort | uniq -c | sort -rn
     exit 0
 fi
@@ -64,9 +70,8 @@ for CID in "$@"; do
     echo "=== $CID ==="
     logs | jq -Rr --arg cid "$CID" '
         fromjson? // empty
-        | select((.message.payload | type) == "object"
-               and .message.payload.correlation_id == $cid)
-        | .message.payload as $p
+        | select(.message.correlation_id == $cid)
+        | (.message.payload | if type == "object" then . else {} end) as $p
         | [ .timestamp,
             .message.message_type,
             .message.source,

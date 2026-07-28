@@ -5,13 +5,15 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+# shellcheck source=_correlation.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_correlation.sh"
 
 PAYLOAD="$(cat)"
 
 ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 DECISION="$(jq -r '.decision // "unconditional"' <<<"$PAYLOAD")"
 LEVEL="$(jq -r '.readiness // empty' <<<"$PAYLOAD")"
-CID="$(jq -r '.correlation_id // empty' <<<"$PAYLOAD")"
+CID="$(correlation_id_or_empty)"
 FLOOR="$(jq -r '.floor // empty' <<<"$PAYLOAD")"
 RATIONALE="$(jq -r '.rationale // empty' <<<"$PAYLOAD")"
 mkdir -p "$RUN_DIR/results"

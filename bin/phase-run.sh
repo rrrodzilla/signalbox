@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase runner: stdin = phase.request {issue, phase, correlation_id}
+# Phase runner: stdin = phase.request {issue, phase}
 # stdout = phase.done (input + {outcome, log})
 #
 # Runs ONE phase engine from the run's config as a child process, records its
@@ -22,21 +22,19 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 # shellcheck source=_liveness.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_liveness.sh"
+# shellcheck source=_correlation.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_correlation.sh"
 
 PAYLOAD="$(cat)"
 PHASE="$(jq -r '.phase' <<<"$PAYLOAD")"
 ISSUE="$(jq -r '.issue' <<<"$PAYLOAD")"
-# The id is only worth forwarding if the phase's own seed will accept it back:
-# the shared inherited_correlation_id (bin/_correlation.sh) takes a string of
-# at most 128 [A-Za-z0-9._-] characters and containing no "..". Anything looser
-# here — a JSON number that jq -r would stringify, or a traversal-shaped id —
-# is forwarded, rejected downstream, and reminted, which is exactly the broken
-# correlation the id exists to prevent.
-CID="$(jq -r 'if (.correlation_id | type) == "string"
-              then .correlation_id else empty end' <<<"$PAYLOAD")"
-if ! [[ "$CID" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || [[ "$CID" == *".."* ]]; then
-    CID=""
-fi
+# The pipeline's correlation reaches this handler on the envelope of the
+# phase.request it is processing, which exec-handler exports as
+# EMERGENT_CORRELATION_ID. Validate before forwarding: the child engine's
+# exec-source rejects a malformed id outright rather than starting a competing
+# trail, so a bad value here fails the phase loudly instead of quietly
+# splitting the run.
+CID="$(correlation_id_or_empty)"
 
 case "$PHASE" in
     plan)      CFG="plan.toml";      TIMEOUT=2400 ;;
@@ -91,11 +89,16 @@ trap stop_engine EXIT
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
-# The pipeline mints one id per run and every phase engine stamps that same id,
-# so bin/audit.sh <id> reconstructs the whole run (issue #42). A phase launched
-# directly by bin/run.sh --phase gets no id here and mints a phase-prefixed one.
+# EMERGENT_CORRELATION_ID is the only channel that crosses an engine boundary:
+# the envelope is a property of one engine's fabric, so the child's exec-source
+# adopts the parent's id from its environment (clap reads the same variable)
+# and stamps it on everything the phase publishes. One id, every engine, so
+# `bin/audit.sh <id>` reconstructs the whole run (issue #42).
+#
+# A phase launched directly by bin/run.sh --phase inherits nothing; its seed
+# mints its own id, and the trail covers that phase alone.
 SIGNALBOX_ISSUE="$ISSUE" SIGNALBOX_RUN_SLUG="$RUN_SLUG" \
-    SIGNALBOX_CORRELATION_ID="$CID" \
+    EMERGENT_CORRELATION_ID="$CID" \
     emergent --config "$CONFIG" >"$LOG" 2>&1 &
 PID=$!
 printf '%s\n' "$PID" >"$PID_FILE"

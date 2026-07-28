@@ -16,8 +16,13 @@ Absence is a strong claim: assert it only from a pinned route below. If no pinne
 
 **Judging code at a tip — use these routes in order:**
 
-1. Read `tip_files` in `## Branch evidence (harness-captured live at operator time)`. On `resolved: true`, it has one entry per diff file up to the numeric `tip_files_limit` (40), captured by the harness process outside your sandbox. `present: false` means the file genuinely is not at that tip. `present: true` carries `blob` (a 40-hex oid), `size` in bytes, and `lines` AT the tip (`lines: null` means the blob was too large to count); disagreement with a working-tree read means the working tree is the wrong checkout, not that the tip is wrong.
-2. Run that file's granted `pinned_read` command — `git show <full-tip-oid>:<path>` — for its actual content at that exact commit.
+1. Read `tip_files` in `## Branch evidence (harness-captured live at operator time)`. On `resolved: true`, it has one entry per diff file up to the numeric `tip_files_limit` (40), captured by the harness process outside your sandbox. `present: false` means the file genuinely is not at that tip. A `present: true` entry names the tree entry's `type`, and every object id is as wide as this repository's hash: 40 hex characters under SHA-1, 64 under SHA-256. Neither width is a defect, and no width is worth remarking on.
+   - `type: "blob"` is an ordinary file. It carries `blob` (the blob's oid) and normally `size` in bytes and `lines` AT the tip — `lines: null` means the blob was too large to count, and a blob the object database can no longer measure carries neither `size` nor `lines`. Where those metrics exist, disagreement with a working-tree read means the working tree is the wrong checkout, not that the tip is wrong.
+   - `type: "gitlink"` is a submodule reference. It carries the submodule's `commit` and, by design, no `size`, no `lines`, and no `pinned_read`: its content lives in another repository, so nothing here reads it. Judge it by that commit alone.
+   - Any other `type` — a subtree, say — carries the type by itself. Size, line count, and content are all outside these routes.
+
+   Only blob metrics are missing when a blob entry lacks them; an entry shaped as described above is valid evidence, never malformed evidence.
+2. Run that file's granted `pinned_read` command — `git show <full-tip-oid>:<path>` — for its actual content at that exact commit. Only blob entries carry one.
 3. Read `<integration worktree>/<path>` from the granted worktree home ONLY when `## Worktree evidence (harness-captured live at operator time)` reports `clean: true` AND its `tip` matches the branch evidence's `branch_tip_short`. A dirty or mismatched worktree is not the tip.
 
 A file outside the branch diff has no `tip_files` entry and no `pinned_read`, so route 3 is its only route. If that route is unavailable, say "could not verify", not "absent". When `tip_files_truncated: true`, absence from the array proves nothing.
@@ -34,7 +39,7 @@ Your session can run without approval only read-only `gh` (`pr view|checks|list`
 - `git worktree list`
 - once the run's `plan.json` names a feature: `git rev-parse --short feat/<feature>`
 - when the base branch is a plain ref token (letters, digits, `.`, `_`, `/`, `-`): `git log origin/<base> --oneline -20`, `git show --stat origin/<base>`, and — with a feature too — `git log <base>..feat/<feature> --oneline`, `git diff --stat <base>...feat/<feature>`
-- for each file in the branch evidence's `tip_files` that carries a `pinned_read`: that exact string is granted. Run it verbatim — no added flags, no `-C`, and no redirection — or it becomes a different, denied command. A present file with no `pinned_read` has a non-token path and is simply not readable this way; that denial is a sandbox fact, never a defect finding
+- for each file in the branch evidence's `tip_files` that carries a `pinned_read`: that exact string is granted. Run it verbatim — no added flags, no `-C`, and no redirection — or it becomes a different, denied command. A present entry with no `pinned_read` — a gitlink, a blob the object database cannot measure, or a file whose path is not a plain token — is simply not readable this way; that absence, and any denial that follows from it, is a fact about the sandbox and the evidence, never a defect finding
 - when the integration worktree exists: the whole command spelled out as `integration worktree status command:` in `## This phase`. Its path is already shell-escaped there, so run that line exactly as printed — adding, removing, or changing quoting makes it a different, denied command
 
 Git allows branch names carrying `;`, `&`, or `$(...)`, which a rule — one exact command string — cannot carry safely, so a base branch spelled that way grants none of those four base-dependent commands. Nothing is lost: the harness captures the implement comparison itself and injects it (see **implement** below).

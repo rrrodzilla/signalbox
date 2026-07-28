@@ -22,10 +22,13 @@ set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_lang.sh"
 
 PAYLOAD="$(cat)"
 
 WORKDIR="$(jq -r '.workdir' <<<"$PAYLOAD")"
+# The fix target's own directory decides the wording; the harness installs into any repository.
+lang_profile "$(detect_language "$WORKDIR")"
 ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 REVIEW="$(jq -r '.review' <<<"$PAYLOAD")"
 THREAD_ID="$(jq -r '.thread_id // ""' <<<"$PAYLOAD")"
@@ -70,12 +73,12 @@ RULES="## Rules
 
 - If .claude/docs/ARCHI-rules.md exists here, your changes must conform to it.
 - Address every issue the reviewer raised, with minimal correct changes.
-- Library code must not use unwrap or expect; use proper error types.
+- $LANG_FIX_RULE
 - Do not refactor beyond what the feedback requires. Do not add features.
-- Only edit Rust source files in this repository. Do not run cargo, git, or any other command.
+- $LANG_EDIT_SCOPE Do not run build, test, git, or any other command.
 - Keep doc comments accurate to the new behavior."
 
-PROMPT="You are the fix half of an automated review loop on the Rust crate in the current directory.
+PROMPT="You are the fix half of an automated review loop on $LANG_SUBJECT.
 
 $INTENT## Reviewer feedback (round $ROUND)
 

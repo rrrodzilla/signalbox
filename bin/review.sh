@@ -19,10 +19,13 @@ set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_lang.sh"
 
 PAYLOAD="$(cat)"
 
 WORKDIR="$(jq -r '.workdir' <<<"$PAYLOAD")"
+# The review workdir, not the harness repository, decides the language wording.
+lang_profile "$(detect_language "$WORKDIR")"
 ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 FEEDBACK="$(jq -r '.feedback // ""' <<<"$PAYLOAD")"
 THREAD_ID="$(jq -r '.thread_id // ""' <<<"$PAYLOAD")"
@@ -41,7 +44,7 @@ cd "$WORKDIR"
 if [ -z "$THREAD_ID" ]; then
     # Fresh session. If feedback is present (thread was lost), embed it so the
     # reviewer can still verify prior issues were addressed.
-    PROMPT="$(cat "$ROOT/prompts/review.md")"
+    PROMPT="$(render_prompt "$ROOT/prompts/review.md")"
     # Target mode: the validated plan's intent is authoritative context —
     # without it, deliberate API removals read as compatibility defects.
     if [ -f "$RUN_DIR/plan.json" ]; then
@@ -79,7 +82,7 @@ $FEEDBACK"
 else
     # Resume: the thread already holds the prior review, so the prompt only
     # asks to verify. --sandbox / --color are not accepted here (inherited).
-    PROMPT="$(cat "$ROOT/prompts/re-review.md")"
+    PROMPT="$(render_prompt "$ROOT/prompts/re-review.md")"
 
     codex exec resume "$THREAD_ID" \
         --json \

@@ -7,8 +7,7 @@ the diff is under review.
 
 ## In scope (correctness only)
 
-- Reachable panics: `unwrap`/`expect`/indexing/slicing that can fail on valid
-  inputs (e.g. empty strings, empty collections)
+- __SIGNALBOX_LANG_PANICS__
 - Logic errors: code that does not do what its names, doc comments, or tests
   claim
 - Tests that assert the wrong thing or cannot pass
@@ -19,8 +18,8 @@ the diff is under review.
 - Style, naming, formatting, documentation wording
 - Architecture or design alternatives
 - Files not touched by this diff
-- Missing features or wiring — other shards handle them. A module that is not
-  yet declared in lib.rs is NOT a defect; wiring happens in a later stage.
+- Missing features or wiring — other shards handle them.
+  __SIGNALBOX_LANG_WIRING__; wiring happens in a later stage.
 
 ## Verdict (mandatory)
 

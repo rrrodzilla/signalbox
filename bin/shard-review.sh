@@ -16,6 +16,7 @@ set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_lang.sh"
 
 ME="${1:?worker index}"
 PAYLOAD="$(cat)"
@@ -34,6 +35,7 @@ CODEX_EFFORT_RESOLVED="${CODEX_EFFORT:-high}"
 FEATURE="$(jq -r '.feature // "feature"' "$RUN_DIR/plan.json" 2>/dev/null || echo feature)"
 export FEATURE
 WT="$WT_BASE/$FEATURE-${BRANCH##*/}"
+lang_profile "$(detect_language "$WT")"
 
 mkdir -p "$RUN_DIR/logs"
 LAST="$RUN_DIR/logs/shard-review-$STAGE_ID-$SHARD_ID-r$ROUND.md"
@@ -44,7 +46,7 @@ DIFF="$(git -C "$WT" diff "$INT_BRANCH"...HEAD)"
 cd "$WT"
 
 if [ -z "$THREAD_ID" ]; then
-    PROMPT="$(cat "$ROOT/prompts/shard-review.md")
+    PROMPT="$(render_prompt "$ROOT/prompts/shard-review.md")
 
 ## Diff under review ($BRANCH vs $INT_BRANCH)
 
@@ -70,7 +72,7 @@ $DIFF
 else
     # Resume: the thread already holds the prior findings, so the prompt only
     # asks to verify. --sandbox / --color are not accepted here (inherited).
-    PROMPT="$(cat "$ROOT/prompts/shard-re-review.md")
+    PROMPT="$(render_prompt "$ROOT/prompts/shard-re-review.md")
 
 ## Current diff after the fix ($BRANCH vs $INT_BRANCH)
 

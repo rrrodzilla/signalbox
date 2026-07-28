@@ -18,6 +18,7 @@ set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_lang.sh"
 
 ME="${1:?worker index}"
 PAYLOAD="$(cat)"
@@ -35,6 +36,7 @@ FIX_SESSION_ID="$(jq -r '.fix_session_id // ""' <<<"$PAYLOAD")"
 FEATURE="$(jq -r '.feature // "feature"' "$RUN_DIR/plan.json" 2>/dev/null || echo feature)"
 export FEATURE
 WT="$WT_BASE/$FEATURE-${BRANCH##*/}"
+lang_profile "$(detect_language "$WT")"
 
 mkdir -p "$RUN_DIR/logs"
 
@@ -57,8 +59,7 @@ $REVIEW
 
 - If .claude/docs/ARCHI-rules.md exists here, your changes must conform to it.
 - Address every issue the reviewer raised, with minimal correct changes.
-- Library code must not use unwrap or expect; use proper error handling or
-  a graceful fallback.
+- $LANG_FIX_RULE
 - If addressing the feedback correctly would require a mechanism this shard's
   scope does not cover, do not build it: make no change and end your reply
   with a line reading SCOPE-CONFLICT followed by one paragraph naming the
@@ -66,7 +67,7 @@ $REVIEW
   exception at a time is not.
 - Only edit the files this shard owns per the review's scope (the files it created or changed).
 - Do not refactor beyond the feedback. Do not add features.
-- Do not run cargo, git, or any other command.
+- Do not run build, test, git, or any other command.
 - Keep tests and doc comments accurate to the new behavior."
 
 RESUME_PROMPT="## Reviewer feedback (round $ROUND)

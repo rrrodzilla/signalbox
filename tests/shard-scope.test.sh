@@ -159,9 +159,9 @@ fi
 report_case "absent and empty file declarations fail closed" "$OK" \
     "absent=$ABSENT_STATUS empty=$EMPTY_STATUS"
 
-# 5. Empty and newline-containing declared paths never produce partial output.
+# 5. An empty declared path never produces partial output.
 INVALID_PATHS="$FIXTURE_ROOT/invalid-paths.json"
-jq '.stages[0].shards[0].files = ["valid.txt", "", "bad\npath.txt"]' \
+jq '.stages[0].shards[0].files = ["valid.txt", ""]' \
     "$PLAN" >"$INVALID_PATHS"
 run_subject "$OUT" "$ERR" \
     shard_declared_files "$INVALID_PATHS" build helper
@@ -176,9 +176,33 @@ fi
 report_case "invalid declared paths fail before printing" "$OK" \
     "status=$INVALID_PATH_STATUS stdout-bytes=$INVALID_PATH_STDOUT_SIZE"
 
+# 5a. A declared path holding a newline or a backslash is escaped into one
+# record, never rejected: the plan validator accepts such paths, so the gate
+# has to compare and report them instead of failing the run.
+ESCAPED_DECLARED="$FIXTURE_ROOT/escaped-declared.json"
+jq '.stages[0].shards[0].files
+    = ["valid.txt", "bad\npath.txt", "back\\slash.txt"]' \
+    "$PLAN" >"$ESCAPED_DECLARED"
+run_subject "$OUT" "$ERR" \
+    shard_declared_files "$ESCAPED_DECLARED" build helper
+ESCAPED_DECLARED_OUTPUT="$(<"$OUT")"
+OK=1
+if [ "$RUN_STATUS" -eq 0 ] \
+    && [ "$ESCAPED_DECLARED_OUTPUT" = 'valid.txt
+bad\npath.txt
+back\\slash.txt' ] \
+    && [ ! -s "$ERR" ]; then
+    OK=0
+fi
+report_case "declared paths with newlines are escaped, not rejected" "$OK" \
+    "status=$RUN_STATUS output=$ESCAPED_DECLARED_OUTPUT"
+
 # 6. Every helper rejects both missing and excess arguments with status 64.
 OK=0
 for FUNCTION in \
+    scope_encode_path \
+    scope_decode_path \
+    scope_decode_paths \
     shard_declared_files \
     shard_touched_files \
     scope_violations \
@@ -251,7 +275,7 @@ fi
 report_case "unresolvable ref fails with scope diagnostic" "$OK" \
     "status=$RUN_STATUS stdout-bytes=$BAD_REF_STDOUT_SIZE"
 
-# 10. A newline in a Git path fails before any path is emitted.
+# 10. A newline in a Git path becomes exactly one escaped record.
 git_fixture "$GIT_DIR" switch -q shard
 NEWLINE_PATH=$'bad\npath.txt'
 printf '%s\n' "newline path" >"$GIT_DIR/$NEWLINE_PATH"
@@ -260,15 +284,17 @@ git_fixture "$GIT_DIR" commit -q -m "newline path"
 NEWLINE_TIP="$(git_fixture "$GIT_DIR" rev-parse HEAD)"
 run_subject "$OUT" "$ERR" \
     shard_touched_files "$GIT_DIR" main "$NEWLINE_TIP"
-NEWLINE_STDOUT_SIZE="$(wc -c <"$OUT")"
+NEWLINE_RECORD_COUNT="$(grep -Fxc 'bad\npath.txt' "$OUT")"
+NEWLINE_LINE_COUNT="$(wc -l <"$OUT")"
 OK=1
-if [ "$RUN_STATUS" -eq 1 ] \
-    && [ "$NEWLINE_STDOUT_SIZE" -eq 0 ] \
-    && [[ "$(<"$ERR")" == "[scope]"* ]]; then
+if [ "$RUN_STATUS" -eq 0 ] \
+    && [ "$NEWLINE_RECORD_COUNT" -eq 1 ] \
+    && [ "$NEWLINE_LINE_COUNT" -eq 4 ] \
+    && [ ! -s "$ERR" ]; then
     OK=0
 fi
-report_case "newline-containing Git path fails before printing" "$OK" \
-    "status=$RUN_STATUS stdout-bytes=$NEWLINE_STDOUT_SIZE"
+report_case "newline-containing Git path becomes one escaped record" "$OK" \
+    "status=$RUN_STATUS records=$NEWLINE_RECORD_COUNT lines=$NEWLINE_LINE_COUNT"
 
 # 11. Exact declared and touched lists produce no violations.
 run_subject "$OUT" "$ERR" \
@@ -342,6 +368,35 @@ if [ "$RUN_STATUS" -eq 0 ] \
 fi
 report_case "scope report contains marker, paths, and recovery contract" "$OK" \
     "status=$RUN_STATUS first-line=$REPORT_FIRST_LINE"
+
+# 16. The encoder and the decoder are inverses for backslash and newline paths.
+AWKWARD_PATH=$'weird\\dir\nname.txt'
+ENCODED_PATH="$(scope_encode_path "$AWKWARD_PATH")"
+mapfile -d '' -t ROUND_TRIP < <(scope_decode_paths "$ENCODED_PATH")
+OK=1
+if [ "$ENCODED_PATH" = 'weird\\dir\nname.txt' ] \
+    && [ "${#ROUND_TRIP[@]}" -eq 1 ] \
+    && [ "${ROUND_TRIP[0]}" = "$AWKWARD_PATH" ]; then
+    OK=0
+fi
+report_case "encoded records decode back to the original path" "$OK" \
+    "encoded=$ENCODED_PATH decoded-count=${#ROUND_TRIP[@]}"
+
+# 17. An escaped newline path stays one record through the whole comparison
+# and decodes back into a single Git pathspec.
+run_subject "$OUT" "$ERR" \
+    scope_violations 'owned.txt' $'owned.txt\nbad\\npath.txt'
+ESCAPED_VIOLATIONS="$(<"$OUT")"
+mapfile -d '' -t DECODED_VIOLATIONS < <(scope_decode_paths "$ESCAPED_VIOLATIONS")
+OK=1
+if [ "$RUN_STATUS" -eq 0 ] \
+    && [ "$ESCAPED_VIOLATIONS" = 'bad\npath.txt' ] \
+    && [ "${#DECODED_VIOLATIONS[@]}" -eq 1 ] \
+    && [ "${DECODED_VIOLATIONS[0]}" = $'bad\npath.txt' ]; then
+    OK=0
+fi
+report_case "an escaped newline path stays one violation record" "$OK" \
+    "status=$RUN_STATUS violations=$ESCAPED_VIOLATIONS decoded-count=${#DECODED_VIOLATIONS[@]}"
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

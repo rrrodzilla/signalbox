@@ -67,7 +67,24 @@ if ! VIOLATIONS="$(scope_violations "$DECLARED" "$TOUCHED")"; then
 fi
 
 if [ -n "$VIOLATIONS" ]; then
-    mapfile -t VIOLATING_PATHS <<<"$VIOLATIONS"
+    # The lists carry escaped records so a path containing a newline stays one
+    # record; Git needs the raw bytes back, hence the NUL-delimited decode.
+    mapfile -d '' -t VIOLATING_PATHS < <(
+        if scope_decode_paths "$VIOLATIONS"; then
+            printf '0\0'
+        else
+            printf '%s\0' "$?"
+        fi
+    )
+    DECODE_STATUS_INDEX=$((${#VIOLATING_PATHS[@]} - 1))
+    DECODE_STATUS="${VIOLATING_PATHS[$DECODE_STATUS_INDEX]}"
+    unset 'VIOLATING_PATHS[DECODE_STATUS_INDEX]'
+
+    if [ "$DECODE_STATUS" -ne 0 ]; then
+        printf '%s\n' \
+            "[shard-review] cannot decode violating paths for stage $STAGE_ID shard $SHARD_ID" >&2
+        exit 1
+    fi
 
     if ! REVIEW="$(scope_report "$SHARD_ID" "$DECLARED" "$VIOLATIONS")"; then
         printf '%s\n' \

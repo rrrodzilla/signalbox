@@ -139,8 +139,9 @@ report_case() {
     fi
 }
 
-# 1. A fresh session receives every declared path and the authoritative rule,
-#    without retaining the old circular ownership phrase.
+# 1. A fresh session receives every declared path, the authoritative rule, and
+#    the leave-to-restore exception the scope report depends on, without
+#    retaining the old circular ownership phrase.
 fixture
 write_plan
 make_worktree scope-feature build-alpha
@@ -151,6 +152,7 @@ if [ "$RUN_STATUS" -eq 0 ] \
     && grep -Fq -- "- bin/shard-fix.sh" "$ARGV_LOG" \
     && grep -Fq -- "- tests/shard-fix-scope.test.sh" "$ARGV_LOG" \
     && grep -Fq "Edit only the files in the complete ownership list above" "$ARGV_LOG" \
+    && grep -Fq "restore it to its state at the integration tip" "$ARGV_LOG" \
     && ! grep -Fq "the files it created or changed" "$ARGV_LOG"; then
     OK=0
 fi
@@ -182,7 +184,7 @@ if [ "$RUN_STATUS" -eq 0 ] \
     && grep -Fq "## Complete set of files this shard may change" "$ARGV_LOG" \
     && grep -Fq -- "- bin/shard-fix.sh" "$ARGV_LOG" \
     && grep -Fq -- "- tests/shard-fix-scope.test.sh" "$ARGV_LOG" \
-    && grep -Fq "Files outside this list are off limits." "$ARGV_LOG"; then
+    && grep -Fq "Files outside this list are off limits, except to undo a change this branch" "$ARGV_LOG"; then
     OK=0
 fi
 report_case "rounds 2+ repeat declared ownership in the resume prompt" "$OK" \

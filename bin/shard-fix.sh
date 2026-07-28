@@ -43,13 +43,18 @@ if SCOPE_LOOKUP="$(
     while IFS= read -r DECLARED_PATH || [ -n "$DECLARED_PATH" ]; do
         OWNERSHIP_SECTION+="- $DECLARED_PATH"$'\n'
     done <<<"$DECLARED_FILES"
-    OWNERSHIP_RULE="- Edit only the files in the complete ownership list above. Every other
-  file in the repository belongs to a concurrent shard in the same stage, and
-  writing to it collides at the fan-in merge. If the feedback cannot be
-  addressed without another file, make no change and use the SCOPE-CONFLICT
-  response the next rule describes."
+    OWNERSHIP_RULE="- Edit only the files in the complete ownership list above, with one
+  exception: a file outside the list that this branch has already changed must
+  be put back — restore it to its state at the integration tip, or delete it if
+  this branch created it. Every file outside the list belongs to a concurrent
+  shard in the same stage, so leaving a change there collides at the fan-in
+  merge. Beyond undoing such a change, do not write outside the list: if the
+  feedback cannot be addressed without new edits to another file, make no
+  change and use the SCOPE-CONFLICT response the next rule describes."
     RESUME_OWNERSHIP="$OWNERSHIP_SECTION
-Files outside this list are off limits."
+Files outside this list are off limits, except to undo a change this branch
+already made to one: restore it to its state at the integration tip, or delete
+it if this branch created it."
 else
     SCOPE_REASON="${SCOPE_LOOKUP//$'\n'/; }"
     printf '%s\n' \

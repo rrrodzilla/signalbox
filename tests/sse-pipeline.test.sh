@@ -133,6 +133,7 @@ forward_event() {
         '{"correlation_id":"cid-14","stage":"s1","nested":{"ok":true}}' \
         | SIGNALBOX_RUN_SLUG="issue-14" \
             SIGNALBOX_SINK_PORT="$SINK_PORT" \
+            EMERGENT_CORRELATION_ID="cor_01kyk5bd3xfcgbvh2tacztktzb" \
             "$FORWARD_SUBJECT" implement shard.built \
             >"$FORWARD_STDOUT" 2>"$FORWARD_STDERR"
     FORWARD_STATUS=$?
@@ -259,7 +260,7 @@ if [ "$READY_STATUS" -eq 0 ] \
     && jq -e '
         .type == "shard.built"
         and .engine_label == "implement"
-        and .correlation_id == "cid-14"
+        and .correlation_id == "cor_01kyk5bd3xfcgbvh2tacztktzb"
         and .payload == {
             correlation_id: "cid-14",
             stage: "s1",

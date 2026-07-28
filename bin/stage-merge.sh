@@ -34,5 +34,5 @@ for BRANCH in $(jq -r '.branches[]' <<<"$PAYLOAD"); do
 done
 
 jq -c --arg stage "$STAGE_ID" \
-    '{stage: $stage, merged: .branches, tip: "", correlation_id: .correlation_id}' <<<"$PAYLOAD" |
+    '{stage: $stage, merged: .branches, tip: ""}' <<<"$PAYLOAD" |
     jq -c --arg tip "$(git -C "$INT_WT" rev-parse --short HEAD)" '.tip = $tip'

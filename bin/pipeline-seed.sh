@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Pipeline seed: validate preconditions and emit the first phase request.
 #   SIGNALBOX_ISSUE=<n> emergent --config pipeline.toml
-# stdout = phase.request {issue, phase, correlation_id}.
+# stdout = phase.request {issue, phase}; the run's correlation rides the
+# envelope, stamped by exec-source --correlate.
 # Before resetting provenance or emitting, archive only the explicit prior-run
 # singleton allowlist under logs/<prior-correlation-id>/, preserving relative
 # paths. Current-run launch/config/PID files, direct logs, and repo state stay put.
@@ -22,9 +23,15 @@ if [ ! -d "$DOCS" ] || [ ! -f "$DOCS/ARCHI.md" ]; then
     exit 1
 fi
 
-# The pipeline seed mints the run key; phase-run.sh hands it to every child
-# engine so one correlation id covers the whole run.
-CID="$(mint_correlation_id pipe "$ISSUE")"
+# exec-source --correlate minted the run key and stamped it on the envelope of
+# everything this seed publishes; phase-run.sh hands the same id to every child
+# engine, so one correlation covers the whole run. A seed that cannot see it is
+# misconfigured — minting a substitute here would put the id in the payload and
+# nowhere the event store can find it.
+CID="$(correlation_id)" || {
+    echo "error: no correlation on the envelope; pipeline-seed's source needs --correlate" >&2
+    exit 78
+}
 mkdir -p "$RUN_DIR/state" "$RUN_DIR/logs" "$RUN_DIR/results"
 
 ARCHIVE_PATHS=(
@@ -58,7 +65,7 @@ if [ "${#PRIOR_PATHS[@]}" -gt 0 ]; then
             "$RUN_DIR/state/pipeline.json" 2>/dev/null || true
     )"
     if [ -z "$PRIOR_ID" ] || [[ ! "$PRIOR_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
-        PRIOR_ID="prev-$(correlation_stamp)"
+        PRIOR_ID="prev-$(date -u +%Y%m%d-%H%M%S)"
     fi
 
     ARCHIVE_ID="$PRIOR_ID"
@@ -109,5 +116,4 @@ jq -n \
 reset_provenance
 echo "[pipeline] issue #$ISSUE, run: $RUN_DIR, correlation_id: $CID" >&2
 
-jq -n --arg issue "$ISSUE" --arg cid "$CID" \
-    '{issue: ($issue | tonumber), phase: "plan", correlation_id: $cid}'
+jq -n --arg issue "$ISSUE" '{issue: ($issue | tonumber), phase: "plan"}'

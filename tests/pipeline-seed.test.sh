@@ -41,8 +41,14 @@ fixture() {
     STDERR_PATH="$DIR/stderr"
 }
 
+# The seed reads the run key from the message envelope, which exec-source
+# --correlate stamps and exports; standing in for it here is what makes the
+# subject runnable outside the fabric.
+SEED_CID="cor_01kyk5bd3xfcgbvh2tacztktzb"
+
 run_subject() {
-    SIGNALBOX_ISSUE=9 SIGNALBOX_RUN_SLUG=issue-9 \
+    EMERGENT_CORRELATION_ID="$SEED_CID" \
+        SIGNALBOX_ISSUE=9 SIGNALBOX_RUN_SLUG=issue-9 \
         "$FIXTURE_PATH/bin/pipeline-seed.sh" \
         >"$STDOUT_PATH" 2>"$STDERR_PATH"
     RUN_STATUS=$?
@@ -62,16 +68,17 @@ report_case() {
 seed_output_matches_state() {
     local OUTPUT="$1"
     local PIPELINE_STATE="$2"
-    local OUTPUT_CID
-    OUTPUT_CID="$(jq -r -s '.[0].correlation_id // empty' "$OUTPUT" 2>/dev/null)"
+    # The emitted phase.request carries no correlation: the envelope does.
+    # The run manifest still records it, because bin/run.sh reads that file
+    # from outside the fabric where no envelope exists.
     jq -e -s '
         length == 1
         and .[0].phase == "plan"
         and .[0].issue == 9
-        and (.[0].correlation_id | startswith("pipe-9-"))
+        and (.[0] | has("correlation_id") | not)
     ' "$OUTPUT" >/dev/null 2>&1 \
         && jq -e \
-            --arg cid "$OUTPUT_CID" '
+            --arg cid "$SEED_CID" '
                 .correlation_id == $cid
                 and .issue == 9
                 and (.started | test(

@@ -288,7 +288,8 @@ printf '%s\n' \
     '#!/usr/bin/env bash' \
     'set -euo pipefail' \
     'PAYLOAD="$(cat)"' \
-    'printf '"'"'%s\n'"'"' "$PAYLOAD" >"$SIGNALBOX_PROMOTE_MARKER"' \
+    'jq -c --arg cid "${EMERGENT_CORRELATION_ID-}" '"'"'{payload: ., envelope: $cid}'"'"' \' \
+    '    <<<"$PAYLOAD" >"$SIGNALBOX_PROMOTE_MARKER"' \
     'case "${SIGNALBOX_PROMOTE_MODE:-artifact}" in' \
     '    artifact)' \
     '        jq -c '"'"'. + {outcome: "ARTIFACT", log: "fixture-promote.log"}'"'"' <<<"$PAYLOAD"' \
@@ -663,11 +664,8 @@ if [ "$SUBJECT_STATUS" -eq 0 ] \
         and .payload.outcome == "ARTIFACT"
     ' "$RUN_DIR/state/complete.json" >/dev/null 2>&1 \
     && jq -e '
-        . == {
-            issue: 3210,
-            phase: "promote",
-            correlation_id: "promote-correlation"
-        }
+        .payload == {issue: 3210, phase: "promote"}
+        and .envelope == "promote-correlation"
     ' "$PROMOTE_MARKER" >/dev/null 2>&1 \
     && [ ! -e "$RUN_DIR/state/pipeline-promote.stamp" ]; then
     OK=0

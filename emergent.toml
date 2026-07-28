@@ -21,7 +21,7 @@ socket_path = "auto"
 [[sources]]
 name = "seed"
 path = "~/.local/share/emergent/primitives/bin/exec-source"
-args = ["--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/seed.sh"]
+args = ["--correlate", "--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/seed.sh"]
 publishes = ["exec.output"]
 
 # jq's clock formatting is always UTC while seed scripts stamped local time, so

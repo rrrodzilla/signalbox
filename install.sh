@@ -272,10 +272,20 @@ if [ -z "$GATE_CMD" ]; then
 else
     need "${GATE_CMD%% *}" "the testing gate runs: $GATE_CMD"
 fi
+PRIMITIVES="$HOME/.local/share/emergent/primitives/bin"
 for p in exec-source exec-handler exec-sink stream-runner; do
-    [ -x "$HOME/.local/share/emergent/primitives/bin/$p" ] \
+    [ -x "$PRIMITIVES/$p" ] \
         || { echo "preflight: missing primitive $p — run: emergent marketplace install exec-source exec-handler exec-sink stream-runner" >&2; MISSING=1; }
 done
+# Every seed source declares --correlate, and the run's id reaches scripts only
+# because the exec primitives export the envelope. A primitive predating that
+# support would fail each seed with a bare argument error at launch, long after
+# this install; check the capability here instead.
+if [ -x "$PRIMITIVES/exec-source" ] \
+    && ! "$PRIMITIVES/exec-source" --help 2>&1 | grep -q -- '--correlate'; then
+    echo "preflight: exec-source has no --correlate — correlation now rides the message envelope; update with: emergent marketplace update" >&2
+    MISSING=1
+fi
 gh auth status >/dev/null 2>&1 \
     || { echo "preflight: gh is not authenticated — run: gh auth login" >&2; MISSING=1; }
 [ -n "$(git -C "$TARGET" config user.signingkey || true)" ] \

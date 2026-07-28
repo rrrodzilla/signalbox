@@ -25,6 +25,5 @@ jq -c --arg path "$PLAN_PATH" '{
   shards: ([.plan.stages[].shards | length] | add),
   scope_notes: (.plan.scope_notes // ""),
   path: $path,
-  round: .round,
-  correlation_id
+  round: .round
 }' <<<"$PAYLOAD"

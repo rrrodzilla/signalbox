@@ -155,6 +155,7 @@ ENVELOPE="$(
         --arg repo_root "$REPO_ROOT" \
         --arg instance_id "$INSTANCE_ID" \
         --arg issue_env "${SIGNALBOX_ISSUE:-}" \
+        --arg correlation_id "${EMERGENT_CORRELATION_ID:-}" \
         --arg feature_env "$FEATURE" \
         '
         def integer_or_null($value):
@@ -181,12 +182,10 @@ ENVELOPE="$(
             type: $type,
             engine_label: $engine_label,
             sent_at: $sent_at,
+            # The run id rides the envelope, which the exec-sink exports
+            # as EMERGENT_CORRELATION_ID; the payload no longer carries it.
             correlation_id: (
-                if ($payload | type) == "object"
-                    and ($payload | has("correlation_id"))
-                then $payload.correlation_id
-                else null
-                end
+                if $correlation_id == "" then null else $correlation_id end
             ),
             payload: $payload,
             instance: {

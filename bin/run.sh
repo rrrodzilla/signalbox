@@ -57,15 +57,20 @@ cr_correlation_id() {
 }
 
 forward_event() {
-    local TOPIC="$1" PAYLOAD="$2"
+    local TOPIC="$1" PAYLOAD="$2" CORRELATION="${3:-}"
 
     # Dashboard delivery is parity-only. Detach all output and do not wait:
     # an unavailable or wedged shared sink must never stall this launcher.
     # 8>&- keeps this launcher's run ownership out of the detached child, which
     # may outlive the launcher; an inherited copy would hold the run claimed
     # after exit. Closing an unopened fd is a no-op if the claim was never made.
+    #
+    # In the topology an exec-sink exports the envelope; here the launcher
+    # stands in for it, so the dashboard reads the run's id from the same
+    # variable either way.
     printf '%s\n' "$PAYLOAD" \
-        | "$ROOT/bin/sse-forward.sh" pipeline "$TOPIC" \
+        | EMERGENT_CORRELATION_ID="$CORRELATION" \
+            "$ROOT/bin/sse-forward.sh" pipeline "$TOPIC" \
             >/dev/null 2>&1 8>&- &
 }
 
@@ -223,8 +228,9 @@ fresh_cr_correlation() {
     cr_correlation_id "$ARTIFACT" 2>/dev/null || true
 }
 
-# The terminal's correlation ID comes from the artifact that actually settled
-# it, keyed on the observed outcome — never from the phase alone. A run
+# This launcher runs outside the fabric, so there is no envelope to read: the
+# terminal's correlation ID comes from the artifact that actually settled it,
+# keyed on the observed outcome — never from the phase alone. A run
 # directory is reused across launches, so plan.json, state/gate.json and
 # results/CR.md all survive from the previous attempt: reading results/CR.md
 # for every review terminal would stamp a fresh PARKED or ESCALATED record with
@@ -232,7 +238,7 @@ fresh_cr_correlation() {
 # state/pending.json or state/escalated.json. Outcomes with no artifact of
 # their own (TIMEOUT, ENGINE_DIED) resolve to empty, which record_terminal
 # writes as null: no correlation is truthful, borrowed correlation is not.
-resolve_correlation_id() {
+settled_correlation_id() {
     local CORRELATION=""
 
     case "$PHASE:$OUTCOME" in
@@ -264,7 +270,7 @@ record_terminal() {
     local PARKED_VALUE="$2"
     local CORRELATION_VALUE OBSERVATION NEXT_STEP REASON PAYLOAD TOPIC ARTIFACT
 
-    CORRELATION_VALUE="$(resolve_correlation_id)"
+    CORRELATION_VALUE="$(settled_correlation_id)"
     OBSERVATION="$(terminal_observation)"
     NEXT_STEP="$(terminal_next_step)"
     REASON="Standalone launcher terminal: observed $OBSERVATION. No operator verification ran; bin/operator.sh runs only in the pipeline topology. Next step: $NEXT_STEP."
@@ -276,23 +282,23 @@ record_terminal() {
             --argjson parked "$PARKED_VALUE" \
             --arg outcome "$OUTCOME" \
             --arg reason "$REASON" \
-            --arg correlation_id "$CORRELATION_VALUE" \
             '{
                 issue: ($issue | tonumber),
                 phase: $phase,
                 parked: $parked,
                 outcome: $outcome,
-                reason: $reason,
-                correlation_id: (
-                    if $correlation_id == "" then null else $correlation_id end
-                )
+                reason: $reason
             }'
     )"
 
+    # This launcher is outside the fabric, so nothing exported the envelope:
+    # stand in for the exec-sink and pass the artifact-derived id on the same
+    # channel the topology uses, rather than a second one in the payload.
     printf '%s\n' "$PAYLOAD" \
-        | "$ROOT/bin/terminal-record.sh" "$TERMINAL_KIND" "$RUN_DIR"
+        | EMERGENT_CORRELATION_ID="$CORRELATION_VALUE" \
+            "$ROOT/bin/terminal-record.sh" "$TERMINAL_KIND" "$RUN_DIR"
     TOPIC="pipeline.$TERMINAL_KIND"
-    forward_event "$TOPIC" "$PAYLOAD"
+    forward_event "$TOPIC" "$PAYLOAD" "$CORRELATION_VALUE"
 
     ARTIFACT="$RUN_DIR/state/$TERMINAL_KIND.json"
     printf 'terminal:  %s\n' "$TERMINAL_KIND"
@@ -684,18 +690,18 @@ if [ "$PHASE" = "promote" ]; then
         jq -n \
             --arg issue "$ISSUE" \
             --arg phase "promote" \
-            --arg correlation_id "$PROMOTE_CORRELATION_ID" \
             '{
                 issue: ($issue | tonumber),
-                phase: $phase,
-                correlation_id: $correlation_id
+                phase: $phase
             }'
     )"
-    forward_event "phase.request" "$REQUEST_PAYLOAD"
+    forward_event "phase.request" "$REQUEST_PAYLOAD" "$PROMOTE_CORRELATION_ID"
 
     PROMOTE_STATUS=0
     if PROMOTE_OUTPUT="$(
-        printf '%s\n' "$REQUEST_PAYLOAD" | "$ROOT/bin/promote-exec.sh" 8>&-
+        printf '%s\n' "$REQUEST_PAYLOAD" \
+            | EMERGENT_CORRELATION_ID="$PROMOTE_CORRELATION_ID" \
+                "$ROOT/bin/promote-exec.sh" 8>&-
     )"; then
         :
     else
@@ -730,7 +736,7 @@ if [ "$PHASE" = "promote" ]; then
         OUTCOME="NO_GO"
         PROMOTE_FAILURE_REASON="bin/promote-exec.sh returned phase.done without a string outcome"
     else
-        forward_event "phase.done" "$PHASE_DONE"
+        forward_event "phase.done" "$PHASE_DONE" "$PROMOTE_CORRELATION_ID"
     fi
 
     if [ "$OUTCOME" = "ARTIFACT" ]; then

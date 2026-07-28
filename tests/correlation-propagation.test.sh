@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Self-contained test runner for review correlation-id minting, topology
-# pass-through, and pipeline-to-phase propagation. No framework and no
-# dependencies beyond coreutils, git, jq, and python3 (tomllib); every fixture
-# lives under mktemp -d and every run directory uses a unique test-only slug.
+# Self-contained test runner for envelope correlation propagation: the review
+# seed reading the envelope, the seed topology declaring --correlate, the phase
+# runner handing its id to a child engine, and -- when the engine and the exec
+# primitives are installed -- a real source-to-handler trail in the event store.
+# No framework and no dependencies beyond coreutils, git, jq, and python3
+# (tomllib); every fixture lives under mktemp -d and every run directory uses a
+# unique test-only slug.
 # Prints PASS/FAIL per case and exits non-zero when any case failed.
 #
 # Deliberately no -e: cases capture subject statuses that may be non-zero so
@@ -22,6 +25,7 @@ RUN_PATHS=(
 )
 TESTS_RUN=0
 TESTS_PASSED=0
+PRIMITIVES="$HOME/.local/share/emergent/primitives/bin"
 
 cleanup() {
     local RUN_PATH
@@ -45,118 +49,109 @@ report_case() {
     fi
 }
 
-EXPECTED_CID="pipe-42-20260727-231704"
+report_skip() {
+    printf 'SKIP %s — %s\n' "$1" "$2"
+}
 
-# 1. A pipeline id is inherited byte-for-byte by the review seed.
-INHERITED_OUTPUT="$(
-    SIGNALBOX_RUN_SLUG="$SEED_SLUG" \
-        SIGNALBOX_CORRELATION_ID="$EXPECTED_CID" \
-        "$ROOT/bin/seed.sh" 2>"$FIXTURE_ROOT/seed-inherited.stderr"
-)"
-INHERITED_STATUS=$?
-INHERITED_CID="$(jq -r '.correlation_id // empty' <<<"$INHERITED_OUTPUT" 2>/dev/null)"
-OK=1
-if [ "$INHERITED_STATUS" -eq 0 ] && [ "$INHERITED_CID" = "$EXPECTED_CID" ]; then
-    OK=0
-fi
-report_case "review seed inherits the pipeline correlation id" "$OK" \
-    "status=$INHERITED_STATUS id=$INHERITED_CID"
+# A well-formed TypeID, the shape exec-source mints.
+EXPECTED_CID="cor_01kyk5bd3xfcgbvh2tacztktzb"
 
-# 2. Without a parent id the review seed mints a UTC-stamped id.
-UTC_BEFORE="$(date -u +%Y%m%d-%H%M%S)"
-MINTED_OUTPUT="$(
-    env -u SIGNALBOX_CORRELATION_ID \
+# 1. The review seed reports the envelope's id and keeps it out of the payload.
+SEED_OUTPUT="$(
+    EMERGENT_CORRELATION_ID="$EXPECTED_CID" \
         SIGNALBOX_RUN_SLUG="$SEED_SLUG" \
-        "$ROOT/bin/seed.sh" 2>"$FIXTURE_ROOT/seed-minted.stderr"
+        "$ROOT/bin/seed.sh" 2>"$FIXTURE_ROOT/seed.stderr"
 )"
-MINTED_STATUS=$?
-UTC_AFTER="$(date -u +%Y%m%d-%H%M%S)"
-MINTED_CID="$(jq -r '.correlation_id // empty' <<<"$MINTED_OUTPUT" 2>/dev/null)"
-MINTED_STAMP="${MINTED_CID: -15}"
+SEED_STATUS=$?
+SEED_STDERR="$(cat "$FIXTURE_ROOT/seed.stderr" 2>/dev/null)"
 OK=1
-if [ "$MINTED_STATUS" -eq 0 ] \
-    && [[ "$MINTED_CID" =~ ^review-[A-Za-z0-9._-]+-[0-9]{8}-[0-9]{6}$ ]] \
-    && { [ "$MINTED_STAMP" = "$UTC_BEFORE" ] \
-        || [ "$MINTED_STAMP" = "$UTC_AFTER" ]; }; then
+if [ "$SEED_STATUS" -eq 0 ] \
+    && jq -e 'has("correlation_id") | not' <<<"$SEED_OUTPUT" >/dev/null 2>&1 \
+    && jq -e '.round == 1 and (.feature | type) == "string"' \
+        <<<"$SEED_OUTPUT" >/dev/null 2>&1 \
+    && [[ "$SEED_STDERR" == *"$EXPECTED_CID"* ]]; then
     OK=0
 fi
-report_case "review seed mints a UTC-stamped correlation id" "$OK" \
-    "status=$MINTED_STATUS before=$UTC_BEFORE id=$MINTED_CID after=$UTC_AFTER"
+report_case "review seed reads the envelope and leaves the payload clean" "$OK" \
+    "status=$SEED_STATUS payload=$SEED_OUTPUT stderr=$SEED_STDERR"
 
-# 3. A non-UTC local timezone cannot change the minted UTC stamp.
-CHICAGO_BEFORE="$(date -u +%Y%m%d-%H%M%S)"
-CHICAGO_OUTPUT="$(
-    env -u SIGNALBOX_CORRELATION_ID \
-        TZ=America/Chicago SIGNALBOX_RUN_SLUG="$SEED_SLUG" \
-        "$ROOT/bin/seed.sh" 2>"$FIXTURE_ROOT/seed-chicago.stderr"
+# 2. Without an envelope the seed fails loudly. Minting a substitute here is
+# the issue #42 regression: the id would exist only in the payload, and the
+# event store would have no record of it.
+ORPHAN_OUTPUT="$(
+    env -u EMERGENT_CORRELATION_ID \
+        SIGNALBOX_RUN_SLUG="$SEED_SLUG" \
+        "$ROOT/bin/seed.sh" 2>"$FIXTURE_ROOT/seed-orphan.stderr"
 )"
-CHICAGO_STATUS=$?
-CHICAGO_AFTER="$(date -u +%Y%m%d-%H%M%S)"
-CHICAGO_CID="$(jq -r '.correlation_id // empty' <<<"$CHICAGO_OUTPUT" 2>/dev/null)"
-CHICAGO_STAMP="${CHICAGO_CID: -15}"
+ORPHAN_STATUS=$?
 OK=1
-if [ "$CHICAGO_STATUS" -eq 0 ] \
-    && [[ "$CHICAGO_CID" =~ ^review-[A-Za-z0-9._-]+-[0-9]{8}-[0-9]{6}$ ]] \
-    && { [ "$CHICAGO_STAMP" = "$CHICAGO_BEFORE" ] \
-        || [ "$CHICAGO_STAMP" = "$CHICAGO_AFTER" ]; }; then
+if [ "$ORPHAN_STATUS" -ne 0 ] && [ -z "$ORPHAN_OUTPUT" ]; then
     OK=0
 fi
-report_case "review seed stays on UTC under America/Chicago" "$OK" \
-    "status=$CHICAGO_STATUS before=$CHICAGO_BEFORE id=$CHICAGO_CID after=$CHICAGO_AFTER"
+report_case "review seed refuses to mint without an envelope" "$OK" \
+    "status=$ORPHAN_STATUS payload=$ORPHAN_OUTPUT"
 
-# 4. A malformed inherited id falls back to a newly minted review id.
+# 3. A malformed envelope value is treated as absence, not adopted.
 MALFORMED_OUTPUT="$(
-    SIGNALBOX_RUN_SLUG="$SEED_SLUG" \
-        SIGNALBOX_CORRELATION_ID="bad id" \
+    EMERGENT_CORRELATION_ID="pipe-42-20260727-231704" \
+        SIGNALBOX_RUN_SLUG="$SEED_SLUG" \
         "$ROOT/bin/seed.sh" 2>"$FIXTURE_ROOT/seed-malformed.stderr"
 )"
 MALFORMED_STATUS=$?
-MALFORMED_CID="$(jq -r '.correlation_id // empty' <<<"$MALFORMED_OUTPUT" 2>/dev/null)"
 OK=1
-if [ "$MALFORMED_STATUS" -eq 0 ] \
-    && [ "$MALFORMED_CID" != "bad id" ] \
-    && [[ "$MALFORMED_CID" =~ ^review-[A-Za-z0-9._-]+-[0-9]{8}-[0-9]{6}$ ]]; then
+if [ "$MALFORMED_STATUS" -ne 0 ] && [ -z "$MALFORMED_OUTPUT" ]; then
     OK=0
 fi
-report_case "review seed replaces a malformed inherited id" "$OK" \
-    "status=$MALFORMED_STATUS id=$MALFORMED_CID"
+report_case "review seed rejects a legacy hand-minted envelope value" "$OK" \
+    "status=$MALFORMED_STATUS payload=$MALFORMED_OUTPUT"
 
-# 5. Load unwrap-seed from TOML and prove it only unwraps the seed envelope.
-UNWRAP_PROGRAM="$(
-    python3 - "$ROOT/emergent.toml" 2>"$FIXTURE_ROOT/tomllib.stderr" <<'PYEOF'
+# 4. Every seed source declares --correlate. Without it the fabric stamps
+# nothing and every seed in that topology fails closed.
+SEED_SOURCES="$(
+    python3 - "$ROOT" 2>"$FIXTURE_ROOT/tomllib.stderr" <<'PYEOF'
+import pathlib
 import sys
 import tomllib
 
-with open(sys.argv[1], "rb") as stream:
-    topology = tomllib.load(stream)
-
-handler = next(
-    item for item in topology.get("handlers", [])
-    if item.get("name") == "unwrap-seed"
-)
-print(handler["args"][-1])
+root = pathlib.Path(sys.argv[1])
+missing = []
+seen = 0
+for name in ("pipeline.toml", "plan.toml", "implement.toml", "emergent.toml", "init.toml"):
+    with open(root / name, "rb") as stream:
+        topology = tomllib.load(stream)
+    for source in topology.get("sources", []):
+        args = source.get("args", [])
+        if not any("/bin/" in str(arg) and str(arg).endswith(".sh") for arg in args):
+            continue
+        seen += 1
+        if "--correlate" not in args:
+            missing.append(f"{name}:{source['name']}")
+print(seen, ",".join(missing))
 PYEOF
 )"
 TOML_STATUS=$?
-SEED_JSON="$(
-    jq -cn --arg cid "$EXPECTED_CID" \
-        '{feature: "fixture", workdir: "/tmp/fixture", round: 1,
-          feedback: "", correlation_id: $cid}'
-)"
-ENVELOPE="$(jq -cn --arg stdout "$SEED_JSON" '{stdout: $stdout}')"
-UNWRAPPED="$(jq -c "$UNWRAP_PROGRAM" <<<"$ENVELOPE" 2>"$FIXTURE_ROOT/unwrap.stderr")"
-UNWRAP_STATUS=$?
-UNWRAPPED_CID="$(jq -r '.correlation_id // empty' <<<"$UNWRAPPED" 2>/dev/null)"
+SEED_SOURCE_COUNT="${SEED_SOURCES%% *}"
+SEED_SOURCE_MISSING="${SEED_SOURCES#* }"
 OK=1
 if [ "$TOML_STATUS" -eq 0 ] \
-    && [ "$UNWRAP_STATUS" -eq 0 ] \
-    && [ "$UNWRAPPED_CID" = "$EXPECTED_CID" ] \
-    && [[ "$UNWRAP_PROGRAM" != *now* ]] \
-    && [[ "$UNWRAP_PROGRAM" != *strftime* ]]; then
+    && [ "$SEED_SOURCE_COUNT" -eq 5 ] \
+    && [ -z "$SEED_SOURCE_MISSING" ]; then
     OK=0
 fi
-report_case "unwrap-seed passes the id through without minting" "$OK" \
-    "toml=$TOML_STATUS jq=$UNWRAP_STATUS id=$UNWRAPPED_CID program=$UNWRAP_PROGRAM"
+report_case "every seed source declares --correlate" "$OK" \
+    "toml=$TOML_STATUS count=$SEED_SOURCE_COUNT missing=$SEED_SOURCE_MISSING"
+
+# 5. No topology threads correlation_id through a payload any more; the
+# envelope is the single channel.
+PAYLOAD_THREADING="$(
+    grep -l 'correlation_id' "$ROOT"/*.toml 2>/dev/null | tr '\n' ' '
+)"
+OK=1
+if [ -z "${PAYLOAD_THREADING// /}" ]; then
+    OK=0
+fi
+report_case "no topology carries correlation_id in a payload" "$OK" \
+    "files=$PAYLOAD_THREADING"
 
 FAKE_BIN="$FIXTURE_ROOT/bin"
 mkdir -p "$FAKE_BIN"
@@ -165,7 +160,7 @@ cat >"$FAKE_BIN/emergent" <<'FAKEEOF'
 set -euo pipefail
 
 jq -n \
-    --arg correlation_id "${SIGNALBOX_CORRELATION_ID-}" \
+    --arg correlation_id "${EMERGENT_CORRELATION_ID-}" \
     --arg issue "${SIGNALBOX_ISSUE-}" \
     --arg run_slug "${SIGNALBOX_RUN_SLUG-}" \
     '{correlation_id: $correlation_id, issue: $issue, run_slug: $run_slug}' \
@@ -189,25 +184,24 @@ chmod +x "$FAKE_BIN/emergent"
 
 run_phase_case() {
     local SLUG="$1"
-    local PAYLOAD_CID="$2"
+    local ENVELOPE_CID="$2"
     local OUTPUT_FILE="$3"
     local ENV_FILE="$4"
     local STDERR_FILE="$5"
     local RUN_DIR="$ROOT/runs/$SLUG"
 
     mkdir -p "$RUN_DIR"
-    printf '%s' "$(
-        jq -cn --arg cid "$PAYLOAD_CID" \
-            '{issue: 42, phase: "plan", correlation_id: $cid}'
-    )" \
-        | FAKE_ENGINE_ENV_FILE="$ENV_FILE" \
+    jq -cn '{issue: 42, phase: "plan"}' \
+        | EMERGENT_CORRELATION_ID="$ENVELOPE_CID" \
+            FAKE_ENGINE_ENV_FILE="$ENV_FILE" \
             FAKE_ENGINE_RUN_DIR="$RUN_DIR" \
             SIGNALBOX_RUN_SLUG="$SLUG" \
             PATH="$FAKE_BIN:$PATH" \
             "$ROOT/bin/phase-run.sh" >"$OUTPUT_FILE" 2>"$STDERR_FILE"
 }
 
-# 6. A valid phase.request id reaches the child engine and phase.done unchanged.
+# 6. The phase runner hands its own envelope id to the child engine, on the
+# variable the child's exec-source reads.
 VALID_OUTPUT="$FIXTURE_ROOT/phase-valid.json"
 VALID_ENV="$FIXTURE_ROOT/phase-valid-env.json"
 run_phase_case \
@@ -222,17 +216,17 @@ if [ "$VALID_STATUS" -eq 0 ] \
         '.correlation_id == $cid and .issue == "42" and .run_slug == $slug' \
         "$VALID_ENV" >/dev/null 2>&1 \
     && jq -e \
-        --arg cid "$EXPECTED_CID" \
-        '.correlation_id == $cid
-         and .outcome == "ARTIFACT"
-         and (.log | type == "string" and length > 0)' \
+        'has("correlation_id") | not' "$VALID_OUTPUT" >/dev/null 2>&1 \
+    && jq -e \
+        '.outcome == "ARTIFACT" and (.log | type == "string" and length > 0)' \
         "$VALID_OUTPUT" >/dev/null 2>&1; then
     OK=0
 fi
-report_case "phase runner propagates the pipeline id to its child" "$OK" \
+report_case "phase runner hands its envelope id to the child engine" "$OK" \
     "status=$VALID_STATUS env=$(head -c 200 "$VALID_ENV" 2>/dev/null) done=$(head -c 200 "$VALID_OUTPUT" 2>/dev/null)"
 
-# 7. A malformed payload id reaches the child as the empty mint-own signal.
+# 7. A malformed envelope value reaches the child empty, so the child's
+# exec-source mints its own rather than adopting a value the store never saw.
 INVALID_OUTPUT="$FIXTURE_ROOT/phase-malformed.json"
 INVALID_ENV="$FIXTURE_ROOT/phase-malformed-env.json"
 run_phase_case \
@@ -244,16 +238,76 @@ if [ "$INVALID_STATUS" -eq 0 ] \
     && jq -e \
         --arg slug "$MALFORMED_PHASE_SLUG" \
         '.correlation_id == "" and .issue == "42" and .run_slug == $slug' \
-        "$INVALID_ENV" >/dev/null 2>&1 \
-    && jq -e \
-        '.correlation_id == "pipe 42"
-         and .outcome == "ARTIFACT"
-         and (.log | type == "string" and length > 0)' \
-        "$INVALID_OUTPUT" >/dev/null 2>&1; then
+        "$INVALID_ENV" >/dev/null 2>&1; then
     OK=0
 fi
 report_case "phase runner clears a malformed id before child launch" "$OK" \
-    "status=$INVALID_STATUS env=$(head -c 200 "$INVALID_ENV" 2>/dev/null) done=$(head -c 200 "$INVALID_OUTPUT" 2>/dev/null)"
+    "status=$INVALID_STATUS env=$(head -c 200 "$INVALID_ENV" 2>/dev/null)"
+
+# 8. End to end against the real fabric: exec-source mints, exec-handler
+# forwards, the command sees the same value, and the event store records it on
+# the envelope of every message.
+E2E_NAME="source-to-handler trail lands on the envelope"
+if ! command -v emergent >/dev/null 2>&1; then
+    report_skip "$E2E_NAME" "emergent engine not installed"
+elif [ ! -x "$PRIMITIVES/exec-source" ] || [ ! -x "$PRIMITIVES/exec-handler" ]; then
+    report_skip "$E2E_NAME" "exec primitives not installed"
+else
+    E2E_DIR="$FIXTURE_ROOT/e2e"
+    mkdir -p "$E2E_DIR/logs"
+    # Quoted heredoc: the shell must not touch $EMERGENT_CORRELATION_ID, and
+    # TOML rejects a backslash before it. Paths go in afterwards.
+    cat >"$FIXTURE_ROOT/e2e.toml.in" <<'E2EEOF'
+[engine]
+name = "__NAME__"
+socket_path = "auto"
+api_port = 0
+
+[event_store]
+json_log_dir = "__DIR__/logs"
+sqlite_path = "__DIR__/events.db"
+retention_days = 1
+
+[[sources]]
+name = "seed"
+path = "__PRIMITIVES__/exec-source"
+args = ["--correlate", "--shell", "sh", "--command", "jq -nc --arg c \"$EMERGENT_CORRELATION_ID\" '{from_command: $c}'"]
+publishes = ["trail.seed"]
+
+[[handlers]]
+name = "hop"
+path = "__PRIMITIVES__/exec-handler"
+args = ["-s", "trail.seed", "--publish-as", "trail.hop", "--", "sh", "-c", "jq -c --arg c \"$EMERGENT_CORRELATION_ID\" '.stdout | fromjson | . + {from_handler: $c}'"]
+subscribes = ["trail.seed"]
+publishes = ["trail.hop"]
+E2EEOF
+    sed -e "s|__NAME__|signalbox-correlation-test-$$|g" \
+        -e "s|__DIR__|$E2E_DIR|g" \
+        -e "s|__PRIMITIVES__|$PRIMITIVES|g" \
+        "$FIXTURE_ROOT/e2e.toml.in" >"$E2E_DIR/emergent.toml"
+
+    timeout 25 emergent --config "$E2E_DIR/emergent.toml" \
+        >"$E2E_DIR/engine.log" 2>&1
+    E2E_TRAIL="$(
+        cat "$E2E_DIR"/logs/events-*.jsonl 2>/dev/null \
+            | jq -Rr 'fromjson? // empty
+                      | select(.message.message_type == "trail.hop")
+                      | [.message.correlation_id,
+                         .message.payload.from_command,
+                         .message.payload.from_handler] | @tsv'
+    )"
+    ENVELOPE_CID="$(cut -f1 <<<"$E2E_TRAIL")"
+    COMMAND_CID="$(cut -f2 <<<"$E2E_TRAIL")"
+    HANDLER_CID="$(cut -f3 <<<"$E2E_TRAIL")"
+    OK=1
+    if [[ "$ENVELOPE_CID" =~ ^cor_[0-9a-hjkmnp-tv-z]{26}$ ]] \
+        && [ "$COMMAND_CID" = "$ENVELOPE_CID" ] \
+        && [ "$HANDLER_CID" = "$ENVELOPE_CID" ]; then
+        OK=0
+    fi
+    report_case "$E2E_NAME" "$OK" \
+        "envelope=$ENVELOPE_CID command=$COMMAND_CID handler=$HANDLER_CID"
+fi
 
 printf '%d/%d cases passed\n' "$TESTS_PASSED" "$TESTS_RUN"
 [ "$TESTS_PASSED" -eq "$TESTS_RUN" ]

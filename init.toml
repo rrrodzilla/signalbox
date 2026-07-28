@@ -19,7 +19,7 @@ socket_path = "auto"
 [[sources]]
 name = "init-seed"
 path = "~/.local/share/emergent/primitives/bin/exec-source"
-args = ["--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/init-seed.sh"]
+args = ["--correlate", "--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/init-seed.sh"]
 publishes = ["exec.output"]
 
 [[handlers]]

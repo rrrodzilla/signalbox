@@ -38,7 +38,7 @@ socket_path = "auto"
 [[sources]]
 name = "pipeline-seed"
 path = "~/.local/share/emergent/primitives/bin/exec-source"
-args = ["--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/pipeline-seed.sh"]
+args = ["--correlate", "--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/pipeline-seed.sh"]
 publishes = ["exec.output"]
 
 [[handlers]]
@@ -72,21 +72,21 @@ publishes = ["phase.done"]
 [[handlers]]
 name = "advance"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "phase.verified", "--publish-as", "phase.request", "--", "jq", "-c", "select(.verdict == \"PROCEED\" and (.phase == \"plan\" or .phase == \"implement\" or (.phase == \"review\" and .parked != true))) | {issue, correlation_id, phase: ({plan: \"implement\", implement: \"review\", review: \"promote\"}[.phase])}"]
+args = ["-s", "phase.verified", "--publish-as", "phase.request", "--", "jq", "-c", "select(.verdict == \"PROCEED\" and (.phase == \"plan\" or .phase == \"implement\" or (.phase == \"review\" and .parked != true))) | {issue, phase: ({plan: \"implement\", implement: \"review\", review: \"promote\"}[.phase])}"]
 subscribes = ["phase.verified"]
 publishes = ["phase.request"]
 
 [[handlers]]
 name = "complete"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "phase.verified", "--publish-as", "pipeline.complete", "--", "jq", "-c", "select(.verdict == \"PROCEED\" and (.phase == \"promote\" or (.phase == \"review\" and .parked == true))) | {issue, phase, parked: (.parked // false), reason, correlation_id}"]
+args = ["-s", "phase.verified", "--publish-as", "pipeline.complete", "--", "jq", "-c", "select(.verdict == \"PROCEED\" and (.phase == \"promote\" or (.phase == \"review\" and .parked == true))) | {issue, phase, parked: (.parked // false), reason}"]
 subscribes = ["phase.verified"]
 publishes = ["pipeline.complete"]
 
 [[handlers]]
 name = "halt-guard"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "phase.verified", "--publish-as", "pipeline.halted", "--", "jq", "-c", "select(.verdict == \"HALT\") | {issue, phase, outcome, reason, correlation_id}"]
+args = ["-s", "phase.verified", "--publish-as", "pipeline.halted", "--", "jq", "-c", "select(.verdict == \"HALT\") | {issue, phase, outcome, reason}"]
 subscribes = ["phase.verified"]
 publishes = ["pipeline.halted"]
 
@@ -99,7 +99,7 @@ subscribes = ["phase.verified"]
 [[sinks]]
 name = "completion"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "pipeline.complete", "--", "jq", "-r", "\"PIPELINE COMPLETE issue #\\(.issue)\\(if .parked then \" — PARKED FOR HUMAN APPROVAL\" else \" — MERGED (release step is yours)\" end)\\n\\(.reason)\\ntrail: bin/audit.sh \\(.correlation_id)\""]
+args = ["-s", "pipeline.complete", "--", "jq", "-r", "\"PIPELINE COMPLETE issue #\\(.issue)\\(if .parked then \" — PARKED FOR HUMAN APPROVAL\" else \" — MERGED (release step is yours)\" end)\\n\\(.reason)\\ntrail: bin/audit.sh \\(env.EMERGENT_CORRELATION_ID)\""]
 subscribes = ["pipeline.complete"]
 
 [[sinks]]

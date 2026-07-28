@@ -3,7 +3,7 @@
 #   {workdir, round, feedback, thread_id?, fix_session_id?}
 # stdout = review.raw payload
 #   {verdict, review, round, workdir, thread_id, fix_session_id,
-#    correlation_id, provenance}
+#    provenance}
 #
 # Round 1 (no thread_id): fresh non-interactive Codex review of $workdir in a
 # read-only sandbox; the thread id is captured from the thread.started event.
@@ -30,7 +30,6 @@ ROUND="$(jq -r '.round' <<<"$PAYLOAD")"
 FEEDBACK="$(jq -r '.feedback // ""' <<<"$PAYLOAD")"
 THREAD_ID="$(jq -r '.thread_id // ""' <<<"$PAYLOAD")"
 FIX_SESSION_ID="$(jq -r '.fix_session_id // ""' <<<"$PAYLOAD")"
-CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
 CODEX_MODEL_RESOLVED="${CODEX_MODEL:-gpt-5.6-sol}"
 CODEX_EFFORT_RESOLVED="${CODEX_EFFORT:-high}"
 
@@ -110,6 +109,5 @@ jq -n \
     --arg workdir "$WORKDIR" \
     --arg thread_id "$THREAD_ID" \
     --arg fix_session_id "$FIX_SESSION_ID" \
-    --arg cid "$CID" \
     --argjson provenance "$PROVENANCE" \
-    '{verdict: $verdict, review: $review, round: $round, workdir: $workdir, thread_id: $thread_id, fix_session_id: $fix_session_id, correlation_id: $cid, provenance: $provenance}'
+    '{verdict: $verdict, review: $review, round: $round, workdir: $workdir, thread_id: $thread_id, fix_session_id: $fix_session_id, provenance: $provenance}'

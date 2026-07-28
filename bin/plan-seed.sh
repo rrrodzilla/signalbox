@@ -47,15 +47,16 @@ WORKTREE_LOCK="$ROOT/state/worktree.lock"
     fi
 } >&2
 
-# Stamp the pipeline run's correlation_id when inherited from
-# SIGNALBOX_CORRELATION_ID; otherwise mint impl-<feature>-<UTC> locally. Stamp
-# it on the plan AND every stage item because stream-runner emits stage items
-# verbatim. The trail is reconstructable from the event store by this one key.
-CID="$(resolve_correlation_id impl "$FEATURE")"
+# exec-source --correlate adopts the pipeline run's id when the phase runner
+# exported one, and mints one for a direct launch. Stage items no longer need
+# the id stamped into them: stream-runner holds the load message's correlation
+# for the length of the stream and replays it onto every item it emits.
+CID="$(correlation_id)" || {
+    echo "error: no correlation on the envelope; plan-seed's source needs --correlate" >&2
+    exit 78
+}
 echo "[plan-seed] correlation_id: $CID" >&2
-# Run manifest: plan.done (stream-runner's end event) carries only {count},
-# so the finisher reads the run's id from here to cite the audit trail.
+# Run manifest: the finisher runs after the stream has ended and reads the
+# run's id from here to cite the audit trail.
 jq -n --arg cid "$CID" '{correlation_id: $cid}' >"$RUN_DIR/state/run.json"
-jq -c --arg cid "$CID" \
-    '.correlation_id = $cid | .stages = [.stages[] | . + {correlation_id: $cid}]' \
-    "$RUN_DIR/plan.json"
+jq -c . "$RUN_DIR/plan.json"

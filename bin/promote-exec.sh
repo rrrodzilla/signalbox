@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Promotion executor: stdin = phase.request {issue, phase: "promote", correlation_id}
+# Promotion executor: stdin = phase.request {issue, phase: "promote"}
 # stdout = phase.done (input + {outcome, log, provenance?})
 #
 # Headless Opus performs the outward-facing promotion — push, PR, CI watch,

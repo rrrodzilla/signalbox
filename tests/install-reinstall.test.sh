@@ -64,6 +64,13 @@ fixture() {
     for COMMAND in exec-source exec-handler exec-sink stream-runner; do
         make_stub "$PRIMITIVES/$COMMAND"
     done
+    # install.sh preflights the capability, not just the file: correlation now
+    # rides the message envelope, so a primitive predating --correlate would
+    # break every seed at launch. The stub advertises it the way a current
+    # exec-source does.
+    printf '#!/usr/bin/env bash\nprintf %%s "      --correlate\\n"\nexit 0\n' \
+        >"$PRIMITIVES/exec-source"
+    chmod +x "$PRIMITIVES/exec-source"
     for COMMAND in emergent codex claude gh cargo custom-gate; do
         make_stub "$FIXTURE_STUBS/$COMMAND"
     done

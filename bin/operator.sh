@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pipeline operator: stdin = phase.done {issue, phase, outcome, log, correlation_id}
+# Pipeline operator: stdin = phase.done {issue, phase, outcome, log}
 # stdout = phase.verified (input + {verdict, reason, parked, provenance})
 #
 # Headless Opus applies the phantom-run discipline as topology: never trust

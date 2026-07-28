@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Vault researcher: bin/research.sh <aspect>
-# stdin = init.requested payload {repo, vault, correlation_id}
+# stdin = init.requested payload {repo, vault}
 # stdout = doc.researched payload
-#   {aspect, doc, content, correlation_id, provenance}
+#   {aspect, doc, content, provenance}
 #
 # One researcher per aspect, fanned out by subscription — each runs a
 # read-only Codex analysis of the repo and produces the COMPLETE document
@@ -14,7 +14,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 ASPECT="${1:?usage: research.sh <architecture|rules|testing>}"
 PAYLOAD="$(cat)"
-CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
 CODEX_MODEL_RESOLVED="${CODEX_MODEL:-gpt-5.6-sol}"
 CODEX_EFFORT_RESOLVED="${CODEX_EFFORT:-high}"
 
@@ -52,6 +51,5 @@ jq -n \
     --arg aspect "$ASPECT" \
     --arg doc "$DOC" \
     --rawfile content "$LAST" \
-    --arg cid "$CID" \
     --argjson provenance "$PROVENANCE" \
-    '{aspect: $aspect, doc: $doc, content: $content, correlation_id: $cid, provenance: $provenance}'
+    '{aspect: $aspect, doc: $doc, content: $content, provenance: $provenance}'

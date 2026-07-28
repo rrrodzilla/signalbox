@@ -14,6 +14,8 @@
 set -euo pipefail
 # shellcheck source=_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+# shellcheck source=_correlation.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_correlation.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_provenance.sh"
 
 PAYLOAD="$(cat)"
@@ -38,7 +40,7 @@ case "$ACTION" in
 esac
 
 ROUND="$(jq -r '.round // 1' <<<"$PAYLOAD")"
-CID="$(jq -r '.correlation_id // ""' <<<"$PAYLOAD")"
+CID="$(correlation_id_or_empty)"
 REVIEW_HEAD="$(jq -r '.review // ""' <<<"$PAYLOAD" | head -c 700)"
 WORKDIR="$(jq -r '.workdir // ""' <<<"$PAYLOAD")"
 

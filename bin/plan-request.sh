@@ -28,15 +28,17 @@ for n in $(jq -r '.body' <<<"$CONTEXT" | grep -oiE 'blocked by[^#]*#[0-9]+' | gr
     BLOCKERS="$(jq -c --argjson b "$B" '. + [$b]' <<<"$BLOCKERS")"
 done
 
-# Use the pipeline's id when the phase runner supplied one; a direct launch
-# mints its own plan-prefixed UTC id.
-CID="$(resolve_correlation_id plan "$ISSUE")"
+# exec-source --correlate adopts the pipeline's id when the phase runner
+# exported one and mints its own for a direct launch.
+CID="$(correlation_id)" || {
+    echo "error: no correlation on the envelope; plan-request's source needs --correlate" >&2
+    exit 78
+}
 echo "[plan-request] issue #$ISSUE, $(jq 'length' <<<"$BLOCKERS") blocker(s), correlation_id: $CID" >&2
 
 jq -n \
     --argjson issue "$CONTEXT" \
     --argjson blockers "$BLOCKERS" \
-    --arg cid "$CID" \
     '{issue: $issue.number, title: $issue.title, body: $issue.body,
       labels: [$issue.labels[].name], blockers: $blockers,
-      round: 1, feedback: "", correlation_id: $cid}'
+      round: 1, feedback: ""}'

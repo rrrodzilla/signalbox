@@ -202,6 +202,7 @@ done
 
 HOLD_REASON=""
 HOLD_DEADLINE=""
+PARK_HELD=false
 if [ "$PHASE" = "review" ] && [ "$OUTCOME" = "PARKED" ]; then
     PARK_GRACE_DEFAULT=86400
     PARK_GRACE_MAX=86400
@@ -259,15 +260,31 @@ if [ "$HANDOFF_READY" = true ]; then
         else
             echo "[pipeline] port lease could not be transferred to the held engine; the registry entry may be released while the webhook is still listening" >&2
         fi
-        write_park_record true "$TRANSFERRED_PID" "$ENGINE_START_ID" \
-            "$HOLD_DEADLINE" "$LEASE_TRANSFERRED" ""
+
+        # Spawning the reaper and transferring the lease both take time, and the
+        # engine can exit or be stopped inside that window — a transfer refused
+        # for a dead target is one symptom of exactly that. The record and the
+        # narration may only claim a live webhook if this exact process is still
+        # running now; otherwise the park is a closed window and says so.
+        if engine_running "$TRANSFERRED_PID" "$ENGINE_START_ID"; then
+            PARK_HELD=true
+            write_park_record true "$TRANSFERRED_PID" "$ENGINE_START_ID" \
+                "$HOLD_DEADLINE" "$LEASE_TRANSFERRED" ""
+        else
+            PARK_REASON="The approval window is closed because the review engine exited while ownership of it was being transferred."
+            write_park_record false null "" null "$LEASE_TRANSFERRED" \
+                "$PARK_REASON"
+            echo "[pipeline] $PARK_REASON" >&2
+        fi
     fi
 
     # Ownership has passed to the reaper: emptying PID makes stop_engine a no-op,
     # so the still-armed traps can no longer terminate the transferred engine.
     PID=""
     if [ "$HOLD_REASON" = "park" ]; then
-        echo "[pipeline] review parked; deliberately leaving idle engine pid $TRANSFERRED_PID open at http://127.0.0.1:$APPROVAL_PORT/approve for approval (deadline: ${HOLD_DEADLINE}s)" >&2
+        if [ "$PARK_HELD" = true ]; then
+            echo "[pipeline] review parked; deliberately leaving idle engine pid $TRANSFERRED_PID open at http://127.0.0.1:$APPROVAL_PORT/approve for approval (deadline: ${HOLD_DEADLINE}s)" >&2
+        fi
     else
         echo "[pipeline] review terminal reached with docs-sync in flight; handed engine pid $TRANSFERRED_PID to deferred reaper (deadline: 960s)" >&2
     fi

@@ -1118,23 +1118,42 @@ if [ "$PHASE" = "review" ] && [ "$OUTCOME" = "PARKED" ]; then
         if "$(dirname "${BASH_SOURCE[0]}")/ports.sh" transfer \
             "$RUN_SLUG" "$PARK_ENGINE_PID" >/dev/null 2>&1; then
             LEASE_TRANSFERRED=true
-            LEASED=0
         else
             echo "[standalone] port lease could not be transferred to the held engine; the registry entry may be released while the webhook is still listening" >&2
         fi
-        write_park_record true "$PARK_ENGINE_PID" "$PARK_START_ID" \
-            "$PARK_DEADLINE" "$LEASE_TRANSFERRED" ""
 
-        CHILD_REAPED=1
-        PID_FILE_OWNED=0
-        # This prevents an interactive shell from HUPing the held child as this
-        # launcher exits. The engine still shares its terminal session, so a
-        # park that must outlive that terminal should be launched under
-        # nohup/setsid, as the operator narration explains.
-        disown "$CHILD_PID" 2>/dev/null || true
-        PARK_HELD=true
-        printf '[standalone] review parked; deliberately leaving idle engine pid %s open at http://127.0.0.1:%s/approve for approval (deadline: %ss); use nohup/setsid when the park must outlive this terminal\n' \
-            "$PARK_ENGINE_PID" "$PORT_APPROVAL" "$PARK_DEADLINE" >&2
+        # Spawning the reaper and transferring the lease both take time, and the
+        # engine can exit or be stopped inside that window — a transfer refused
+        # for a dead target is one symptom of exactly that. Only a process that
+        # is still exactly this engine, and still running, may be recorded and
+        # narrated as a held webhook; anything else is a closed park window,
+        # which leaves PARK_HELD false so the launcher reaps below and cleanup
+        # releases the lease it still owns.
+        if engine_running "$PARK_ENGINE_PID" "$PARK_START_ID"; then
+            if [ "$LEASE_TRANSFERRED" = true ]; then
+                # The lease now names the held engine, so this launcher's
+                # cleanup must no longer release it on the way out.
+                LEASED=0
+            fi
+            write_park_record true "$PARK_ENGINE_PID" "$PARK_START_ID" \
+                "$PARK_DEADLINE" "$LEASE_TRANSFERRED" ""
+
+            CHILD_REAPED=1
+            PID_FILE_OWNED=0
+            # This prevents an interactive shell from HUPing the held child as
+            # this launcher exits. The engine still shares its terminal session,
+            # so a park that must outlive that terminal should be launched under
+            # nohup/setsid, as the operator narration explains.
+            disown "$CHILD_PID" 2>/dev/null || true
+            PARK_HELD=true
+            printf '[standalone] review parked; deliberately leaving idle engine pid %s open at http://127.0.0.1:%s/approve for approval (deadline: %ss); use nohup/setsid when the park must outlive this terminal\n' \
+                "$PARK_ENGINE_PID" "$PORT_APPROVAL" "$PARK_DEADLINE" >&2
+        else
+            PARK_REASON="The approval window is closed because the review engine exited while ownership of it was being transferred."
+            write_park_record false null "" null "$LEASE_TRANSFERRED" \
+                "$PARK_REASON"
+            printf '[standalone] %s\n' "$PARK_REASON" >&2
+        fi
     else
         if [ -z "$PARK_START_ID" ] || [ -z "$PARK_STARTTIME" ]; then
             PARK_REASON="The approval window is closed because the review engine identity was unreadable, so a safe deferred handoff was impossible."

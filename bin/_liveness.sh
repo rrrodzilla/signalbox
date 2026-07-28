@@ -12,6 +12,9 @@
 #   owner_live <pid> <recorded-identity>
 #     stdout: empty
 #     status: 0 when the recorded owner is conservatively still live; 1 otherwise
+#   engine_running <pid> <recorded-identity>
+#     stdout: empty
+#     status: 0 when the recorded owner is still live AND not a zombie; 1 otherwise
 #   live_runs <runs-dir>
 #     stdout: one "<slug>\t<pid>\t<phase>" line per live launched engine
 #     status: always 0; launch metadata that is unparseable, not an object, or
@@ -66,6 +69,24 @@ owner_live() {
     CURRENT="$(proc_identity "$PID_VALUE" || true)"
     [ -n "$CURRENT" ] || return 0
     [ "$CURRENT" = "$RECORDED" ]
+}
+
+# The recorded owner is still RUNNING, not merely still present. A launcher's
+# engine that exits stays visible as a zombie until the launcher reaps it, and
+# both kill(0) and the start identity still answer for that corpse — so
+# owner_live alone cannot tell a held engine from one that just died. Any site
+# that claims a handed-off engine is still serving must ask this instead. An
+# unreadable /proc leaves liveness as the only evidence, which owner_live has
+# already weighed conservatively.
+engine_running() {
+    local PID_VALUE="${1:-}" RECORDED="${2:-}" STATE=""
+
+    owner_live "$PID_VALUE" "$RECORDED" || return 1
+    # comm (field 2) may hold spaces and parens, so state (field 3) is the first
+    # field after the LAST ')'.
+    STATE="$(awk '{ sub(/^.*\) /, ""); print $1 }' \
+        "/proc/$PID_VALUE/stat" 2>/dev/null || true)"
+    [ "$STATE" != "Z" ]
 }
 
 live_runs() (

@@ -3,6 +3,8 @@
 # Invocation:
 #   bin/ports.sh lease <slug>          stdout = leased base port
 #   bin/ports.sh transfer <slug> <pid> stdout = existing base port
+#     transfer fails unless the target is alive with a readable start identity,
+#     so a lease never names an owner reap_dead cannot judge exactly.
 #   bin/ports.sh release <slug>        stdout = empty
 #   bin/ports.sh list                  stdout = human-readable global lease table
 # Diagnostics are written to stderr. This is an operator utility, not a
@@ -223,8 +225,26 @@ case "$COMMAND" in
             exit 1
         fi
 
-        BASE="$(jq -r --arg key "$KEY" '.[$key].base' "$REGISTRY")"
+        # An entry without an exact start identity is the one entry reap_dead
+        # cannot judge: owner_live falls back to bare liveness, so once the
+        # kernel hands this number to an unrelated process the lease is
+        # preserved forever and its port never returns to the pool. The target
+        # may also exit between the check above and this read. Both cases are
+        # refusals, not silently weaker leases — the caller then knows the
+        # handoff did not happen.
         TRANSFER_START="$(proc_identity "$TRANSFER_PID" || true)"
+        if [ -z "$TRANSFER_START" ]; then
+            echo "error: cannot transfer run $KEY to pid $TRANSFER_PID: start identity unreadable" >&2
+            exit 1
+        fi
+        TRANSFER_RECHECK="$(proc_identity "$TRANSFER_PID" || true)"
+        if [ -z "$TRANSFER_RECHECK" ] \
+            || [ "$TRANSFER_RECHECK" != "$TRANSFER_START" ]; then
+            echo "error: pid $TRANSFER_PID stopped being the process run $KEY was being transferred to" >&2
+            exit 1
+        fi
+
+        BASE="$(jq -r --arg key "$KEY" '.[$key].base' "$REGISTRY")"
         STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         write_registry \
             '.[$key] = {base: $base, pid: $pid, start: $start, ts: $ts}' \

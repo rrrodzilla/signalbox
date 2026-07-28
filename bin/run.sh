@@ -80,7 +80,12 @@ write_park_record() {
     local APPROVE_COMMAND
     local SINCE
 
-    APPROVE_COMMAND="curl -s -X POST $APPROVE_URL -H 'Content-Type: application/json' --data @$PENDING"
+    # The recorded command is meant to be pasted and run verbatim, so the
+    # pending path has to survive as a single shell word: a harness installed
+    # under a path with a space would otherwise split `--data @` across
+    # arguments and curl would post the wrong file (or none). printf %q yields
+    # exactly one word for any path.
+    APPROVE_COMMAND="curl -s -X POST $APPROVE_URL -H 'Content-Type: application/json' --data @$(printf '%q' "$PENDING")"
     SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     jq -n \
         --argjson held "$HELD_VALUE" \
@@ -174,8 +179,11 @@ terminal_next_step() {
             ;;
         review:PARKED)
             if [ "${PARK_HELD:-false}" = true ]; then
-                printf "curl -s -X POST http://127.0.0.1:%s/approve -H 'Content-Type: application/json' --data @%s/state/pending.json; the webhook stays live until that POST or the %ss park deadline; abandoning the park means SIGTERMing recorded engine pid %s" \
-                    "$PORT_APPROVAL" "$RUN_DIR" "$PARK_DEADLINE" "$PARK_ENGINE_PID"
+                # Same single-shell-word requirement as the recorded command in
+                # write_park_record: the operator pastes this line as-is.
+                printf "curl -s -X POST http://127.0.0.1:%s/approve -H 'Content-Type: application/json' --data @%s; the webhook stays live until that POST or the %ss park deadline; abandoning the park means SIGTERMing recorded engine pid %s" \
+                    "$PORT_APPROVAL" "$(printf '%q' "$RUN_DIR/state/pending.json")" \
+                    "$PARK_DEADLINE" "$PARK_ENGINE_PID"
             else
                 printf 'inspect state/pending.json, then relaunch bin/run.sh %s --phase review' "$ISSUE"
             fi

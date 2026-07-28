@@ -390,10 +390,15 @@ REAPER_PID="$(head -n 1 "$REAPER_PID_FILE" 2>/dev/null || true)"
 [ -n "$PARK_PID" ] && CHILD_PIDS+=("$PARK_PID")
 [ -n "$REAPER_PID" ] && CHILD_PIDS+=("$REAPER_PID")
 
+# The pending path in the recorded command must be one shell word, whatever the
+# fixture path contains, so the expectation is the printf %q form rather than
+# the raw path.
+PENDING_ARG="$(printf '%q' "$RUN_DIR/state/pending.json")"
 OK=1
 if [ "$REAPER_READY" -eq 0 ] \
     && jq -e \
         --arg run_dir "$RUN_DIR" \
+        --arg pending_arg "$PENDING_ARG" \
         '
         .held == true
         and .issue == 3203
@@ -404,7 +409,7 @@ if [ "$REAPER_READY" -eq 0 ] \
         and .approve_command == (
             "curl -s -X POST " + .approve_url
             + " -H '\''Content-Type: application/json'\'' --data @"
-            + $run_dir + "/state/pending.json"
+            + $pending_arg
         )
         and .pending == ($run_dir + "/state/pending.json")
         and (.pid | type) == "number"

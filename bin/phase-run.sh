@@ -131,7 +131,12 @@ write_park_record() {
     local APPROVE_COMMAND
     local SINCE
 
-    APPROVE_COMMAND="curl -s -X POST $APPROVE_URL -H 'Content-Type: application/json' --data @$PENDING"
+    # The recorded command is meant to be pasted and run verbatim, so the
+    # pending path has to survive as a single shell word: a harness installed
+    # under a path with a space would otherwise split `--data @` across
+    # arguments and curl would post the wrong file (or none). printf %q yields
+    # exactly one word for any path.
+    APPROVE_COMMAND="curl -s -X POST $APPROVE_URL -H 'Content-Type: application/json' --data @$(printf '%q' "$PENDING")"
     SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     jq -n \
         --argjson held "$HELD_VALUE" \

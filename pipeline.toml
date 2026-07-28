@@ -1,9 +1,9 @@
 # The end-to-end feature pipeline: plan -> implement -> review as ONE
-# engine, with Fable as the operator at every phase seam.
+# engine, with Opus as the operator at every phase seam.
 #
 # Each phase still runs as its own engine (the phase-runner launches it as
 # a child, watches DISK ARTIFACTS for the terminal condition, and stops it
-# gracefully so its event trail flushes). Between phases, a headless Fable
+# gracefully so its event trail flushes). Between phases, a headless Opus
 # operator applies the phantom-run discipline as topology: never trust the
 # runner's reported outcome, verify the artifacts first-hand (plan.json
 # shape, GATE GREEN + branch commits + diff ⊆ declared shard files, fresh
@@ -15,7 +15,7 @@
 #        ▲                                   │
 #        │                              phase.done
 #        │                                   │
-#        │                          operator (claude -p, Fable)
+#        │                          operator (claude -p, Opus)
 #        │                                   │
 #        │                            phase.verified
 #        │                ┌──────────────────┼──────────────────┐

@@ -2,7 +2,7 @@
 # Promotion executor: stdin = phase.request {issue, phase: "promote", correlation_id}
 # stdout = phase.done (input + {outcome, log, provenance?})
 #
-# Headless Fable performs the outward-facing promotion — push, PR, CI watch,
+# Headless Opus performs the outward-facing promotion — push, PR, CI watch,
 # squash merge, cleanup — under its own judgment (prompts/promote.md). This
 # is the delegation boundary the human chose: PR-and-merge after green CI is
 # the workflow's job; releases stay human. NO_GO leaves everything in a safe
@@ -70,11 +70,11 @@ fi
 cd "$REPO_ROOT"
 env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
     claude -p "$PROMPT" \
-    --model claude-fable-5 \
+    --model opus \
     --permission-mode bypassPermissions \
     ${ADD_DIR[@]+"${ADD_DIR[@]}"} \
     >"$LOG" 2>"$LOG.stderr" || true
-stamp_provenance "logs/promote-$ISSUE.md" claude claude-fable-5 ""
+stamp_provenance "logs/promote-$ISSUE.md" claude opus ""
 
 RESULT_LINE="$(grep -E '^\{.*"result".*\}[[:space:]]*$' "$LOG" | tail -1 || true)"
 
@@ -84,7 +84,7 @@ if [ -n "$RESULT_LINE" ] && jq -e . >/dev/null 2>&1 <<<"$RESULT_LINE"; then
     [ "$R" = "MERGED" ] && OUTCOME="ARTIFACT"
 fi
 
-PROVENANCE="$(provenance_object claude claude-fable-5 "")"
+PROVENANCE="$(provenance_object claude opus "")"
 jq -c \
     --arg outcome "$OUTCOME" \
     --arg log "$LOG" \

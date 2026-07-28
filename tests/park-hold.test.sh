@@ -485,13 +485,14 @@ if [ "$PHASE_STATUS" -eq 0 ] \
     && jq -s -e 'length == 1 and .[0].outcome == "ARTIFACT"' \
         "$PHASE_OUT" >/dev/null 2>&1 \
     && [ ! -e "$PHASE_RUN_DIR/state/park.json" ] \
+    && [[ "$ARTIFACT_REAPER_PID" =~ ^[1-9][0-9]*$ ]] \
     && [ "$ARTIFACT_ENGINE_EXIT" -eq 0 ] \
     && [ "$ARTIFACT_REAPER_EXIT" -eq 0 ] \
     && [ ! -e "$PHASE_PID_FILE" ]; then
     OK=0
 fi
 report_case "review artifact keeps deferred behavior without park record" "$OK" \
-    "status=$PHASE_STATUS engine_exit=$ARTIFACT_ENGINE_EXIT reaper_exit=$ARTIFACT_REAPER_EXIT"
+    "status=$PHASE_STATUS reaper=$ARTIFACT_REAPER_PID engine_exit=$ARTIFACT_ENGINE_EXIT reaper_exit=$ARTIFACT_REAPER_EXIT"
 
 # A7. If the engine naturally exits after pending is observed but before
 # ownership can move, the phase result stays PARKED and park.json closes the

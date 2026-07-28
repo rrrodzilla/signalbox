@@ -29,6 +29,7 @@ PROMPT_CAPTURE=""
 SUBJECT_STDOUT=""
 SUBJECT_STDERR=""
 SPAWNED_PID=""
+ZOMBIE_PID=""
 APPROVE_URL="http://127.0.0.1:8240/approve"
 APPROVE_COMMAND="curl -s -X POST $APPROVE_URL -H 'Content-Type: application/json' --data @/fixture/state/pending.json"
 
@@ -54,6 +55,43 @@ spawn_child() {
     sleep 300 &
     SPAWNED_PID=$!
     CHILD_PIDS+=("$SPAWNED_PID")
+}
+
+# The state character from /proc/<pid>/stat, read the same way the subject does:
+# fields 3+ follow the LAST ')', because comm may itself hold spaces and parens.
+proc_state_of() {
+    local STAT_LINE=""
+    local -a FIELDS=()
+
+    STAT_LINE="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+    read -ra FIELDS <<<"${STAT_LINE##*)}"
+    printf '%s\n' "${FIELDS[0]:-}"
+}
+
+# A process that has exited but has not been reaped: it still answers kill(0)
+# and keeps its start identity, which is precisely the case the state check
+# exists for. The parent execs `sleep` — a process that never waits — so the
+# corpse persists for the whole case, and killing that parent (via CHILD_PIDS)
+# hands the zombie to init, which reaps it. Returns 1 if no zombie could be
+# staged, so a case can fail loudly instead of passing vacuously.
+spawn_zombie() {
+    local PID_FILE="$1"
+    local WAITED=0
+
+    ZOMBIE_PID=""
+    bash -c 'sleep 0.2 & printf "%s\n" "$!" >"$1"; exec sleep 300' _ "$PID_FILE" &
+    CHILD_PIDS+=("$!")
+    while [ "$WAITED" -lt 200 ]; do
+        if [ -s "$PID_FILE" ]; then
+            ZOMBIE_PID="$(<"$PID_FILE")"
+            if [ "$(proc_state_of "$ZOMBIE_PID")" = "Z" ]; then
+                return 0
+            fi
+        fi
+        sleep 0.05
+        WAITED=$((WAITED + 1))
+    done
+    return 1
 }
 
 # A park record as the supervisor writes one, dated now so the deadline it
@@ -593,6 +631,31 @@ if grep -Fx -- '- held: false' "$PROMPT_CAPTURE" >/dev/null \
 fi
 report_case "a hold without a start identity is never called live" "$OK" \
     "status=$RUN_STATUS prompt=$(tail -n 16 "$PROMPT_CAPTURE" | tr '\n' ' ')"
+
+# 6d. The exited-engine check cannot stop at kill(0). A process that has exited
+# but has not been reaped answers it and still carries its recorded start
+# identity, while its approval socket is already gone — so the recorded pid and
+# the recorded identity both agree with a hold that no longer exists. Only the
+# process state separates that corpse from the running engine.
+setup_harness
+ZOMBIE_CASE="an unreaped exited engine is presented as a closed window"
+OK=1
+if spawn_zombie "$CASE_ROOT/zombie.pid"; then
+    ZOMBIE_ID="$(proc_identity "$ZOMBIE_PID")"
+    park_record true "$ZOMBIE_PID" "$ZOMBIE_ID" 86400
+    run_operator "review" "$PROCEED_OUTPUT"
+    if grep -Fx -- '- held: false' "$PROMPT_CAPTURE" >/dev/null \
+        && grep -Fx -- '- recorded_held: true' "$PROMPT_CAPTURE" >/dev/null \
+        && grep -F -- 'has already exited (process state Z)' \
+            "$PROMPT_CAPTURE" >/dev/null \
+        && valid_proceed_payload; then
+        OK=0
+    fi
+    report_case "$ZOMBIE_CASE" "$OK" \
+        "status=$RUN_STATUS prompt=$(tail -n 16 "$PROMPT_CAPTURE" | tr '\n' ' ')"
+else
+    report_case "$ZOMBIE_CASE" "$OK" "no zombie process could be staged"
+fi
 
 # 7. A declined hold is still evidence: the operator must receive the recorded
 # closed-window reason instead of repeating a dead endpoint from narration.

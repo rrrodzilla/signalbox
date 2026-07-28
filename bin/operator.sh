@@ -125,12 +125,34 @@ park_record_fields() {
     ' 2>/dev/null
 }
 
+# A process that has exited but has not yet been reaped stays in /proc as a
+# zombie: kill(0) still succeeds and its start identity is unchanged, so pid
+# liveness paired with start identity cannot tell it apart from the running
+# engine — while its listening socket is already gone. The held engine's parent
+# is the detached reaper, which collects it only at its own deadline, so that
+# window is real rather than theoretical. The state field in /proc/<pid>/stat is
+# what separates them. Fields 3+ follow the LAST ')', because comm (field 2) may
+# itself hold spaces and parens; the state is the first of those. Prints nothing
+# and returns 1 when /proc cannot answer.
+proc_state() {
+    local PID_VALUE="${1:-}" STAT_LINE=""
+    local -a FIELDS=()
+
+    [[ "$PID_VALUE" =~ ^[1-9][0-9]*$ ]] || return 1
+    STAT_LINE="$(cat "/proc/$PID_VALUE/stat" 2>/dev/null)" || return 1
+    read -ra FIELDS <<<"${STAT_LINE##*)}"
+    [ "${#FIELDS[@]}" -ge 1 ] && [ -n "${FIELDS[0]}" ] || return 1
+    printf '%s\n' "${FIELDS[0]}"
+}
+
 # park.json records what the supervisor observed when it made the hold, so a
 # recorded `held: true` is evidence of a past claim, never of a live endpoint:
 # by the time this operator runs the held engine may have exited, its pid may
 # have been recycled onto an unrelated process, or the park deadline may have
 # elapsed, and the record on disk still reads the same. The hold is therefore
-# re-established here from /proc and the clock. One sentence describing the
+# re-established here from /proc and the clock: the recorded pid must still be
+# the same process by start identity, must not merely be its own unreaped
+# corpse, and must still have park deadline left. One sentence describing the
 # outcome is printed either way; status 0 means the approval window is open at
 # this instant. Anything that cannot be established — no pid, no recorded start
 # identity, unreadable /proc, an unevaluable deadline — is a closed window
@@ -139,7 +161,8 @@ park_record_fields() {
 park_hold_status() {
     local RECORDED="$1" PID_VALUE="$2" START_VALUE="$3"
     local SINCE="$4" DEADLINE="$5"
-    local CURRENT_IDENTITY="" NOW_EPOCH="" SINCE_EPOCH="" EXPIRES_EPOCH=""
+    local CURRENT_IDENTITY="" CURRENT_STATE=""
+    local NOW_EPOCH="" SINCE_EPOCH="" EXPIRES_EPOCH=""
 
     if [ "$RECORDED" != "true" ]; then
         printf 'the record itself reports no hold, so no approval window was opened'
@@ -170,6 +193,30 @@ park_hold_status() {
             "$PID_VALUE" "$CURRENT_IDENTITY" "$START_VALUE"
         return 1
     fi
+    CURRENT_STATE="$(proc_state "$PID_VALUE" 2>/dev/null || true)"
+    if [ -z "$CURRENT_STATE" ]; then
+        printf '/proc cannot supply a current state for pid %s, so the hold cannot be confirmed live' \
+            "$PID_VALUE"
+        return 1
+    fi
+    # Z is an exited process still held open by its unreaped exit status; X and
+    # x are one already being torn down. All three keep answering kill(0) and
+    # keep their recorded start identity, and none of them still holds a socket.
+    # A state that is not a single letter is not the kernel's state field at
+    # all, so it decides nothing and the hold stays unconfirmed.
+    case "$CURRENT_STATE" in
+        Z | X | x)
+            printf 'pid %s has already exited (process state %s) and only awaits reaping, so its approval socket is closed and the window with it' \
+                "$PID_VALUE" "$CURRENT_STATE"
+            return 1
+            ;;
+        [A-Za-z]) ;;
+        *)
+            printf '/proc did not yield a readable process state for pid %s, so the hold cannot be confirmed live' \
+                "$PID_VALUE"
+            return 1
+            ;;
+    esac
 
     NOW_EPOCH="$(date -u +%s 2>/dev/null || true)"
     case "$NOW_EPOCH" in

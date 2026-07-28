@@ -5,20 +5,26 @@
 #   shard_declared_files <plan-json-path> <stage-id> <shard-id>
 #     Print the shard's declared files, one per line in declared order. Return
 #     64 unless given exactly three arguments, 1 with a `[scope]` diagnostic
-#     when the plan or declaration cannot be validated, and 0 otherwise.
-#     Validation failures never print a partial file list.
+#     when the plan or declaration cannot be validated or the list cannot be
+#     written, and 0 otherwise. Validation failures never print a partial file
+#     list.
 #   shard_touched_files <git-dir> <base-ref> <head-ref>
 #     Print paths changed on <head-ref> since its merge base with <base-ref>,
-#     one per line. Return 64 unless given exactly three arguments, 1 with a
-#     `[scope]` diagnostic when Git fails or a path contains a newline, and 0
-#     otherwise. A successful diff with no changes prints nothing.
+#     one per line. Renames are not detected, so a renamed file is reported as
+#     both its pre-image and its post-image path. Return 64 unless given
+#     exactly three arguments, 1 with a `[scope]` diagnostic when Git fails, a
+#     path contains a newline, or the list cannot be written, and 0 otherwise.
+#     A successful diff with no changes prints nothing.
 #   scope_violations <declared-newline-list> <touched-newline-list>
 #     Print each unique, nonempty touched path absent from the nonempty
 #     declared paths, preserving touched order. Return 64 unless given exactly
-#     two arguments and 0 otherwise, including when no violation exists.
+#     two arguments, 1 with a `[scope]` diagnostic when the list cannot be
+#     written, and 0 otherwise, including when no violation exists.
 #   scope_report <shard-id> <declared-newline-list> <violations-newline-list>
 #     Print a Markdown shard-scope violation report. Return 64 unless given
-#     exactly three arguments and 0 otherwise.
+#     exactly three arguments, 1 with a `[scope]` diagnostic when the report
+#     cannot be written, and 0 otherwise. The report is written whole or not
+#     at all.
 # shellcheck shell=bash
 
 shard_declared_files() {
@@ -78,7 +84,11 @@ shard_declared_files() {
         return 1
     fi
 
-    printf '%s\n' "$SCOPE_DECLARED"
+    if ! printf '%s\n' "$SCOPE_DECLARED"; then
+        printf '%s\n' \
+            "[scope] cannot write the declared file list for stage $SCOPE_STAGE_ID shard $SCOPE_SHARD_ID" >&2
+        return 1
+    fi
     return 0
 }
 
@@ -96,7 +106,7 @@ shard_touched_files() {
     local -a SCOPE_DIFF_ENTRIES=()
 
     mapfile -d '' -t SCOPE_DIFF_ENTRIES < <(
-        if git -C "$SCOPE_GIT_DIR" diff --name-only -z \
+        if git -C "$SCOPE_GIT_DIR" diff --name-only --no-renames -z \
             "$SCOPE_BASE_REF...$SCOPE_HEAD_REF" -- 2>/dev/null; then
             printf '0\0'
         else
@@ -123,7 +133,11 @@ shard_touched_files() {
     done
 
     for SCOPE_PATH in "${SCOPE_DIFF_ENTRIES[@]}"; do
-        printf '%s\n' "$SCOPE_PATH"
+        if ! printf '%s\n' "$SCOPE_PATH"; then
+            printf '%s\n' \
+                "[scope] cannot write the touched file list for $SCOPE_BASE_REF...$SCOPE_HEAD_REF" >&2
+            return 1
+        fi
     done
     return 0
 }
@@ -172,8 +186,10 @@ scope_violations() {
                 break
             fi
         done
-        if [ "$SCOPE_IS_DECLARED" -eq 0 ]; then
-            printf '%s\n' "$SCOPE_PATH"
+        if [ "$SCOPE_IS_DECLARED" -eq 0 ] && ! printf '%s\n' "$SCOPE_PATH"; then
+            printf '%s\n' \
+                "[scope] cannot write the violation list" >&2
+            return 1
         fi
     done <<<"$SCOPE_TOUCHED_LIST"
     return 0
@@ -188,23 +204,28 @@ scope_report() {
     local SCOPE_DECLARED_LIST="$2"
     local SCOPE_VIOLATIONS_LIST="$3"
     local SCOPE_PATH=""
+    local SCOPE_TEXT=""
 
-    printf '%s\n\n' "## Shard scope violation"
-    printf 'Shard `%s` exceeded its declared file scope.\n\n' "$SCOPE_SHARD_ID"
-    printf '%s\n\n' "These are the only files this shard may change:"
+    SCOPE_TEXT="## Shard scope violation"$'\n\n'
+    SCOPE_TEXT+="Shard \`$SCOPE_SHARD_ID\` exceeded its declared file scope."$'\n\n'
+    SCOPE_TEXT+="These are the only files this shard may change:"$'\n\n'
     while IFS= read -r SCOPE_PATH || [ -n "$SCOPE_PATH" ]; do
         if [ -n "$SCOPE_PATH" ]; then
-            printf -- '- %s\n' "$SCOPE_PATH"
+            SCOPE_TEXT+="- $SCOPE_PATH"$'\n'
         fi
     done <<<"$SCOPE_DECLARED_LIST"
-    printf '\n%s\n\n' \
-        "The branch also changed files this shard does not own:"
+    SCOPE_TEXT+=$'\n'"The branch also changed files this shard does not own:"$'\n\n'
     while IFS= read -r SCOPE_PATH || [ -n "$SCOPE_PATH" ]; do
         if [ -n "$SCOPE_PATH" ]; then
-            printf -- '- %s\n' "$SCOPE_PATH"
+            SCOPE_TEXT+="- $SCOPE_PATH"$'\n'
         fi
     done <<<"$SCOPE_VIOLATIONS_LIST"
-    printf '\n%s\n' \
-        "A file this shard does not own belongs to a concurrent shard in the same stage and collides at the fan-in merge. Each unowned file must be restored to its state at the integration tip and left out of this shard entirely. If the change genuinely cannot be made without that file, the correct response is to make no edit and end the reply with a line reading SCOPE-CONFLICT plus one paragraph naming the decision required."
+    SCOPE_TEXT+=$'\n'"A file this shard does not own belongs to a concurrent shard in the same stage and collides at the fan-in merge. Each unowned file must be restored to its state at the integration tip and left out of this shard entirely. If the change genuinely cannot be made without that file, the correct response is to make no edit and end the reply with a line reading SCOPE-CONFLICT plus one paragraph naming the decision required."$'\n'
+
+    if ! printf '%s' "$SCOPE_TEXT"; then
+        printf '%s\n' \
+            "[scope] cannot write the scope report for shard $SCOPE_SHARD_ID" >&2
+        return 1
+    fi
     return 0
 }

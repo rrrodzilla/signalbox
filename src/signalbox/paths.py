@@ -65,6 +65,42 @@ def install_skills(worktree: Path) -> list[str]:
     return installed
 
 
+class SkillMissing(RuntimeError):
+    """A shipped skill could not be read.
+
+    Raised rather than substituting an empty procedure: an acting agent with no
+    procedure still edits files, and it edits them by improvisation.
+    """
+
+
+def strip_frontmatter(text: str) -> str:
+    """The prose of a SKILL.md, without its YAML header.
+
+    The header exists so a skill loader can advertise the skill. A runner that
+    has no skill loader has no use for it, and it reads as noise in a prompt.
+    """
+    if not text.startswith("---"):
+        return text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return text
+    return text[end + 4 :].lstrip("\n")
+
+
+def skill_body(name: str) -> str:
+    """The procedure a skill describes, as text.
+
+    Claude Code resolves skills by name, so it only needs the name. Codex has
+    no skill loader at all, so for those runners the procedure has to travel in
+    the prompt — which means it has to be readable from here.
+    """
+    path = skills_dir() / name / "SKILL.md"
+    try:
+        return strip_frontmatter(path.read_text())
+    except OSError as exc:
+        raise SkillMissing(f"cannot read skill {name!r} at {path}: {exc}") from exc
+
+
 class WorktreeMissing(RuntimeError):
     """The run's worktree is absent.
 

@@ -32,6 +32,33 @@ ROLE_SKILLS = {
 
 READ_ONLY_ROLES = frozenset({"survey", "plan", "review", "assess", "plan-notes"})
 
+# Which model renders each judgment. This is a property of the role, not of the
+# run, because the judgments differ in kind: planning, reviewing, and assessing
+# are the load-bearing calls and get the strongest reasoning; surveying is
+# breadth-first reading; note writing is transcription of decisions already made.
+ROLE_MODELS = {
+    "survey": "fable",
+    "plan": "fable",
+    "review": "fable",
+    "assess": "fable",
+    "plan-notes": "sonnet",
+    "write-note": "sonnet",
+}
+
+
+def model_env_var(role: str) -> str:
+    return f"SIGNALBOX_MODEL_{role.upper().replace('-', '_')}"
+
+
+def model_for(role: str, env: dict[str, str] | None = None) -> str:
+    """The model for a role: per-role override, then global override, then map.
+
+    The global override exists so a whole run can be pinned to one model while
+    diagnosing a behaviour, without editing the map.
+    """
+    env = os.environ if env is None else env
+    return env.get(model_env_var(role)) or env.get("SIGNALBOX_MODEL") or ROLE_MODELS[role]
+
 
 def extract_verdict(stdout: str) -> dict | None:
     """The last complete JSON object in the output, or None.
@@ -103,7 +130,7 @@ def _workdir(payload: dict) -> str:
     return str(require_worktree(payload))
 
 
-def run(role: str, payload: dict, model: str = "opus") -> tuple[dict, int]:
+def run(role: str, payload: dict, model: str | None = None) -> tuple[dict, int]:
     """Invoke the model and return (verdict, exit_code)."""
     completed = subprocess.run(
         [
@@ -111,7 +138,7 @@ def run(role: str, payload: dict, model: str = "opus") -> tuple[dict, int]:
             "-p",
             prompt_for(role, payload),
             "--model",
-            model,
+            model or model_for(role),
             "--allowedTools",
             *tools_for(role),
         ],
@@ -153,7 +180,7 @@ def main(argv: list[str]) -> int:
         return 1
 
     try:
-        verdict, code = run(role, payload, os.environ.get("SIGNALBOX_MODEL", "opus"))
+        verdict, code = run(role, payload)
     except WorktreeMissing as exc:
         print(f"signalbox agent: {exc}", file=sys.stderr)
         return 1

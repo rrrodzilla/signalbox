@@ -6,6 +6,8 @@ import asyncio
 
 import pytest
 
+from signalbox import identity
+from signalbox.identity import CARRIED_KEYS
 from signalbox.primitives.join_terminal import (
     Joiner,
     Pending,
@@ -117,6 +119,32 @@ def test_expected_count_rejects_nonsense():
 def test_summarise_keeps_declared_scope_for_the_merge_step():
     pending = Pending(expected=1, results=[_shard(declared=["src/a.py"])])
     assert summarise("stage_id", "s1", pending, False)["results"][0]["declared"] == ["src/a.py"]
+
+
+def test_summarise_carries_every_identity_key_from_the_first_result():
+    carried = {key: f"value-{key}" for key in CARRIED_KEYS}
+    summary = summarise(
+        "join_key",
+        "joined",
+        Pending(expected=1, results=[carried]),
+        False,
+    )
+
+    assert all(summary[key] == carried[key] for key in CARRIED_KEYS)
+
+
+def test_a_future_carried_key_crosses_the_join_without_changing_its_summary(monkeypatch):
+    monkeypatch.setattr(identity, "CARRIED_KEYS", (*CARRIED_KEYS, "sentinel"))
+    summary = summarise(
+        "stage_id",
+        "joined-stage",
+        Pending(expected=1, results=[{"stage_id": "identity-stage", "sentinel": "future-value"}]),
+        False,
+    )
+
+    assert summary["stage_id"] == "identity-stage"
+    assert summary["sentinel"] == "future-value"
+    assert summary["results"] == [{"stage_id": "identity-stage"}]
 
 
 def test_join_subscribes_to_every_terminal_shard_outcome():

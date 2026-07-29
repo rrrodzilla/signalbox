@@ -11,6 +11,8 @@ import asyncio
 import os
 import sys
 
+from signalbox.identity import project
+
 
 def note_events(payload: dict) -> list[dict]:
     """One payload per note, each stamped with the run identity and the total."""
@@ -18,12 +20,12 @@ def note_events(payload: dict) -> list[dict]:
     count = len(notes)
     return [
         {
-            "run_id": payload.get("run_id"),
-            "repo": payload.get("repo"),
-            "issue": payload.get("issue"),
-            "pr": payload.get("pr"),
-            "note": note if isinstance(note, str) else note.get("note"),
-            "reason": None if isinstance(note, str) else note.get("reason"),
+            **(
+                {"note": note, "reason": None}
+                if isinstance(note, str)
+                else {"reason": None, **note}
+            ),
+            **project(payload),
             "note_count": count,
         }
         for note in notes

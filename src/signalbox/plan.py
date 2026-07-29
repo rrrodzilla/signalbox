@@ -14,6 +14,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from signalbox.identity import project
+
 MAX_ATTEMPTS = 3
 
 
@@ -118,11 +120,9 @@ def _stamp_stage(stage: dict, plan: dict) -> dict:
     """
     return {
         **stage,
+        **project(plan),
+        "stage_id": stage.get("stage_id"),
         "stage_count": len([x for x in plan.get("stages") or [] if isinstance(x, dict)]),
-        "run_id": plan.get("run_id"),
-        "repo": plan.get("repo"),
-        "issue": plan.get("issue"),
-        "base_sha": plan.get("base_sha"),
     }
 
 
@@ -138,10 +138,7 @@ def shard_events(stage: dict, envelope: dict) -> list[dict]:
     stage_id = stage.get("stage_id")
     return [
         {
-            "run_id": envelope.get("run_id"),
-            "repo": envelope.get("repo"),
-            "issue": envelope.get("issue"),
-            "base_sha": envelope.get("base_sha"),
+            **project(envelope),
             "stage_id": stage_id,
             "stage_count": envelope.get("stage_count"),
             "shard_id": shard.get("shard_id"),

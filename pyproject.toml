@@ -15,6 +15,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/signalbox"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/signalbox/dashboard.html" = "signalbox/dashboard.html"
+
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 

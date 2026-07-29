@@ -59,6 +59,11 @@ def main(argv: list[str] | None = None) -> int:
 
         return emit.main(rest)
 
+    if command == "dashboard":
+        from signalbox import dashboard
+
+        return dashboard.main(rest)
+
     if command in {
         "fetch-issue",
         "run-suite",

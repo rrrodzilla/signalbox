@@ -69,6 +69,10 @@ def test_emit_vocabulary_excludes_anything_that_advances_the_run():
         assert forbidden not in ALLOWED_EVENTS
 
 
+def test_model_provenance_is_not_in_the_agent_emission_vocabulary():
+    assert "model.invoked" not in ALLOWED_EVENTS
+
+
 def test_parse_fields_decodes_json_values():
     assert parse_fields(["a=1", "b=hi", 'c=["x"]']) == {"a": 1, "b": "hi", "c": ["x"]}
 

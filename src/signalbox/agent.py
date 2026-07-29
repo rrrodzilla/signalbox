@@ -15,7 +15,10 @@ import json
 import os
 import subprocess
 import sys
+import time
 
+from signalbox.dispatch import environment
+from signalbox.emit import post_provenance
 from signalbox.identity import carry, spoofed_keys
 from signalbox.paths import WorktreeMissing, require_worktree
 
@@ -43,6 +46,21 @@ ROLE_MODELS = {
     "assess": "fable",
     "plan-notes": "sonnet",
     "write-note": "sonnet",
+}
+
+# The successful output topic owned by each model-bearing topology role.
+# Acting roles produce their topic through `signalbox emit`; judging roles have
+# their stdout wrapped by exec-handler.  Keeping both shapes in one map lets the
+# topology assert that every produced event has an invocation provenance edge.
+ROLE_PRODUCED_TOPICS = {
+    "survey": "codebase.surveyed",
+    "plan": "plan.submitted",
+    "review": "review.submitted",
+    "assess": "gate.assessed",
+    "plan-notes": "notes.planned",
+    "write-note": "note.written",
+    "implement": "shard.submitted",
+    "fix": "shard.submitted",
 }
 
 
@@ -132,13 +150,15 @@ def _workdir(payload: dict) -> str:
 
 def run(role: str, payload: dict, model: str | None = None) -> tuple[dict, int]:
     """Invoke the model and return (verdict, exit_code)."""
+    invoked_model = model or model_for(role)
+    started = time.monotonic()
     completed = subprocess.run(
         [
             "claude",
             "-p",
             prompt_for(role, payload),
             "--model",
-            model or model_for(role),
+            invoked_model,
             "--allowedTools",
             *tools_for(role),
         ],
@@ -146,6 +166,16 @@ def run(role: str, payload: dict, model: str | None = None) -> tuple[dict, int]:
         capture_output=True,
         text=True,
         check=False,
+    )
+    duration_ms = round((time.monotonic() - started) * 1000)
+    post_provenance(
+        role,
+        "claude",
+        invoked_model,
+        ROLE_PRODUCED_TOPICS[role],
+        completed.returncode == 0,
+        duration_ms,
+        env=environment(payload, dict(os.environ)),
     )
     if completed.returncode != 0:
         print(completed.stderr.strip()[:2000], file=sys.stderr)

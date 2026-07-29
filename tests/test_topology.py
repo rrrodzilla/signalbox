@@ -336,6 +336,40 @@ def test_the_dashboard_stream_has_something_to_carry_while_idle():
     )
 
 
+def test_every_non_deterministic_node_publishes_invocation_provenance():
+    """A model verdict without its invocation edge cannot be audited.
+
+    The package owns the role-to-output declaration while emergent.toml owns the
+    executable graph. Comparing both here prevents either declaration from
+    quietly gaining a model-bearing role the other does not know about.
+    """
+    from signalbox.agent import ROLE_PRODUCED_TOPICS
+
+    nodes_by_role = {
+        "survey": "survey-codebase",
+        "plan": "draft-plan",
+        "review": "review-shard",
+        "assess": "assess",
+        "plan-notes": "plan-notes",
+        "write-note": "write-note",
+        "implement": "dispatch-implement",
+        "fix": "dispatch-fix",
+    }
+    assert set(nodes_by_role) == set(ROLE_PRODUCED_TOPICS)
+
+    primitives = HANDLERS + SINKS
+    for role, node_name in nodes_by_role.items():
+        node = named(primitives, node_name)
+        produced = set(node.get("publishes", []))
+        assert "model.invoked" in produced, f"{node_name} loses invocation provenance"
+        if role not in {"implement", "fix"}:
+            assert ROLE_PRODUCED_TOPICS[role] in produced, (
+                f"{node_name} disagrees with ROLE_PRODUCED_TOPICS[{role!r}]"
+            )
+        else:
+            assert ROLE_PRODUCED_TOPICS[role] == "shard.submitted"
+
+
 # ── routing, executed rather than inspected ──────────────────────────────────
 #
 # Every test above reads the config. These run the jq, because a selector that
@@ -434,11 +468,58 @@ def test_a_github_delivery_is_not_reported_as_an_unknown_emission():
     assert unknown == {"event": "shard.vibes", "run_id": "x"}
 
 
+def test_a_model_invocation_routes_to_its_topic_and_nowhere_else():
+    """Provenance shares the control ingress with five commands.
+
+    A selector that overlaps another ingress router duplicates one model call
+    into domain work, while a selector that misses silently erases the audit
+    edge, so execute every control router against the real envelope.
+    """
+    envelope = {
+        "headers": {},
+        "body": {"event": "model.invoked", "run_id": "sb-60", "role": "review"},
+    }
+    control_routers = [
+        h["name"]
+        for h in HANDLERS
+        if h.get("subscribes") == ["http.request"]
+        and h["name"] != "route-check-suite"
+    ]
+    routed = {name: route(name, envelope) for name in control_routers}
+    assert routed["route-model-invoked"] == envelope["body"]
+    assert all(
+        result is None
+        for name, result in routed.items()
+        if name != "route-model-invoked"
+    ), f"model.invoked also routed through {routed}"
+
+
+def test_a_model_invocation_is_known_control_vocabulary():
+    """Every invocation used to produce a false unknown-event beside provenance."""
+    envelope = {
+        "headers": {},
+        "body": {"event": "model.invoked", "run_id": "sb-60", "role": "plan"},
+    }
+    assert route("route-unknown-emission", envelope) is None
+
+
 def test_the_page_treats_heartbeat_traffic_as_proof_of_life_not_content():
-    """Subscribing to interval output must not put reaper noise on the board."""
+    """Consumed telemetry must not weaken the interval proof-of-life contract.
+
+    model.invoked is consumed by the stream but is not a heartbeat rendered by
+    the page; adding it must not let either interval topic escape filtering.
+    """
     page = (ROOT / "src" / "signalbox" / "dashboard.html").read_text()
     assert "HEARTBEAT" in page, "the page has no heartbeat filter"
     dashboard = named(SINKS, "dashboard")
+    assert "model.invoked" in dashboard["subscribes"]
+    provenance_branch = page.index('if (t === "model.invoked"')
+    assert page.index("provenance.set(", provenance_branch) < page.index(
+        "return;", provenance_branch
+    ), "model.invoked must be consumed as provenance before rendering"
+    assert 'if (msg.type !== "model.invoked"' in page, (
+        "model.invoked must not become standalone feed content"
+    )
     for source in SOURCES:
         if "--interval" not in source.get("args", []):
             continue

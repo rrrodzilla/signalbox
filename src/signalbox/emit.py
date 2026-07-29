@@ -96,6 +96,45 @@ def post(body: dict, url: str | None = None, timeout: float = 10.0) -> int:
         return response.status
 
 
+def post_provenance(
+    role: str,
+    runner: str,
+    model: str | None,
+    produces: str,
+    ok: bool,
+    duration_ms: int,
+    env: dict[str, str] | None = None,
+) -> int | None:
+    """Publish the model actually invoked at a mechanical process boundary.
+
+    This deliberately bypasses the agent-facing event vocabulary.  Provenance
+    comes from Python arguments chosen by the invoker, while identity and
+    correlation take the same path as every other control POST.
+    """
+    body = build_body(
+        "model.invoked",
+        {
+            "role": role,
+            "runner": runner,
+            "model": model,
+            "produces": produces,
+            "ok": ok,
+            "duration_ms": duration_ms,
+        },
+        dict(os.environ) if env is None else env,
+    )
+    try:
+        return post(body)
+    except (urllib.error.URLError, OSError) as exc:
+        # Provenance is observability, not part of the invocation's verdict.
+        # A control outage must not turn completed model work into a failure.
+        print(
+            f"signalbox provenance: control endpoint unreachable: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
 def main(argv: list[str]) -> int:
     import argparse
 

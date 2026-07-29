@@ -23,8 +23,10 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+from signalbox.emit import post_provenance
 from signalbox.paths import SkillMissing, require_skill, state_dir, worktree_for
 
 # Which CLI performs each acting skill. Implementation and fix run on codex;
@@ -216,14 +218,26 @@ def main(argv: list[str]) -> int:
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({**payload, "runner": runner, "model": model}))
 
+    invocation_env = environment(payload, dict(os.environ))
+    started = time.monotonic()
     completed = subprocess.run(
         command,
         cwd=str(worktree),
-        env=environment(payload, dict(os.environ)),
+        env=invocation_env,
         input=stdin_text,
         capture_output=True,
         text=True,
         check=False,
+    )
+    duration_ms = round((time.monotonic() - started) * 1000)
+    post_provenance(
+        args.skill.removeprefix("signalbox-"),
+        runner,
+        model,
+        "shard.submitted",
+        completed.returncode == 0,
+        duration_ms,
+        env=invocation_env,
     )
     # The marker stays whatever happens; that is the point. Only a shard that
     # announced a terminal verdict clears it, and the reaper finds the rest.

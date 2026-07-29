@@ -7,9 +7,19 @@ accident.
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
-from signalbox.agent import ROLE_MODELS, ROLE_SKILLS, model_env_var, model_for
+from signalbox import agent, dispatch, emit
+from signalbox.agent import (
+    ROLE_MODELS,
+    ROLE_PRODUCED_TOPICS,
+    ROLE_SKILLS,
+    model_env_var,
+    model_for,
+)
 from signalbox.dispatch import (
     claude_command,
     codex_command,
@@ -18,6 +28,63 @@ from signalbox.dispatch import (
     runner_for,
 )
 from signalbox.paths import SKILL_ROOTS, SkillMissing, install_skills, require_skill
+
+
+def test_every_model_role_declares_the_topic_it_produces():
+    assert ROLE_PRODUCED_TOPICS == {
+        "survey": "codebase.surveyed",
+        "plan": "plan.submitted",
+        "review": "review.submitted",
+        "assess": "gate.assessed",
+        "plan-notes": "notes.planned",
+        "write-note": "note.written",
+        "implement": "shard.submitted",
+        "fix": "shard.submitted",
+    }
+
+
+def test_provenance_body_has_join_fields_and_control_failure_is_nonfatal(
+    monkeypatch, capsys
+):
+    bodies = []
+    monkeypatch.setattr(emit, "post", lambda body: bodies.append(body) or 202)
+    env = {
+        "SIGNALBOX_RUN_ID": "r1",
+        "SIGNALBOX_STAGE_ID": "s1",
+        "SIGNALBOX_SHARD_ID": "a",
+        "SIGNALBOX_ROUND": "2",
+    }
+
+    assert (
+        emit.post_provenance(
+            "review", "claude", "opus", "review.submitted", True, 123, env=env
+        )
+        == 202
+    )
+    assert bodies == [
+        {
+            "role": "review",
+            "runner": "claude",
+            "model": "opus",
+            "produces": "review.submitted",
+            "ok": True,
+            "duration_ms": 123,
+            "run_id": "r1",
+            "stage_id": "s1",
+            "shard_id": "a",
+            "round": 2,
+            "event": "model.invoked",
+        }
+    ]
+
+    monkeypatch.setattr(emit, "post", lambda body: (_ for _ in ()).throw(OSError("down")))
+    assert (
+        emit.post_provenance(
+            "review", "claude", "opus", "review.submitted", False, 456, env=env
+        )
+        is None
+    )
+    assert "control endpoint unreachable: down" in capsys.readouterr().err
 
 
 def test_every_judging_role_has_a_model():
@@ -127,3 +194,128 @@ def test_the_claude_runner_still_names_the_skill():
     assert command[0] == "claude"
     assert "Load the signalbox-fix skill" in command[2]
     assert command[command.index("--model") + 1] == "sonnet"
+
+
+@pytest.mark.parametrize("returncode", [0, 17])
+def test_judging_invocation_always_posts_resolved_model(monkeypatch, returncode):
+    posted = []
+    monkeypatch.setattr(
+        agent.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=returncode,
+            stdout='{"verdict":"approved"}',
+            stderr="failed",
+        ),
+    )
+    monkeypatch.setattr(agent, "_workdir", lambda payload: "/tmp/wt")
+    monkeypatch.setattr(
+        agent,
+        "post_provenance",
+        lambda *args, **kwargs: posted.append((args, kwargs)),
+    )
+
+    payload = {
+        "run_id": "r1",
+        "stage_id": "s1",
+        "shard_id": "a",
+        "round": 2,
+    }
+    _, code = agent.run("review", payload, model="opus")
+
+    assert code == returncode
+    args, kwargs = posted[0]
+    assert args[:5] == (
+        "review",
+        "claude",
+        "opus",
+        "review.submitted",
+        returncode == 0,
+    )
+    assert isinstance(args[5], int) and args[5] >= 0
+    assert kwargs["env"]["SIGNALBOX_RUN_ID"] == "r1"
+    assert kwargs["env"]["SIGNALBOX_STAGE_ID"] == "s1"
+    assert kwargs["env"]["SIGNALBOX_SHARD_ID"] == "a"
+    assert kwargs["env"]["SIGNALBOX_ROUND"] == "2"
+
+
+@pytest.mark.parametrize(
+    "base_env,expected_model",
+    [
+        ({}, None),
+        ({"SIGNALBOX_CODEX_MODEL": "gpt-5.6"}, "gpt-5.6"),
+    ],
+)
+def test_acting_invocation_posts_codex_model_or_null(
+    tmp_path, monkeypatch, base_env, expected_model
+):
+    posted = []
+    payload = {
+        "run_id": "r1",
+        "shard_id": "a",
+        "round": 1,
+        "declared": [],
+    }
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path / "state"))
+    monkeypatch.setattr(dispatch, "worktree_for", lambda payload: tmp_path)
+    monkeypatch.setattr(dispatch, "require_skill", lambda *args: None)
+    monkeypatch.setattr(
+        dispatch.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stderr=""),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "post_provenance",
+        lambda *args, **kwargs: posted.append((args, kwargs)),
+    )
+    monkeypatch.delenv("SIGNALBOX_CODEX_MODEL", raising=False)
+    for key, value in base_env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(dispatch.sys, "stdin", SimpleNamespace(read=lambda: json.dumps(payload)))
+
+    assert dispatch.main(["--skill", "signalbox-implement"]) == 0
+    assert posted[0][0][:5] == (
+        "implement",
+        "codex",
+        expected_model,
+        "shard.submitted",
+        True,
+    )
+    assert isinstance(posted[0][0][5], int) and posted[0][0][5] >= 0
+    assert posted[0][1]["env"]["SIGNALBOX_RUN_ID"] == "r1"
+
+
+def test_acting_nonzero_invocation_still_posts_provenance(tmp_path, monkeypatch):
+    posted = []
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path / "state"))
+    monkeypatch.setattr(dispatch, "worktree_for", lambda payload: tmp_path)
+    monkeypatch.setattr(dispatch, "require_skill", lambda *args: None)
+    monkeypatch.setattr(
+        dispatch.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=9, stderr="failed"),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "post_provenance",
+        lambda *args, **kwargs: posted.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        dispatch.sys,
+        "stdin",
+        SimpleNamespace(
+            read=lambda: json.dumps(
+                {"run_id": "r1", "shard_id": "a", "round": 1, "declared": []}
+            )
+        ),
+    )
+
+    assert dispatch.main(["--skill", "signalbox-implement"]) == 9
+    assert posted[0][0][:5] == (
+        "implement",
+        "codex",
+        dispatch_model_for("codex"),
+        "shard.submitted",
+        False,
+    )

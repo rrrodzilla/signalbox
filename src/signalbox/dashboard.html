@@ -142,6 +142,7 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 #feed { overflow-y:auto; padding:0 14px 24px; }
 .ev { border-top:1px solid var(--seam); padding:6px 0; }
 .ev .hd { color:var(--faint); font-size:10px; display:flex; gap:8px; }
+.ev .hd .badge { margin-left:auto; cursor:default; }
 .ev .ty { font-weight:700; }
 .ev .bd { color:var(--dim); font-size:11px; overflow-wrap:anywhere; }
 .ev.k-good .ty { color:var(--green); }
@@ -226,6 +227,7 @@ function age(now, then) {
 
 const runs = new Map();
 const feed = [];
+const provenance = new Map();
 let totalEvents = 0;
 let filter = null;
 const openDrawers = new Set();
@@ -250,9 +252,46 @@ function shardState(run, id) {
   return run.shards.get(id);
 }
 
+const IDENTITY = ["run_id", "stage_id", "shard_id", "round", "role", "skill"];
+
+function identity(p) {
+  return Object.fromEntries(IDENTITY
+    .filter((k) => p && p[k] !== undefined && p[k] !== null)
+    .map((k) => [k, p[k]]));
+}
+
+function identityKey(id) {
+  return IDENTITY.filter((k) => id[k] !== undefined)
+    .map((k) => k + "=" + JSON.stringify(id[k])).join("|");
+}
+
+function invocationFor(entry) {
+  let best = null;
+  let bestScore = 0;
+  for (const invocation of provenance.values()) {
+    let score = 0;
+    let conflict = false;
+    for (const k of IDENTITY) {
+      if (entry[k] === undefined || invocation[k] === undefined) continue;
+      if (entry[k] !== invocation[k]) { conflict = true; break; }
+      score++;
+    }
+    if (!conflict && score > bestScore) {
+      best = invocation;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
 function apply(msg) {
   const t = msg.type;
   const p = msg.payload || {};
+  if (t === "model.invoked" || p.event === "model.invoked") {
+    const id = identity(p);
+    provenance.set(identityKey(id), { ...id, runner: p.runner, model: p.model });
+    return;
+  }
   const id = p.run_id || "unattributed";
   const run = runFor(id);
   run.last = msg.timestamp || Date.now();
@@ -419,11 +458,18 @@ function renderFeed() {
   const el = document.getElementById("feed");
   const shown = feed.filter((e) => !filter || kind(e.type) === filter).slice(0, 250);
   if (!shown.length) { el.innerHTML = '<div class="empty">No events match.</div>'; return; }
-  el.innerHTML = shown.map((e) =>
-    '<div class="ev ' + kind(e.type) + '">' +
+  el.innerHTML = shown.map((e) => {
+    const invocation = invocationFor(e);
+    const badge = invocation
+      ? '<span class="badge">' + esc(invocation.runner) +
+        (invocation.model == null ? "" : " · " + esc(invocation.model)) + "</span>"
+      : "";
+    return '<div class="ev ' + kind(e.type) + '">' +
       '<div class="hd"><span>' + new Date(e.timestamp).toLocaleTimeString([], { hour12:false }) +
-      '</span><span class="ty">' + esc(e.type) + "</span><span>" + esc(e.source || "") + "</span></div>" +
-      '<div class="bd">' + esc(e.summary) + "</div></div>").join("");
+      '</span><span class="ty">' + esc(e.type) + "</span><span>" + esc(e.source || "") +
+      "</span>" + badge + "</div>" +
+      '<div class="bd">' + esc(e.summary) + "</div></div>";
+  }).join("");
 }
 
 const KEEP = ["run_id","stage_id","shard_id","path","verdict","decision","outcome",
@@ -523,8 +569,10 @@ for (const url of streamUrls()) {
     lastByte = Date.now();
     totalEvents++;
     apply(msg);
-    feed.unshift({ type: msg.type, source: msg.source, timestamp: msg.timestamp,
-                   summary: summarise(msg.payload) });
+    if (msg.type !== "model.invoked" && msg.payload?.event !== "model.invoked") {
+      feed.unshift({ type: msg.type, source: msg.source, timestamp: msg.timestamp,
+                     summary: summarise(msg.payload), ...identity(msg.payload) });
+    }
     if (feed.length > 1000) feed.length = 1000;
     document.getElementById("feed-empty")?.remove();
     schedule();

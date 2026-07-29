@@ -177,3 +177,19 @@ def test_every_act_is_reachable_from_the_acts_dispatch():
     source = inspect.getsource(acts.main)
     for command in sorted(ACT_COMMANDS - handled):
         assert f'"{command}"' in source, f"acts.main cannot dispatch {command}"
+
+
+def test_run_built_carries_identity_rather_than_a_bare_count():
+    """stream-runner's end event is {"count": N}. Nothing downstream can use it.
+
+    run-suite looked for a worktree named "unknown" and reported "no suite
+    detected" while a passing suite sat in the real one.
+    """
+    pacer = named(HANDLERS, "pace-stages")
+    assert "run.built" not in pacer["publishes"], "run.built must not come from the pacer"
+
+    joiner = named(HANDLERS, "join-run")
+    assert joiner["publishes"] == ["run.built"]
+    assert joiner["subscribes"] == ["stage.merged"]
+    args = " ".join(joiner["args"])
+    assert "--key run_id" in args and "--count-field stage_count" in args

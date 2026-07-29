@@ -135,3 +135,13 @@ def test_shard_events_declared_is_a_copy():
     events = shard_events(stage, stage)
     events[0]["declared"].append("src/sneaky.py")
     assert stage["shards"][0]["files"] == ["src/a.py"]
+
+
+def test_stages_carry_a_stage_count_so_the_run_join_terminates():
+    result = check_plan(_plan(stages=[
+        {"stage_id": "s1", "shards": [_shard("a", ["src/a.py"])]},
+        {"stage_id": "s2", "shards": [_shard("b", ["src/b.py"])]},
+    ]))
+    assert all(stage["stage_count"] == 2 for stage in result["stages"])
+    events = shard_events(result["stages"][0], result["stages"][0])
+    assert events[0]["stage_count"] == 2

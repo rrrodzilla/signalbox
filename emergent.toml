@@ -208,10 +208,10 @@ publishes = ["run.halted"]
 name = "pace-stages"
 path = "~/.local/share/emergent/primitives/bin/stream-runner"
 args = ["--load-topic", "plan.accepted", "--publish-as", "stage.opened",
-        "--ack-topic", "stage.merged", "--end-topic", "run.built",
+        "--ack-topic", "stage.merged", "--end-topic", "stages.exhausted",
         "--items-key", "stages"]
 subscribes = ["plan.accepted", "stage.merged"]
-publishes = ["stage.opened", "run.built"]
+publishes = ["stage.opened", "stages.exhausted"]
 
 # The SDK splitter: N shard.opened events, causation intact, none held back.
 # Also subscribes to stage.conflicted — FEEDBACK EDGE 3 reopens only the
@@ -386,6 +386,18 @@ args = ["-s", "merge.attempted", "--publish-as", "stage.conflicted", "--",
         "jq", "-c", "select(.ok == false)"]
 subscribes = ["merge.attempted"]
 publishes = ["stage.conflicted"]
+
+# stream-runner's end event is {"count": N} with no run identity, so a run
+# cannot be built from it: run-suite would look for a worktree called "unknown".
+# The join carries identity because every stage.merged does.
+[[handlers]]
+name = "join-run"
+path = "signalbox"
+args = ["primitive", "join-terminal", "--key", "run_id",
+        "--count-field", "stage_count", "--timeout-seconds", "10800",
+        "--publish-as", "run.built", "--subscribe", "stage.merged"]
+subscribes = ["stage.merged"]
+publishes = ["run.built"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GATE — suite.ran is a typed event with counts. The gate cannot be TOLD the
@@ -569,7 +581,7 @@ subscribes = ["approval.granted", "approval.requested", "assess.failed", "branch
               "shard.check-ran", "shard.escalated", "shard.file-written",
               "shard.invalid-verdict", "shard.opened", "shard.silent", "shard.submitted",
               "stage.closed", "stage.conflicted", "stage.mergeable", "stage.merged",
-              "stage.opened", "suite.errored", "suite.ran", "survey.failed",
+              "stage.opened", "stages.exhausted", "suite.errored", "suite.ran", "survey.failed",
               "workspace.failed", "workspace.ready"]
 
 # Lifecycle belongs here rather than on the dashboard: topology-viewer resolves

@@ -65,3 +65,29 @@ def test_dispatch_environment_defaults_round_for_a_first_pass():
 def test_pending_marker_is_named_for_the_shard_the_reaper_will_report():
     assert pending_path("shard", {"shard_id": "a"}).name == "shard-a.json"
     assert pending_path("shard", {"run_id": "r1"}).name == "shard-r1.json"
+
+
+def test_a_missing_worktree_raises_rather_than_defaulting(tmp_path, monkeypatch):
+    """The bug this prevents: an agent judged the wrong repository, confidently.
+
+    run.built once carried no run_id, so the worktree resolved to
+    .../worktrees/unknown, the path did not exist, and the assessor silently
+    fell back to the engine's working directory and reviewed that instead.
+    """
+    import pytest
+
+    from signalbox.paths import WorktreeMissing, require_worktree
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    with pytest.raises(WorktreeMissing):
+        require_worktree({"run_id": "nope"})
+
+
+def test_run_suite_distinguishes_no_worktree_from_no_suite(tmp_path, monkeypatch):
+    from signalbox.acts import run_suite
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    result = run_suite({"run_id": "nope"})
+    assert result["ran"] is False
+    assert result["ok"] is False
+    assert "no worktree" in result["reason"]

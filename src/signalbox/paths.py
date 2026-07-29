@@ -63,3 +63,23 @@ def install_skills(worktree: Path) -> list[str]:
         shutil.copytree(skill, target / skill.name, dirs_exist_ok=True)
         installed.append(skill.name)
     return installed
+
+
+class WorktreeMissing(RuntimeError):
+    """The run's worktree is absent.
+
+    Never degrade to the current directory when this happens. An agent that
+    falls back to wherever the engine happens to be running reads and judges a
+    completely different repository, and reports confidently about it — which
+    is exactly what happened before this existed.
+    """
+
+
+def require_worktree(payload: dict) -> Path:
+    tree = worktree_for(payload)
+    if not tree.is_dir():
+        raise WorktreeMissing(
+            f"no worktree for run {payload.get('run_id')!r} at {tree}; "
+            "refusing to operate on another directory"
+        )
+    return tree

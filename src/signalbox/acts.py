@@ -19,7 +19,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from signalbox.paths import branch_for, install_skills, state_dir, worktree_for
+from signalbox.paths import (
+    WorktreeMissing, branch_for, install_skills, require_worktree,
+    state_dir, worktree_for,
+)
 
 
 def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[int, str, str]:
@@ -130,7 +133,11 @@ def suite_command(root: Path) -> list[str] | None:
 
 
 def run_suite(payload: dict) -> dict:
-    root = worktree_for(payload)
+    try:
+        root = require_worktree(payload)
+    except WorktreeMissing as exc:
+        # Distinct from "this repo has no suite": we could not even look.
+        return {**payload, "ran": False, "ok": False, "reason": str(exc)}
     cmd = suite_command(root)
     if cmd is None:
         # Absence is a fact worth publishing, not a pass.

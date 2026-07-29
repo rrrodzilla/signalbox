@@ -118,6 +118,7 @@ def _stamp_stage(stage: dict, plan: dict) -> dict:
     """
     return {
         **stage,
+        "stage_count": len([x for x in plan.get("stages") or [] if isinstance(x, dict)]),
         "run_id": plan.get("run_id"),
         "repo": plan.get("repo"),
         "issue": plan.get("issue"),
@@ -142,6 +143,7 @@ def shard_events(stage: dict, envelope: dict) -> list[dict]:
             "issue": envelope.get("issue"),
             "base_sha": envelope.get("base_sha"),
             "stage_id": stage_id,
+            "stage_count": envelope.get("stage_count"),
             "shard_id": shard.get("shard_id"),
             "shard_count": count,
             "declared": list(shard.get("files") or []),

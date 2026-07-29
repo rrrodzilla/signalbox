@@ -51,6 +51,7 @@ def summarise(key_name: str, key_value: str, pending: Pending, timed_out: bool) 
         "repo": first.get("repo"),
         "issue": first.get("issue"),
         "base_sha": first.get("base_sha"),
+        "stage_count": first.get("stage_count"),
         "expected": pending.expected,
         "received": len(pending.results),
         "timed_out": timed_out,

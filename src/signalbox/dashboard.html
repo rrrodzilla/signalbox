@@ -1,111 +1,521 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>signalbox</title>
+<title>Signalbox</title>
 <style>
-  :root {
-    color-scheme: light dark;
-    --bg: #fbfbfa; --fg: #16150f; --dim: #6b6a62; --line: #e3e2dc; --card: #fff;
-    --ok: #1a7f4b; --warn: #a86a00; --bad: #b3261e; --act: #2b4c8c;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#131311; --fg:#eceae2; --dim:#8f8d84; --line:#2b2a26; --card:#1b1a17;
-            --ok:#5ec98d; --warn:#e0a33c; --bad:#ef8279; --act:#8ab0f0; }
-  }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 ui-sans-serif,system-ui,sans-serif; }
-  header { position:sticky; top:0; background:var(--bg); border-bottom:1px solid var(--line);
-           padding:14px 20px; display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; z-index:2; }
-  h1 { font-size:15px; margin:0; letter-spacing:.02em; }
-  .status { font-size:12px; color:var(--dim); }
-  .status.live::before { content:"●"; color:var(--ok); margin-right:5px; }
-  .status.down::before { content:"●"; color:var(--bad); margin-right:5px; }
-  main { padding:16px 20px 60px; }
-  .run { border:1px solid var(--line); border-radius:8px; background:var(--card); margin-bottom:16px; overflow:hidden; }
-  .run > summary { padding:10px 14px; cursor:pointer; font-weight:600; display:flex; gap:10px; align-items:center; }
-  .run > summary::marker { color:var(--dim); }
-  .count { font-weight:400; color:var(--dim); font-size:12px; }
-  table { width:100%; border-collapse:collapse; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
-  td { padding:5px 10px; border-top:1px solid var(--line); vertical-align:top; }
-  td.t { white-space:nowrap; color:var(--dim); width:1%; }
-  td.ty { white-space:nowrap; font-weight:600; width:1%; }
-  td.src { white-space:nowrap; color:var(--dim); width:1%; }
-  td.p { color:var(--dim); word-break:break-word; }
-  tr.ok td.ty { color:var(--ok); }
-  tr.bad td.ty { color:var(--bad); }
-  tr.warn td.ty { color:var(--warn); }
-  tr.act td.ty { color:var(--act); }
-  .empty { color:var(--dim); padding:40px 0; text-align:center; }
-</style>
-<header>
-  <h1>signalbox</h1>
-  <span class="status" id="status">connecting…</span>
-  <span class="status" id="tally"></span>
-  <span class="status" style="margin-left:auto"><a href="http://localhost:8102" style="color:inherit">topology →</a></span>
-</header>
-<main><div class="empty" id="empty">Waiting for events. Launch a run with <code>signalbox launch &lt;issue&gt;</code>.</div></main>
-<script>
-const BAD  = /halted|failed|violated|blocked|invalid|conflicted|abandoned|escalated|silent|unknown-event/;
-const OK   = /completed|approved|merged|passed|cleared|synced|ready|accepted/;
-const WARN = /requested|changes|reopen|rejected|retry/;
-const runs = new Map();
-const main = document.querySelector("main");
-const empty = document.getElementById("empty");
-let total = 0;
-
-function classify(type) {
-  if (BAD.test(type)) return "bad";
-  if (OK.test(type)) return "ok";
-  if (WARN.test(type)) return "warn";
-  return "act";
+:root {
+  --enamel:#10151d;      /* page ground: blue-black stove enamel */
+  --casing:#171e28;      /* panel casing */
+  --casing-2:#1d2632;    /* raised fittings */
+  --seam:#2a3542;        /* casing seams */
+  --paint:#d3dce4;       /* diagram paint: primary text, track lines */
+  --dim:#7d8894;
+  --faint:#4a5560;
+  --green:#46c25a;       /* clear */
+  --amber:#e6a23c;       /* occupied / caution */
+  --red:#e15a5f;         /* danger */
+  --white-lamp:#eef4fa;  /* route set */
+  --violet:#a78bfa;      /* waiting on a human */
+  --blue:#5aa7e8;
 }
+* { box-sizing:border-box; margin:0; }
+html { scrollbar-color:var(--seam) var(--enamel); }
+body { background:var(--enamel); color:var(--paint);
+  font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+button { font:inherit; }
+:focus-visible { outline:2px solid var(--amber); outline-offset:2px; }
+
+.plate { display:inline-block; text-transform:uppercase; letter-spacing:.22em;
+  font-size:10px; font-weight:700; color:var(--dim);
+  border:1px solid var(--seam); border-radius:2px; padding:3px 8px 2px 10px;
+  background:linear-gradient(180deg, var(--casing-2), var(--casing)); }
+
+header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  padding:14px 18px 12px; border-bottom:1px solid var(--seam);
+  background:linear-gradient(180deg,#131924,var(--enamel)); position:sticky; top:0; z-index:5; }
+.wordmark { font-size:15px; font-weight:700; letter-spacing:.34em;
+  text-transform:uppercase; color:var(--white-lamp); padding-left:2px; }
+.wordmark .box { color:var(--amber); }
+#meta { color:var(--dim); font-size:11px; letter-spacing:.05em; display:flex;
+  align-items:center; gap:8px; flex-wrap:wrap; }
+#meta a { color:var(--dim); }
+.lamp { display:inline-block; width:9px; height:9px; border-radius:50%;
+  background:var(--faint); vertical-align:-1px; flex:none; }
+.lamp.on-green { background:var(--green); box-shadow:0 0 6px 1px rgba(70,194,90,.55); }
+.lamp.on-amber { background:var(--amber); box-shadow:0 0 6px 1px rgba(230,162,60,.55); }
+.lamp.on-red { background:var(--red); box-shadow:0 0 6px 1px rgba(225,90,95,.55); }
+.lamp.on-violet { background:var(--violet); box-shadow:0 0 6px 1px rgba(167,139,250,.55); }
+.lamp.on-white { background:var(--white-lamp); box-shadow:0 0 6px 1px rgba(238,244,250,.45); }
+
+.deck { display:grid; grid-template-columns:minmax(0,1fr) 420px; gap:0; }
+@media (max-width:1100px){ .deck { grid-template-columns:1fr; } }
+.board { padding:16px 18px 40px; min-width:0; }
+.board section { margin-bottom:22px; }
+.section-head { display:flex; align-items:baseline; gap:10px; margin-bottom:10px; }
+.section-head .count { color:var(--faint); font-size:11px; }
+.empty { color:var(--faint); font-size:12px; padding:14px 2px; }
+
+.run { border:1px solid var(--seam); border-radius:4px; background:var(--casing);
+  margin-bottom:12px; overflow:hidden; }
+.run.selected { border-color:var(--dim); box-shadow:0 0 0 1px var(--dim); }
+.run.attention { border-color:color-mix(in srgb, var(--red) 45%, var(--seam)); }
+.run-head { display:flex; align-items:center; gap:10px; width:100%;
+  background:none; border:0; color:inherit; text-align:left; cursor:pointer;
+  padding:10px 12px 8px; }
+.run-title { font-size:13px; font-weight:600; color:var(--white-lamp);
+  min-width:0; overflow-wrap:anywhere; }
+.run-title .repo { color:var(--dim); font-weight:400; }
+.run-age { margin-left:auto; color:var(--faint); font-size:11px; white-space:nowrap; }
+.livery { font-size:10px; text-transform:uppercase; letter-spacing:.14em;
+  color:var(--dim); white-space:nowrap; }
+.livery.running { color:var(--green); }
+.livery.stopped { color:var(--faint); }
+.livery.stale { color:var(--amber); }
+.livery.halted { color:var(--red); }
+.livery.parked { color:var(--violet); }
+
+.track { display:grid; grid-template-columns:repeat(5,1fr); gap:0; padding:2px 12px 0; }
+.block { position:relative; padding:14px 0 6px; }
+.block::before { content:""; position:absolute; left:0; right:0; top:22px;
+  height:2px; background:var(--faint); }
+.block.done::before { background:var(--green); }
+.block.active::before { background:var(--amber); }
+.block.failed::before { background:var(--red); }
+.block.parked::before { background:var(--violet); }
+.block:not(:first-child)::after { content:""; position:absolute; left:-1px;
+  top:17px; width:2px; height:12px; background:var(--seam); }
+.block .lamp { position:absolute; top:18px; left:50%; margin-left:-5px;
+  width:10px; height:10px; border:1px solid var(--enamel); }
+.block.active .lamp { animation:pulse 2.4s ease-in-out infinite; }
+.block .bname { display:block; text-align:center; margin-top:18px;
+  font-size:10px; text-transform:uppercase; letter-spacing:.16em; color:var(--faint); }
+.block.done .bname { color:var(--dim); }
+.block.active .bname { color:var(--amber); }
+.block.failed .bname { color:var(--red); }
+.block.parked .bname { color:var(--violet); }
+@keyframes pulse { 50% { box-shadow:0 0 10px 3px rgba(230,162,60,.65); } }
+@media (prefers-reduced-motion: reduce) { .block.active .lamp { animation:none; } }
+
+.block .sub { display:block; text-align:center; margin-top:3px; font-size:9px;
+  letter-spacing:.08em; color:var(--dim); text-transform:none; }
+.block .sub .rounds { color:var(--blue); }
+.block .sub .fixing { color:var(--amber); }
+.sidings { display:flex; justify-content:center; align-items:center; gap:4px;
+  margin-top:4px; flex-wrap:wrap; padding:0 4px; }
+.sidings .bar { width:8px; height:2px; background:var(--seam); flex:none; }
+.shard-lamp { width:8px; height:8px; border-radius:2px; flex:none;
+  background:transparent; border:1px solid var(--faint); }
+.shard-lamp.s-building { background:var(--amber); border-color:var(--amber); }
+.shard-lamp.s-review { background:var(--blue); border-color:var(--blue); }
+.shard-lamp.s-fixing { background:var(--red); border-color:var(--red); }
+.shard-lamp.s-done { background:var(--green); border-color:var(--green); }
+.shard-lamp.s-escalated { background:var(--red); border-color:var(--red);
+  animation:pulse 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .shard-lamp.s-escalated { animation:none; } }
+
+.verdict { display:flex; gap:8px; align-items:baseline; padding:8px 12px 10px;
+  font-size:12px; color:var(--dim); }
+.verdict span { overflow-wrap:anywhere; min-width:0; }
+.verdict b { font-weight:700; letter-spacing:.08em; flex:none; }
+.verdict.v-green b { color:var(--green); } .verdict.v-red b { color:var(--red); }
+.verdict.v-amber b { color:var(--amber); } .verdict.v-violet b { color:var(--violet); }
+
+.drawer { border-top:1px solid var(--seam); }
+.drawer > summary { list-style:none; cursor:pointer; padding:6px 12px;
+  font-size:10px; text-transform:uppercase; letter-spacing:.18em; color:var(--faint); }
+.drawer > summary::-webkit-details-marker { display:none; }
+.drawer > summary::before { content:"+ "; }
+.drawer[open] > summary::before { content:"\2212 "; }
+.drawer-body { padding:2px 12px 12px; }
+.idline { color:var(--faint); font-size:11px; overflow-wrap:anywhere; }
+.idline b { color:var(--dim); font-weight:400; }
+
+.register { border-left:1px solid var(--seam); background:#131924; min-width:0; }
+@media (max-width:1100px){ .register { border-left:0; border-top:1px solid var(--seam); } }
+.register-inner { position:sticky; top:57px; max-height:calc(100vh - 57px);
+  display:flex; flex-direction:column; }
+.register-head { padding:14px 14px 8px; }
+.badges { display:flex; gap:6px; flex-wrap:wrap; padding:0 14px 10px; }
+.badge { font-size:10px; letter-spacing:.1em; text-transform:uppercase;
+  border:1px solid var(--seam); border-radius:2px; padding:2px 7px;
+  color:var(--dim); background:none; cursor:pointer; }
+.badge.on { color:var(--white-lamp); border-color:var(--dim); }
+#feed { overflow-y:auto; padding:0 14px 24px; }
+.ev { border-top:1px solid var(--seam); padding:6px 0; }
+.ev .hd { color:var(--faint); font-size:10px; display:flex; gap:8px; }
+.ev .ty { font-weight:700; }
+.ev .bd { color:var(--dim); font-size:11px; overflow-wrap:anywhere; }
+.ev.k-good .ty { color:var(--green); }
+.ev.k-bad .ty { color:var(--red); }
+.ev.k-warn .ty { color:var(--amber); }
+.ev.k-park .ty { color:var(--violet); }
+.ev.k-info .ty { color:var(--blue); }
+</style>
+
+<header>
+  <div class="wordmark">Signal<span class="box">box</span></div>
+  <div id="meta">
+    <span class="lamp" id="stream-lamp"></span><span id="meta-text">connecting…</span>
+    <span>·</span><a href="http://localhost:8102" target="_blank">topology</a>
+  </div>
+</header>
+
+<div class="deck">
+  <main class="board" id="board" aria-label="runs"></main>
+  <aside class="register" aria-label="event register">
+    <div class="register-inner">
+      <div class="register-head"><span class="plate">Register</span></div>
+      <div class="badges" id="badges"></div>
+      <div id="feed"><div class="empty" id="feed-empty">Waiting for events…</div></div>
+    </div>
+  </aside>
+</div>
+
+<script>
+"use strict";
+
+/* The five track sections a run passes through. Every event maps to one. */
+const BLOCKS = ["plan", "build", "gate", "promote", "docs"];
+
+const BLOCK_OF = {
+  "run.requested":"plan", "workspace.ready":"plan", "workspace.failed":"plan",
+  "issue.fetched":"plan", "issue.fetch-failed":"plan", "codebase.surveyed":"plan",
+  "survey.failed":"plan", "plan.submitted":"plan", "plan.checked":"plan",
+  "plan.accepted":"plan", "plan.rejected":"plan", "plan.draft-failed":"plan",
+  "stage.opened":"build", "shard.opened":"build", "shard.file-written":"build",
+  "shard.check-ran":"build", "shard.submitted":"build", "shard.built":"build",
+  "shard.abandoned":"build", "shard.invalid-verdict":"build", "shard.silent":"build",
+  "scope.violated":"build", "review.submitted":"build", "review.failed":"build",
+  "review.invalid-verdict":"build", "shard.approved":"build",
+  "shard.changes-requested":"build", "fix.opened":"build", "shard.escalated":"build",
+  "stage.closed":"build", "stage.mergeable":"build", "merge.attempted":"build",
+  "stage.merged":"build", "stage.conflicted":"build", "run.built":"build",
+  "suite.ran":"gate", "suite.errored":"gate", "gate.assessed":"gate",
+  "assess.failed":"gate", "gate.cleared":"gate", "gate.blocked":"gate",
+  "gate.invalid-verdict":"gate", "approval.requested":"gate", "approval.granted":"gate",
+  "branch.pushed":"promote", "branch.push-failed":"promote", "pr.opened":"promote",
+  "pr.open-failed":"promote", "checks.reported":"promote", "checks.passed":"promote",
+  "checks.failed":"promote", "pr.merged":"promote", "pr.merge-failed":"promote",
+  "notes.planned":"docs", "notes.plan-failed":"docs", "note.drafted":"docs",
+  "note.written":"docs", "note.write-failed":"docs", "notes.synced":"docs",
+};
+
+const BAD  = /halted|failed|violated|blocked|invalid|conflicted|abandoned|escalated|silent|unknown-event|errored/;
+const GOOD = /completed|approved|merged|passed|cleared|synced|written|accepted|built|ready/;
+const PARK = /approval\.requested/;
+const WARN = /requested|changes|rejected|opened|submitted/;
+
+function kind(type) {
+  if (PARK.test(type)) return "k-park";
+  if (BAD.test(type)) return "k-bad";
+  if (GOOD.test(type)) return "k-good";
+  if (WARN.test(type)) return "k-warn";
+  return "k-info";
+}
+
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g,
+  (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+
+function age(now, then) {
+  const s = Math.max(0, Math.round((now - then) / 1000));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  return Math.floor(s / 3600) + "h" + (Math.floor((s % 3600) / 60)) + "m";
+}
+
+/* ── run model, derived entirely from the event stream ───────────────── */
+
+const runs = new Map();
+const feed = [];
+let totalEvents = 0;
+let filter = null;
+const openDrawers = new Set();
+let selected = null;
+
+function runFor(id) {
+  if (!runs.has(id)) {
+    runs.set(id, {
+      key: id, repo: "unknown", issue: null, title: null,
+      blocks: Object.fromEntries(BLOCKS.map((b) => [b, "idle"])),
+      shards: new Map(), stages: new Map(), rounds: 0, attempt: 1,
+      verdict: { label: "opening", cls: "", detail: "" },
+      first: Date.now(), last: Date.now(), state: "running",
+      worktree: null, base: null, notes: [], suite: null, pr: null,
+    });
+  }
+  return runs.get(id);
+}
+
+function shardState(run, id) {
+  if (!run.shards.has(id)) run.shards.set(id, "building");
+  return run.shards.get(id);
+}
+
+function apply(msg) {
+  const t = msg.type;
+  const p = msg.payload || {};
+  const id = p.run_id || "unattributed";
+  const run = runFor(id);
+  run.last = msg.timestamp || Date.now();
+
+  if (p.repo) run.repo = p.repo;
+  else if (p.repo_path) run.repo = String(p.repo_path).split("/").filter(Boolean).pop();
+  if (p.issue != null) run.issue = p.issue;
+  if (p.title) run.title = p.title;
+  if (p.worktree) run.worktree = p.worktree;
+  if (p.base_sha) run.base = p.base_sha;
+  if (p.attempt) run.attempt = p.attempt;
+
+  const block = BLOCK_OF[t];
+  if (block && run.blocks[block] === "idle") run.blocks[block] = "active";
+
+  const set = (b, s) => { run.blocks[b] = s; };
+  const before = (b) => BLOCKS.slice(0, BLOCKS.indexOf(b)).forEach((x) => {
+    if (run.blocks[x] !== "failed") run.blocks[x] = "done";
+  });
+
+  switch (t) {
+    case "plan.accepted": set("plan", "done"); break;
+    case "plan.rejected": run.verdict = { label: "PLAN REJECTED", cls: "v-amber",
+      detail: (p.violations || []).join("; ") }; break;
+    case "workspace.failed": case "issue.fetch-failed": case "survey.failed":
+    case "plan.draft-failed":
+      set("plan", "failed");
+      run.verdict = { label: "FAILED", cls: "v-red", detail: p.error || t }; break;
+    case "shard.opened": run.shards.set(p.shard_id, "building");
+      if (p.stage_id) run.stages.set(p.stage_id, p.shard_count || 0);
+      before("build"); break;
+    case "shard.built": run.shards.set(p.shard_id, "review"); break;
+    case "shard.approved": run.shards.set(p.shard_id, "done"); break;
+    case "fix.opened": run.shards.set(p.shard_id, "fixing");
+      run.rounds = Math.max(run.rounds, p.round || 0); break;
+    case "shard.escalated": case "shard.abandoned": case "scope.violated":
+    case "shard.silent": case "shard.invalid-verdict":
+      run.shards.set(p.shard_id, "escalated");
+      run.verdict = { label: t.split(".")[1].toUpperCase().replace(/-/g, " "),
+        cls: "v-red", detail: p.reason || p.path || "" }; break;
+    case "stage.merged": break;
+    case "run.built": set("build", "done"); before("gate"); break;
+    case "suite.ran": run.suite = p.ran
+      ? (p.ok ? "suite passed" : "suite FAILED") : "no suite ran"; break;
+    case "gate.cleared": set("gate", "done"); before("promote"); break;
+    case "approval.requested": set("gate", "parked"); run.state = "parked";
+      run.verdict = { label: "AWAITING APPROVAL", cls: "v-violet",
+        detail: p.rationale || "" }; break;
+    case "approval.granted": set("gate", "done"); run.state = "running"; break;
+    case "gate.blocked": set("gate", "failed");
+      run.verdict = { label: "BLOCKED", cls: "v-red",
+        detail: (p.reasons || []).join("; ") || p.rationale || "" }; break;
+    case "branch.push-failed": case "pr.open-failed": case "pr.merge-failed":
+      set("promote", "failed");
+      run.verdict = { label: "PROMOTE FAILED", cls: "v-red", detail: p.error || "" }; break;
+    case "pr.opened": run.pr = p.pr || p.url; break;
+    case "pr.merged": set("promote", "done"); before("docs"); break;
+    case "note.written": run.notes.push(p.note); break;
+    case "notes.synced": set("docs", "done"); break;
+    case "run.completed": BLOCKS.forEach((b) => { if (run.blocks[b] !== "failed") run.blocks[b] = "done"; });
+      run.state = "stopped";
+      run.verdict = { label: "COMPLETE", cls: "v-green", detail: run.suite || "" }; break;
+    case "run.halted": run.state = "halted";
+      if (block) set(block, "failed");
+      run.verdict = { label: "HALTED", cls: "v-red", detail: p.reason || "" }; break;
+  }
+
+  if (run.verdict.label === "opening" && block) {
+    run.verdict = { label: t.toUpperCase(), cls: "v-amber", detail: "" };
+  }
+}
+
+/* ── rendering ───────────────────────────────────────────────────────── */
+
+function shardSidings(run) {
+  if (!run.shards.size) return "";
+  const order = ["building", "review", "fixing", "escalated", "done"];
+  const lamps = [...run.shards.entries()]
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+    .map(([sid, st]) => '<span class="shard-lamp s-' + esc(st) + '" title="' +
+      esc(sid + " · " + st) + '"></span>');
+  const done = [...run.shards.values()].filter((s) => s === "done").length;
+  return '<span class="sub">' + done + "/" + run.shards.size + " shards" +
+    (run.rounds ? ' <span class="rounds">&#8635; R' + run.rounds + "</span>" : "") +
+    "</span>" + '<div class="sidings">' + lamps.join("") + "</div>";
+}
+
+const LAMP_FOR = { done:"on-green", active:"on-amber", failed:"on-red",
+                   parked:"on-violet", idle:"" };
+
+function headLamp(run) {
+  if (run.state === "halted") return "on-red";
+  if (run.state === "parked") return "on-violet";
+  if (run.state === "stopped") return "on-green";
+  return "on-amber";
+}
+
+function renderRun(run, now) {
+  const track = BLOCKS.map((b) => {
+    const st = run.blocks[b];
+    const sub = b === "build" ? shardSidings(run)
+      : (b === "plan" && run.attempt > 1 ? '<span class="sub">attempt ' + run.attempt + "</span>" : "");
+    return '<div class="block ' + esc(st) + '"><span class="lamp ' +
+      esc(LAMP_FOR[st] || "") + '"></span><span class="bname">' + esc(b) + "</span>" +
+      sub + "</div>";
+  }).join("");
+
+  const attention = run.state === "halted" ||
+    [...run.shards.values()].some((s) => s === "escalated");
+
+  return '<article class="run ' + (attention ? "attention " : "") +
+    (selected === run.key ? "selected" : "") + '">' +
+    '<button type="button" class="run-head" data-select="' + esc(run.key) + '">' +
+      '<span class="lamp ' + headLamp(run) + '"></span>' +
+      '<span class="run-title"><span class="repo">' + esc(run.repo) + "</span> " +
+        esc(run.issue != null ? "#" + run.issue : run.key) +
+        (run.title ? ' <span class="repo">' + esc(run.title) + "</span>" : "") + "</span>" +
+      '<span class="livery ' + esc(run.state) + '">' + esc(run.state) + "</span>" +
+      '<span class="run-age">' + age(now, run.last) + " ago</span>" +
+    "</button>" +
+    '<div class="track">' + track + "</div>" +
+    '<div class="verdict ' + esc(run.verdict.cls) + '"><b>' + esc(run.verdict.label) + "</b>" +
+      "<span>" + esc(run.verdict.detail) + "</span></div>" +
+    '<details class="drawer"' + (openDrawers.has(run.key) ? " open" : "") +
+      ' data-run="' + esc(run.key) + '"><summary>details</summary>' +
+      '<div class="drawer-body">' +
+        '<div class="idline"><b>run</b> ' + esc(run.key) + "</div>" +
+        '<div class="idline"><b>worktree</b> ' + esc(run.worktree || "not created") + "</div>" +
+        '<div class="idline"><b>base</b> ' + esc(run.base || "unknown") + "</div>" +
+        (run.suite ? '<div class="idline"><b>suite</b> ' + esc(run.suite) + "</div>" : "") +
+        (run.pr ? '<div class="idline"><b>pr</b> ' + esc(run.pr) + "</div>" : "") +
+        (run.notes.length ? '<div class="idline"><b>notes</b> ' + esc(run.notes.join(", ")) + "</div>" : "") +
+        '<div class="idline"><b>started</b> ' + new Date(run.first).toLocaleTimeString() + "</div>" +
+      "</div></details>" +
+    "</article>";
+}
+
+function renderBoard() {
+  const board = document.getElementById("board");
+  const now = Date.now();
+  if (!runs.size) {
+    board.innerHTML = '<div class="empty">No runs yet. Launch one with ' +
+      "<code>signalbox launch &lt;issue&gt; --repo-path &lt;path&gt;</code>.</div>";
+    return;
+  }
+  const byRepo = new Map();
+  for (const run of runs.values()) {
+    if (!byRepo.has(run.repo)) byRepo.set(run.repo, []);
+    byRepo.get(run.repo).push(run);
+  }
+  const sections = [...byRepo.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  board.innerHTML = sections.map(([repo, list]) => {
+    list.sort((a, b) => b.last - a.last);
+    const live = list.filter((r) => r.state === "running" || r.state === "parked").length;
+    return "<section>" +
+      '<div class="section-head"><span class="plate">' + esc(repo) + "</span>" +
+      '<span class="count">' + list.length + " run" + (list.length === 1 ? "" : "s") +
+      (live ? " · " + live + " live" : "") + "</span></div>" +
+      list.map((r) => renderRun(r, now)).join("") + "</section>";
+  }).join("");
+}
+
+function renderFeed() {
+  const el = document.getElementById("feed");
+  const shown = feed.filter((e) => !filter || kind(e.type) === filter).slice(0, 250);
+  if (!shown.length) { el.innerHTML = '<div class="empty">No events match.</div>'; return; }
+  el.innerHTML = shown.map((e) =>
+    '<div class="ev ' + kind(e.type) + '">' +
+      '<div class="hd"><span>' + new Date(e.timestamp).toLocaleTimeString([], { hour12:false }) +
+      '</span><span class="ty">' + esc(e.type) + "</span><span>" + esc(e.source || "") + "</span></div>" +
+      '<div class="bd">' + esc(e.summary) + "</div></div>").join("");
+}
+
+const KEEP = ["run_id","stage_id","shard_id","path","verdict","decision","outcome",
+              "reason","conclusion","note","pr","expected","received","error","attempt"];
 
 function summarise(p) {
   if (!p || typeof p !== "object") return "";
-  const keep = ["shard_id","stage_id","path","verdict","decision","outcome","reason",
-                "violations","findings","conclusion","note","pr","expected","received","error"];
-  const parts = [];
-  for (const k of keep) {
-    if (p[k] === undefined || p[k] === null) continue;
+  const out = [];
+  for (const k of KEEP) {
     let v = p[k];
-    if (Array.isArray(v)) v = v.length ? `[${v.length}] ${JSON.stringify(v[0]).slice(0,60)}` : "[]";
-    else if (typeof v === "object") v = JSON.stringify(v).slice(0, 80);
-    parts.push(`${k}=${v}`);
+    if (v === undefined || v === null) continue;
+    if (Array.isArray(v)) v = "[" + v.length + "]";
+    else if (typeof v === "object") v = JSON.stringify(v).slice(0, 60);
+    out.push(k + "=" + v);
   }
-  return parts.join("  ");
+  const extra = p.violations || p.findings;
+  if (Array.isArray(extra) && extra.length) {
+    out.push(String(typeof extra[0] === "string" ? extra[0] : JSON.stringify(extra[0])).slice(0, 90));
+  }
+  return out.join("  ");
 }
 
-function runBox(id) {
-  if (runs.has(id)) return runs.get(id);
-  empty.remove?.();
-  const box = document.createElement("details");
-  box.className = "run"; box.open = true;
-  box.innerHTML = `<summary>${id} <span class="count">0 events</span></summary><table><tbody></tbody></table>`;
-  main.prepend(box);
-  const entry = { box, body: box.querySelector("tbody"), count: box.querySelector(".count"), n: 0 };
-  runs.set(id, entry);
-  return entry;
+function renderBadges() {
+  const kinds = [["k-good","clear"],["k-warn","caution"],["k-bad","danger"],
+                 ["k-park","waiting"],["k-info","info"]];
+  document.getElementById("badges").innerHTML =
+    '<button class="badge' + (filter ? "" : " on") + '" data-filter="">all</button>' +
+    kinds.map(([k, label]) =>
+      '<button class="badge' + (filter === k ? " on" : "") + '" data-filter="' + k + '">' +
+      label + "</button>").join("");
 }
 
-function add(msg) {
-  const p = msg.payload || {};
-  const entry = runBox(p.run_id || "unattributed");
-  const tr = document.createElement("tr");
-  tr.className = classify(msg.type);
-  const time = new Date(msg.timestamp).toLocaleTimeString([], {hour12:false});
-  tr.innerHTML = `<td class="t">${time}</td><td class="ty">${msg.type}</td>` +
-                 `<td class="src">${msg.source || ""}</td><td class="p"></td>`;
-  tr.lastElementChild.textContent = summarise(p);
-  entry.body.prepend(tr);
-  entry.count.textContent = `${++entry.n} events`;
-  document.getElementById("tally").textContent = `${++total} events · ${runs.size} runs`;
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-filter]");
+  if (b) { filter = b.dataset.filter || null; renderBadges(); renderFeed(); return; }
+  const s = e.target.closest("[data-select]");
+  if (s) { selected = selected === s.dataset.select ? null : s.dataset.select; renderBoard(); }
+});
+document.addEventListener("toggle", (e) => {
+  const d = e.target.closest("details.drawer");
+  if (!d) return;
+  if (d.open) openDrawers.add(d.dataset.run); else openDrawers.delete(d.dataset.run);
+}, true);
+
+/* ── streams ──────────────────────────────────────────────────────────
+   Several engines can be watched at once: ?streams=8101,8201 or full URLs.
+   Each is an independent EventSource; the board merges them by run_id.     */
+
+function streamUrls() {
+  const q = new URLSearchParams(location.search).get("streams");
+  const parts = (q || "8101").split(",").map((s) => s.trim()).filter(Boolean);
+  return parts.map((p) => (/^https?:/.test(p) ? p : "http://127.0.0.1:" + p + "/events"));
 }
 
-function connect() {
-  const es = new EventSource("http://127.0.0.1:8101/events");
-  const status = document.getElementById("status");
-  es.onopen = () => { status.textContent = "live"; status.className = "status live"; };
-  es.onmessage = (e) => { try { add(JSON.parse(e.data)); } catch (_) {} };
-  es.onerror = () => { status.textContent = "disconnected — retrying"; status.className = "status down"; };
+const health = new Map();
+
+function meta() {
+  const up = [...health.values()].filter(Boolean).length;
+  const total = health.size;
+  const lamp = document.getElementById("stream-lamp");
+  lamp.className = "lamp " + (up === total ? "on-green" : up ? "on-amber" : "on-red");
+  document.getElementById("meta-text").textContent =
+    up + "/" + total + " stream" + (total === 1 ? "" : "s") + " · " +
+    runs.size + " run" + (runs.size === 1 ? "" : "s") + " · " + totalEvents + " events";
 }
-connect();
+
+let dirty = false;
+function schedule() { dirty = true; }
+setInterval(() => { if (dirty) { dirty = false; renderBoard(); renderFeed(); } meta(); }, 800);
+setInterval(renderBoard, 15000);   // keep the age column honest while idle
+
+for (const url of streamUrls()) {
+  health.set(url, false);
+  const es = new EventSource(url);
+  es.onopen = () => { health.set(url, true); meta(); };
+  es.onerror = () => { health.set(url, false); meta(); };
+  es.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch (_) { return; }
+    if (!msg || !msg.type) return;
+    msg.timestamp = msg.timestamp || Date.now();
+    totalEvents++;
+    apply(msg);
+    feed.unshift({ type: msg.type, source: msg.source, timestamp: msg.timestamp,
+                   summary: summarise(msg.payload) });
+    if (feed.length > 1000) feed.length = 1000;
+    document.getElementById("feed-empty")?.remove();
+    schedule();
+  };
+}
+
+renderBadges();
+renderBoard();
+meta();
 </script>

@@ -17,7 +17,7 @@ import subprocess
 import sys
 
 from signalbox.identity import carry, spoofed_keys
-from signalbox.paths import worktree_for
+from signalbox.paths import WorktreeMissing, require_worktree
 
 # Each role is a skill, so the procedure is versioned and reviewable on its own
 # rather than living in an argv string.
@@ -93,14 +93,14 @@ def tools_for(role: str) -> list[str]:
     return ["Read", "Grep", "Glob", "Skill", "Bash", "Write", "Edit"]
 
 
-def _workdir(payload: dict) -> str | None:
-    """Judging agents read the run's worktree, not the engine's directory.
+def _workdir(payload: dict) -> str:
+    """Judging agents read the run's worktree, and nothing else.
 
     It is also where the skills were installed, so this is what makes them
-    resolvable at all.
+    resolvable at all. Raises rather than defaulting: a judgment rendered
+    against the wrong repository is worse than no judgment.
     """
-    tree = worktree_for(payload)
-    return str(tree) if tree.is_dir() else None
+    return str(require_worktree(payload))
 
 
 def run(role: str, payload: dict, model: str = "opus") -> tuple[dict, int]:
@@ -152,7 +152,11 @@ def main(argv: list[str]) -> int:
         print(f"signalbox agent: unreadable payload: {exc}", file=sys.stderr)
         return 1
 
-    verdict, code = run(role, payload, os.environ.get("SIGNALBOX_MODEL", "opus"))
+    try:
+        verdict, code = run(role, payload, os.environ.get("SIGNALBOX_MODEL", "opus"))
+    except WorktreeMissing as exc:
+        print(f"signalbox agent: {exc}", file=sys.stderr)
+        return 1
     if code != 0:
         return code
     print(json.dumps(verdict))

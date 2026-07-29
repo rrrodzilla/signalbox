@@ -14,6 +14,7 @@ CONFIG="$ROOT/emergent.toml"
 LOG_DIR="${SIGNALBOX_LOG_DIR:-$ROOT/.harness}"
 ENGINE_LOG="$LOG_DIR/engine.log"
 DASHBOARD_LOG="$LOG_DIR/dashboard.log"
+DASHBOARD_PIDFILE="$LOG_DIR/dashboard.pid"
 FORWARD_LOG="$LOG_DIR/forward.log"
 FORWARD_PIDFILE="$LOG_DIR/forward.pid"
 
@@ -82,6 +83,20 @@ install() {
 
 engine_pids() { pgrep -x emergent 2>/dev/null || true; }
 
+# The viewer is a separate process from the engine, so `down` has to name it or
+# it survives every restart. One that outlived the reinstall was still running
+# the uv *tool* snapshot of the package rather than this working tree.
+#
+# A pidfile rather than `pgrep -f 'signalbox dashboard'`: that pattern matches any
+# process whose arguments merely contain the phrase, including the shell about to
+# run the kill. It took down its own caller the first time it was used.
+dashboard_pid() {
+  [[ -f "$DASHBOARD_PIDFILE" ]] || return 1
+  local pid
+  pid="$(cat "$DASHBOARD_PIDFILE" 2>/dev/null)" || return 1
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && printf '%s' "$pid"
+}
+
 port_held() { fuser -n tcp "$1" >/dev/null 2>&1; }
 
 up() {
@@ -100,13 +115,35 @@ up() {
     sleep 1
   done
 
-  if ! port_held "$DASHBOARD_PORT"; then
-    say "starting the dashboard viewer"
-    nohup signalbox dashboard >"$DASHBOARD_LOG" 2>&1 &
+  # Always replace it rather than reusing whatever holds the port. The viewer is
+  # disposable by construction — no subscription, no state — so the only thing
+  # reuse can preserve is a stale copy of the package.
+  dashboard_down
+  say "starting the dashboard viewer"
+  nohup signalbox dashboard >"$DASHBOARD_LOG" 2>&1 &
+  printf '%s' "$!" >"$DASHBOARD_PIDFILE"
+  deadline=$((SECONDS + 10))
+  until port_held "$DASHBOARD_PORT"; do
+    ((SECONDS < deadline)) || fail "dashboard never came up; see $DASHBOARD_LOG"
     sleep 1
-  fi
+  done
 
   status
+}
+
+dashboard_down() {
+  local pid
+  pid="$(dashboard_pid || true)"
+  if [[ -n "$pid" ]]; then
+    say "stopping dashboard viewer: $pid"
+    kill -TERM "$pid" 2>/dev/null || true
+    local deadline=$((SECONDS + 10))
+    while kill -0 "$pid" 2>/dev/null; do
+      ((SECONDS < deadline)) || { kill -9 "$pid" 2>/dev/null || true; break; }
+      sleep 1
+    done
+  fi
+  rm -f "$DASHBOARD_PIDFILE"
 }
 
 down() {
@@ -129,6 +166,9 @@ down() {
       sleep 1
     done
   fi
+  # The viewer holds no subscription and flushes nothing, but leaving it up means
+  # `restart` silently keeps serving the package it started with.
+  dashboard_down
   say "engine stopped"
 }
 
@@ -139,6 +179,13 @@ status() {
     say "engine:    up (pid $(tr '\n' ' ' <<<"$pids"))"
   else
     say "engine:    down"
+  fi
+  local dpid
+  dpid="$(dashboard_pid || true)"
+  if [[ -n "$dpid" ]]; then
+    say "viewer:    up (pid $dpid)"
+  else
+    say "viewer:    down"
   fi
   local fpid
   fpid="$(forward_pid || true)"
@@ -278,7 +325,7 @@ usage: $0 <command>
   preflight  check tools, primitives, gh auth, and the signing key
   install    install the CLI editable from this checkout, then run the suite
   up         start the engine and the dashboard viewer
-  down       SIGTERM the engine so the event store flushes
+  down       SIGTERM the engine so the event store flushes, and stop the viewer
   restart    down, then up
   status     engine, forwarder, listening ports, and live run worktrees
   launch     signalbox launch <issue> [...] against a running engine

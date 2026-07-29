@@ -117,17 +117,29 @@ args = ["-s", "http.request", "--publish-as", "approval.granted", "--",
 subscribes = ["http.request"]
 publishes = ["approval.granted"]
 
+# Invocation provenance re-enters through control, so this exclusive edge is
+# load-bearing evidence that every non-deterministic act actually happened.
+[[handlers]]
+name = "route-model-invoked"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "http.request", "--publish-as", "model.invoked", "--",
+        "jq", "-c", 'select(.body.event == "model.invoked") | .body']
+subscribes = ["http.request"]
+publishes = ["model.invoked"]
+
 # Anything POSTed that is not recognised vocabulary becomes an event rather
 # than a silent drop. Untrusted input, treated as such.
 #
 # The header guard is load-bearing. GitHub deliveries share this topic and carry
 # no `.body.event`, so without it every webhook would also be reported here as an
 # unknown emission — a real event, wrongly, on every CI conclusion.
+# The model event is load-bearing known vocabulary; omitting it would turn every
+# provenance record into a simultaneous false control-plane alarm.
 [[handlers]]
 name = "route-unknown-emission"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "http.request", "--publish-as", "control.unknown-event", "--",
-        "jq", "-c", 'select(.headers["x-github-event"] == null) | select((.body.event // "") | IN("run.requested","shard.file-written","shard.check-ran","shard.submitted","approval.granted") | not) | .body']
+        "jq", "-c", 'select(.headers["x-github-event"] == null) | select((.body.event // "") | IN("run.requested","shard.file-written","shard.check-ran","shard.submitted","approval.granted","model.invoked") | not) | .body']
 subscribes = ["http.request"]
 publishes = ["control.unknown-event"]
 
@@ -226,7 +238,9 @@ args = ["-s", "issue.fetched", "--publish-as", "codebase.surveyed",
         "-e", "survey.failed", "-t", "300000", "--",
         "signalbox", "agent", "survey"]
 subscribes = ["issue.fetched"]
-publishes = ["codebase.surveyed", "survey.failed"]
+# Provenance is load-bearing beside the verdict: success alone cannot prove
+# which model invocation incurred the judgment.
+publishes = ["codebase.surveyed", "survey.failed", "model.invoked"]
 
 # Fan-in: first drafts and redrafts are the same act, so one primitive.
 # plan.rejected re-entering here is FEEDBACK EDGE 1.
@@ -237,7 +251,9 @@ args = ["-s", "codebase.surveyed", "-s", "plan.rejected",
         "--publish-as", "plan.submitted", "-e", "plan.draft-failed",
         "-t", "600000", "--", "signalbox", "agent", "plan"]
 subscribes = ["codebase.surveyed", "plan.rejected"]
-publishes = ["plan.submitted", "plan.draft-failed"]
+# Redrafts are non-deterministic too, so provenance must survive every feedback
+# pass rather than only the first plan.
+publishes = ["plan.submitted", "plan.draft-failed", "model.invoked"]
 
 [[handlers]]
 name = "check-plan"
@@ -308,6 +324,9 @@ path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "shard.opened", "-t", "2400000", "--",
         "signalbox", "dispatch", "--skill", "signalbox-implement"]
 subscribes = ["shard.opened"]
+# Dispatch provenance is load-bearing because acting agents publish their own
+# verdicts and otherwise leave no topology-visible model edge.
+publishes = ["model.invoked"]
 
 [[sinks]]
 name = "dispatch-fix"
@@ -315,6 +334,9 @@ path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "fix.opened", "-t", "2400000", "--",
         "signalbox", "dispatch", "--skill", "signalbox-fix"]
 subscribes = ["fix.opened"]
+# Fix rounds are fresh model calls, so their provenance cannot be inferred from
+# the original implementation dispatch.
+publishes = ["model.invoked"]
 
 # The other half of the reaper's contract. A shard that announced is not silent,
 # so its marker has to go; without this the reaper reported every successful
@@ -382,7 +404,8 @@ args = ["-s", "shard.built", "--publish-as", "review.submitted",
         "-e", "review.failed", "-t", "900000", "--",
         "signalbox", "agent", "review"]
 subscribes = ["shard.built"]
-publishes = ["review.submitted", "review.failed"]
+# Review provenance is load-bearing audit evidence independent of its verdict.
+publishes = ["review.submitted", "review.failed", "model.invoked"]
 
 [[handlers]]
 name = "route-approved"
@@ -514,7 +537,9 @@ args = ["-s", "suite.ran", "--publish-as", "gate.assessed",
         "-e", "assess.failed", "-t", "600000", "--",
         "signalbox", "agent", "assess"]
 subscribes = ["suite.ran"]
-publishes = ["gate.assessed", "assess.failed"]
+# Promotion rests on this judgment, making its invocation provenance part of
+# the gate's load-bearing evidence.
+publishes = ["gate.assessed", "assess.failed", "model.invoked"]
 
 [[handlers]]
 name = "route-gate-auto"
@@ -633,7 +658,9 @@ args = ["-s", "pr.merged", "--publish-as", "notes.planned",
         "-e", "notes.plan-failed", "-t", "300000", "--",
         "signalbox", "agent", "plan-notes"]
 subscribes = ["pr.merged"]
-publishes = ["notes.planned", "notes.plan-failed"]
+# Notes planning is still model judgment, so provenance is load-bearing even
+# after the code path has merged.
+publishes = ["notes.planned", "notes.plan-failed", "model.invoked"]
 
 [[handlers]]
 name = "split-notes"
@@ -649,7 +676,9 @@ args = ["-s", "note.drafted", "--publish-as", "note.written",
         "-e", "note.write-failed", "-t", "300000", "--",
         "signalbox", "agent", "write-note"]
 subscribes = ["note.drafted"]
-publishes = ["note.written", "note.write-failed"]
+# A rewritten note is durable output, making the invocation that authored it
+# load-bearing provenance rather than transient telemetry.
+publishes = ["note.written", "note.write-failed", "model.invoked"]
 
 [[handlers]]
 name = "join-notes"
@@ -687,6 +716,8 @@ publishes = ["run.completed"]
 # design when there is nothing to report — no stale shard, no stalled PR.
 # `exec.exit` fires on every tick regardless, so it is what keeps the stream open.
 # The page treats both as proof of life and renders neither.
+# Invocation provenance is load-bearing dashboard traffic, and sse-sink's
+# wildcard blindness means this explicit entry is the only observable path.
 [[sinks]]
 name = "dashboard"
 path = "~/.local/share/emergent/primitives/bin/sse-sink"
@@ -698,7 +729,7 @@ subscribes = ["exec.output", "exec.exit",
               "checks.silent", "checks.unknown-pr",
               "codebase.surveyed", "control.unknown-event", "fix.opened", "gate.assessed",
               "gate.blocked", "gate.cleared", "gate.invalid-verdict", "issue.fetch-failed",
-              "issue.fetched", "merge.attempted", "note.drafted", "note.write-failed",
+              "issue.fetched", "merge.attempted", "model.invoked", "note.drafted", "note.write-failed",
               "note.written", "notes.plan-failed", "notes.planned", "notes.synced",
               "plan.accepted", "plan.checked", "plan.draft-failed", "plan.rejected",
               "plan.submitted", "pr.merge-failed", "pr.merged", "pr.open-failed", "pr.opened",

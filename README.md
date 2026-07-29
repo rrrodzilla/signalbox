@@ -79,16 +79,16 @@ The promote path waits on a push, not a poll. GitHub delivers `check_suite.compl
 
 Eight nodes are non-deterministic. Nothing else in the system is.
 
-| Node | Runner | Model | Judges or acts |
-|---|---|---|---|
-| `survey-codebase` | claude | fable | judges |
-| `draft-plan` | claude | fable | judges |
-| `review-shard` | claude | fable | judges |
-| `assess` | claude | fable | judges |
-| `plan-notes` | claude | sonnet | judges |
-| `write-note` | claude | sonnet | acts (writes notes) |
-| `dispatch-implement` | codex | codex default | acts (writes code) |
-| `dispatch-fix` | codex | codex default | acts (writes code) |
+| Node | Role | Runner | Default model | Override precedence | Judges or acts |
+|---|---|---|---|---|---|
+| `survey-codebase` | `survey` | claude | fable | `SIGNALBOX_MODEL_SURVEY`, then `SIGNALBOX_MODEL` | judges |
+| `draft-plan` | `plan` | claude | fable | `SIGNALBOX_MODEL_PLAN`, then `SIGNALBOX_MODEL` | judges |
+| `review-shard` | `review` | claude | fable | `SIGNALBOX_MODEL_REVIEW`, then `SIGNALBOX_MODEL` | judges |
+| `assess` | `assess` | claude | fable | `SIGNALBOX_MODEL_ASSESS`, then `SIGNALBOX_MODEL` | judges |
+| `plan-notes` | `plan-notes` | claude | sonnet | `SIGNALBOX_MODEL_PLAN_NOTES`, then `SIGNALBOX_MODEL` | judges |
+| `write-note` | `write-note` | claude | sonnet | `SIGNALBOX_MODEL_WRITE_NOTE`, then `SIGNALBOX_MODEL` | acts (writes notes) |
+| `dispatch-implement` | `implement` | codex | codex configured default | `SIGNALBOX_CODEX_MODEL` | acts (writes code) |
+| `dispatch-fix` | `fix` | codex | codex configured default | `SIGNALBOX_CODEX_MODEL` | acts (writes code) |
 
 Cross-vendor by design: codex writes the code, Claude reviews it, so no model approves its own work.
 
@@ -96,7 +96,30 @@ The judging nodes are Shape A — one execution, one verdict event, and the rout
 
 Both runners resolve the same `SKILL.md` by name. Claude reads `.claude/skills/`, codex reads `.codex/skills/`, and `prepare-workspace` installs into both, so the procedure is one reviewable file rather than two copies that drift.
 
-Per-role overrides: `SIGNALBOX_MODEL_REVIEW` and friends for one role, `SIGNALBOX_MODEL` for every Claude role, `SIGNALBOX_CODEX_MODEL` for codex. The last is deliberately a separate variable, because model names are not portable between the runners.
+Every one of these eight nodes publishes `model.invoked` at the mechanical
+invocation boundary, whether the invocation succeeds or fails. Its core payload
+is `{event: "model.invoked", role, runner, model}`, followed by the same
+mechanically carried identity as the event it explains (`run_id`, stage/shard
+identity, scope, round, and the other applicable correlation keys). It also
+records `produces`, `ok`, and `duration_ms`, so a failed call still leaves an
+auditable edge naming what it attempted and how long it ran.
+
+`runner` and `model` are resolved in Python by the code that constructs the
+subprocess, not reported by the model. `model.invoked` is deliberately absent
+from the three-event `signalbox emit` vocabulary available to acting agents:
+provenance is useful only if an agent cannot forge its runner, model, or
+invocation. For Claude roles, the per-role variable shown in the table wins,
+then `SIGNALBOX_MODEL`, then the role default. Codex has a separate
+`SIGNALBOX_CODEX_MODEL` because model names are not portable between runners.
+When that variable is unset, signalbox passes no model argument and the
+`model.invoked` payload contains `model: null`, meaning codex chose its own
+configured default; when it is set, signalbox passes that value and records the
+same value in `model`.
+
+The dashboard consumes these events as provenance rather than displaying them
+as standalone feed rows. It joins each invocation to the most specific matching
+mechanical identity on ordinary feed events and renders a `runner · model`
+badge; a null codex model renders as just `codex`.
 
 ## Quick start
 

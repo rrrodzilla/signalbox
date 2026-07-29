@@ -20,7 +20,9 @@ ACT_COMMANDS = frozenset({
     "notify", "launch",
 })
 
-COMMANDS = ACT_COMMANDS | {"primitive", "check-plan", "agent", "dispatch", "emit", "dashboard"}
+COMMANDS = ACT_COMMANDS | {
+    "primitive", "check-plan", "agent", "dispatch", "emit", "dashboard", "paths",
+}
 
 
 def _stdin_payload() -> dict:
@@ -75,6 +77,19 @@ def main(argv: list[str] | None = None) -> int:
         from signalbox import dashboard
 
         return dashboard.main(rest)
+
+    if command == "paths":
+        # A diagnostic, because the failure it catches is silent: a non-editable
+        # install runs a stale copy of the code and skills while the source in
+        # front of you reads correct.
+        from signalbox.emit import control_url
+        from signalbox.paths import skills_dir, state_dir
+
+        print(f"package  {__file__.rsplit('/', 1)[0]}")
+        print(f"skills   {skills_dir()}")
+        print(f"state    {state_dir()}")
+        print(f"control  {control_url()}")
+        return 0
 
     if command in ACT_COMMANDS:
         from signalbox import acts

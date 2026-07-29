@@ -1,1 +1,0 @@
-Created [demo/src/farewell.rs](/home/rodzilla/code/active/trip-emergent-wt/s1-modules-farewell/demo/src/farewell.rs). No other files were modified.

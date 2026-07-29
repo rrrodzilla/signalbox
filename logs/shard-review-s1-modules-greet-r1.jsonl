@@ -1,4 +1,0 @@
-{"type":"thread.started","thread_id":"019fa05f-c0f0-7b31-b6f8-6aca1bb01d54"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"demo/src/greet.rs:2 — `unwrap()` panics when `name` is an empty string — handle `name.chars().next()` returning `None` explicitly\n\nREQUEST_CHANGES"}}
-{"type":"turn.completed","usage":{"input_tokens":15807,"cached_input_tokens":5888,"output_tokens":163,"reasoning_output_tokens":118}}

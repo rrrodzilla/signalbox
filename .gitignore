@@ -3,3 +3,22 @@ __pycache__/
 *.pyc
 .pytest_cache/
 uv.lock
+
+# Build output of the sacrificial demo crate.
+demo/target/
+
+# Runner scratch. Skills are installed into a run's worktree, never here.
+.claude/skills/
+.codex/skills/
+.playwright-mcp/
+
+# The previous architecture kept run state on disk. Nothing writes these now —
+# a run's state is the event store — but they stay ignored so a stray one from an
+# old checkout never reads as current.
+logs/
+results/
+state/
+rendered/
+
+# Harness process logs.
+.harness/

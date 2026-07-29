@@ -1,216 +1,166 @@
 # signalbox
 
-The TRIP workflow rebuilt as [Emergent](https://github.com/Govcraft/emergent) event topologies: plan, implement, review, and promote as deterministic wiring, with AI models at the nodes and an operator at the seams.
+An issue goes in, a merged pull request comes out. Plan, implement, review, and promote as one [Emergent](https://github.com/Govcraft/emergent) event topology: deterministic wiring, AI models at the nodes, and a human at the seams that need one.
 
 The name is from railway signaling. A signal box is where the interlocking lives: levers, signals, and switches wired so that conflicting movements are *physically impossible*, not merely forbidden by rule. That is this system's core idea. An approval gate here is a place where no alternative wiring exists, so no model can talk its way around it.
 
-## Lineage: TRIP, and why signalbox exists
+## The shape
 
-Signalbox descends from [TRIP](https://github.com/PiLastDigit/TRIP-workflow) by PiLastDigit, the "Simple & BS-free Dev Workflow for AI Coding Agents." Credit where it is due: TRIP put clean names and discipline around a loop I had already been running by hand (plan, implement, review, promote, with verdict sentinels and a human gate). My business partner pointed me at the upstream repo; I ran it for a few days, kept everything it got right, and then rebuilt it on Emergent, my open-source event-driven workflow engine. My fork of the original lives at [rrrodzilla/TRIP-workflow](https://github.com/rrrodzilla/TRIP-workflow).
-
-Why a rebuild instead of a PR upstream:
-
-- **TRIP tries to be everything for everybody.** I needed to take a stance on the models and agents in play. Signalbox commits: Codex (sol, high effort) reviews and implements; headless Claude (Opus) fixes, plans, and assesses; an Opus operator judges the phase seams and the promotion. Cross-vendor by design, so no model ever approves its own work.
-- **Prompt-driven orchestration burns tokens on things that should be code.** In a skill-based workflow, the model spends tokens reading instructions, deciding which step comes next, and remembering rules it must not break. Signalbox makes everything programmatic that can be programmatic: routing, verdict parsing, round caps, plan validation, fan-in barriers, and gates are jq, flock, and wiring. Models spend tokens only where judgment is genuinely required.
-- **I already keep project notes in an Obsidian vault.** TRIP's docs tree was one more filesystem format to maintain. Here `.claude/docs` is a symlink into the vault, so the workflow's architectural memory lives with the rest of my notes and every agent reads the same pages.
-- **Linux is a feature, not a portability problem.** Symlinks share the vault and `.claude` across every worktree, `flock` is the fan-in barrier, and engines are plain processes with SIGTERM drain. Constraints that keep a workflow portable were solving a problem I don't have.
-- **Emergent affords things prompts never could.** Deterministic orchestration (no model orchestrates; the engine routes). Real concurrency: sharded implementation in parallel worktrees, which a single chat session cannot do because it cannot be in two places at once. An event store that turns every feature into a queryable audit trail (`bin/audit.sh <correlation-id>`) instead of a scrollback. Topological gates: nothing subscribes around an approval, so trust is structural. Process lifecycle, graceful shutdown, and per-feature correlation ids for free.
-
-What survives from upstream TRIP, gratefully: the sentinels, the review/fix bounce, architectural memory in `ARCHI.md`/`ARCHI-rules.md`/`TESTING.md`, local-only tooling under `.claude/`, and the release as the human's step. The R1-R4 situational-delegation ladder is not upstream TRIP; I added it in my fork and carried it forward here, because it answers the question every agent workflow dodges: *when* should the human stop approving? (See "Situational gate" below.)
-
-The translation in one line: TRIP's sentinels become event topics, the review/fix bounce becomes a native feedback cycle, and the round cap becomes a jq guard instead of prose.
+One engine. Three sources, fifty-two handlers, seven sinks, and no script that knows what comes next.
 
 ```
-seed ──> review.requested ──> reviewer (codex exec, read-only) ──> review.raw
-                 ▲                                                    │
-                 │                                    ┌───────────────┴───────────────┐
-                 │                              verdict-approved                verdict-changes
-                 │                                    │                               │
-                 │                              review.approved            review.changes_requested
-                 │                              situational gate            ┌──────────┴──────────┐
-                 │                                    │               round-guard         escalation-guard
-                 │                              approval.granted         (round < 4)         (round >= 4)
-                 │                           ┌────────┴────────┐            │                     │
-                 │                     promoter sink      docs-syncer       │                     │
-                 │                (PROMOTION_READY → CR.md)     │           │                     │
-                 │                                          docs.synced     │                     │
-                 └────────────── fixer (claude -p, acceptEdits) <── fix.requested          review.escalated
+run.requested ─> workspace.ready ─> issue.fetched ─> codebase.surveyed
+                                                          │
+                                       ┌──────────────────┘
+                                       ▼
+                                  plan.submitted ─> plan.checked
+                                       ▲                  │
+                                       │        ┌─────────┴─────────┐
+                                  plan.rejected ◄─ (attempt < 3)   plan.accepted
+                                                                     │
+                    pace-stages (one stage at a time, ack on merge) ◄─┘
+                                       │
+                                  stage.opened ─> split-shards ─> shard.opened
+                                       ▲                              │
+                                       │                       dispatch-implement
+                              stage.conflicted                        │
+                                       │            shard.file-written ─> scope.violated
+                                       │            shard.check-ran        │
+                                       │            shard.submitted        └─> stage.closed
+                                       │                    │
+                                       │              shard.built ─> review.submitted
+                                       │                                  │
+                                       │              ┌───────────────────┴────────────────┐
+                                       │        shard.approved         shard.changes-requested
+                                       │              │                      │      (round < 5)
+                                       │         join-stage                  └─> fix.opened
+                                       │              │
+                                       │       stage.mergeable ─> merge.attempted
+                                       │                                │
+                                       └── stage.conflicted ◄───────────┴──────> stage.merged
+                                                                                     │
+                                                   join-run (stage_count) ◄───────────┘
+                                                         │
+                                             run.built ─> suite.ran ─> gate.assessed
+                                                                            │
+                                   ┌────────────────────────────────────────┤
+                             gate.cleared                         approval.requested
+                                   │                                        │
+                                   └──────────> branch.pushed <── approval.granted
+                                                     │
+                                                 pr.opened ─> checks.reported
+                                                     │               │
+                                          ┌──────────┴──────┐   checks.failed
+                                     pr.merged        notes.planned    │
+                                                           │   shard.changes-requested
+                                                     note.written              │
+                                                           │            (fix.opened)
+                                                     notes.synced
+                                                           │
+                                                     run.completed
 ```
 
-## Quick start, any repo, TRIP or not
+Four feedback edges close loops nobody sequenced: a rejected plan re-enters the planner, a review that requests changes re-enters implementation, a merge conflict reopens only the shards whose declared files collide, and a red CI run becomes review findings in the vocabulary the fix loop already speaks.
+
+## Principles the wiring enforces
+
+- **Behavior lives in the topology.** There is no `run-pipeline` subcommand and no script that knows the order of phases. Delete the engine and nothing runs, which is the test that says this is an Emergent system rather than a shell pipeline with extra steps.
+- **A model announces; handlers decide.** Every judging node prints one JSON verdict and stops. Deterministic routers turn that one event type into the domain vocabulary, and an unrecognized verdict becomes `*.invalid-verdict` rather than a silent drop. Swapping a model for a rule later disturbs nothing around it.
+- **Identity is never typed by a model.** Run, stage, shard, declared scope, and round counters are stamped from the inbound envelope, and an acting agent reads them from its environment. A model cannot reassign a shard, widen its scope, or reset a round counter by saying so.
+- **Scope is enforced at write time.** One predicate on `shard.file-written` publishes `scope.violated` for a path no shard declared, which closes the stage before review ever sees it.
+- **Silence has a name.** An agent that crashes or refuses produces no event at all; a pending marker plus an interval reaper turns that absence into `shard.silent`, and a sink clears the marker the moment the agent does speak.
+- **No sink does work with consequences.** Sinks cannot publish, so anything whose result matters is a handler. The previous implementation put work in sinks and had to route every consequence out of band through the filesystem, which is where its artifact-polling, phase runner, readiness ledger, port leasing, and vault lock all came from. Removing that one assumption removed all five.
+
+## Models per node
+
+Eight nodes are non-deterministic. Nothing else in the system is.
+
+| Node | Runner | Model | Judges or acts |
+|---|---|---|---|
+| `survey-codebase` | claude | fable | judges |
+| `draft-plan` | claude | fable | judges |
+| `review-shard` | claude | fable | judges |
+| `assess` | claude | fable | judges |
+| `plan-notes` | claude | sonnet | judges |
+| `write-note` | claude | sonnet | acts (writes notes) |
+| `dispatch-implement` | codex | codex default | acts (writes code) |
+| `dispatch-fix` | codex | codex default | acts (writes code) |
+
+Cross-vendor by design: codex writes the code, Claude reviews it, so no model approves its own work.
+
+The judging nodes are Shape A — one execution, one verdict event, and the routers own the transition. The acting nodes are Shape B — an `exec-sink` dispatches, and the agent re-enters through the control endpoint with `signalbox emit` as it works. That is why the scope guard can fire mid-implementation instead of at review: a thirty-minute step publishing one event at the end would be a thirty-minute hole where nothing is observable, resumable, or reactive.
+
+Both runners resolve the same `SKILL.md` by name. Claude reads `.claude/skills/`, codex reads `.codex/skills/`, and `prepare-workspace` installs into both, so the procedure is one reviewable file rather than two copies that drift.
+
+Per-role overrides: `SIGNALBOX_MODEL_REVIEW` and friends for one role, `SIGNALBOX_MODEL` for every Claude role, `SIGNALBOX_CODEX_MODEL` for codex. The last is deliberately a separate variable, because model names are not portable between the runners.
+
+## Quick start
+
+Prerequisites: the Emergent engine and its primitives, `claude`, `codex`, `gh` (authenticated), `git` with a signing key, `jq`, `python3`, and `uv`. `bin/harness.sh preflight` checks all of it and names what is missing.
 
 ```bash
-# 0. prerequisites (install.sh preflights all of this and fails fast):
-#    the Emergent engine + primitives, codex, claude, gh (authed), jq,
-#    python3, curl,
-#    and a git signing key configured in the target repo
-cargo install emergent-engine   # or a prebuilt binary: github.com/Govcraft/emergent/releases
-emergent marketplace install exec-source exec-handler exec-sink stream-runner
+emergent marketplace install exec-source exec-handler exec-sink \
+    stream-runner http-source sse-sink topology-viewer
 
-# 1. install or refresh the harness (never committed to the target; --reinstall
-#    is safe for a fresh repo and refreshes an existing install in place;
-#    --vault flags are only needed the first time; --gate overrides detection)
-./install.sh ~/code/my-repo --vault ~/my-vault --reinstall  # [--folder TRIP/my-repo] [--gate '<command>']
+./bin/harness.sh install      # editable CLI install, then the invariant suite
+./bin/harness.sh up           # engine + dashboard
+./bin/harness.sh status       # what is listening, and which runs have worktrees
 
-# 2. fill the vault, once per repo (three researchers write ARCHI.md,
-#    ARCHI-rules.md, and TESTING.md; existing docs get .proposed.md siblings;
-#    the supervised runner exits on its own once all three land)
-~/code/my-repo/.claude/emergent/bin/init-run.sh
-
-# 3. per issue: one command, issue in, merged PR out
-~/code/my-repo/.claude/emergent/bin/run.sh 42
+./bin/harness.sh launch 42 --repo owner/name --repo-path ~/code/my-repo
 ```
 
-Step 3 runs plan → implement → review → promote with Opus operating the phase seams. Releases remain human-owned, and the situational gate can park a run for human approval when its earned readiness is below the assessed floor. Run the launcher once per issue and N issues can proceed side by side in the same checkout: each gets its own run directory, engines, approval webhook port, logs, and PID files. `bin/run.sh --list` distinguishes a live phase launch, a live parked review engine, and a dead engine instead of calling every surviving process merely alive. The direct `SIGNALBOX_ISSUE=42 emergent --config ~/code/my-repo/.claude/emergent/pipeline.toml` form remains available for one run at a time. Details per phase below.
+Watch it at **http://127.0.0.1:8103** (the run board) and **http://127.0.0.1:8102** (the live topology). A run's whole trail is in the event store; `bin/harness.sh down` sends SIGTERM so that trail flushes.
 
-Conversational entry: install.sh also installs a user-level `/signalbox` launcher skill (from `skills/signalbox/`, once, never overwriting your customizations). `/signalbox 54` picks install/init/pipeline from the repo's state and supervises with the disk-artifact discipline, so the day-to-day interface is one slash command in any repo.
+The install is editable on purpose. A built wheel is the one reliable way to end up running a stale copy of the code and skills while the source in front of you reads correct, and that failure is invisible — a stale skill reports a verdict, just the wrong one. `signalbox paths` prints where the running CLI actually resolves its package, skills, and state.
 
-## Run the prototype demo
+## Dogfooding signalbox on signalbox
 
 ```bash
-./dev.sh emergent.toml
+./bin/harness.sh dogfood 57      # launches issue 57 against this checkout as run sb-57
 ```
 
-(The tracked TOMLs carry a `__SIGNALBOX_ROOT__` placeholder rather than any machine's absolute path; `dev.sh` renders against this clone into gitignored `rendered/` and launches the engine. `install.sh` does the same rendering against the target repo.)
+Two things about the target being this repository. A run branches from the checkout's **current HEAD**, read at `prepare-workspace` time, so check out the branch you want as the base before launching. And the CLI is installed editable, so a run in flight is using the working tree it is also reading: land your edits and restart the engine (`./bin/harness.sh restart`) rather than editing underneath a live run.
 
-The one-shot `seed` source fires on startup (sources start last), reviewing `demo/`, a tiny crate with a deliberate reachable panic. Expected flow: round 1 `REQUEST_CHANGES` → Claude fixes → round 2 `APPROVED` → `results/CR.md` written under the `PROMOTION_READY` sentinel.
+## Run the demo
 
-Artifacts per round land in `logs/`: `review-round-N.md` (Codex's review), `review-round-N.jsonl` (event stream), `fix-round-N.log` (Claude's fix transcript).
+`demo/` is a sacrificial crate with a deliberate reachable panic in `parse_pairs`.
 
-## Pieces
+```bash
+./bin/harness.sh up
+./bin/harness.sh launch 1 --repo-path ./demo --run-id demo-1 \
+    --body-file /path/to/issue.md    # no remote needed; the issue text comes from disk
+```
 
-| File | Role |
+A local-only run needs no `gh`: `fetch-issue` passes through when the body is already on the envelope.
+
+## Layout
+
+| Path | Role |
 |---|---|
-| `emergent.toml` | The topology, the state machine as wiring |
-| `bin/review.sh` | Codex reviewer (same `codex exec` flags as TRIP's review scripts) |
-| `bin/fix.sh` | Headless Claude fixer; increments `round`, closes the loop |
-| `bin/promote.sh` | Writes the approved CR under `PROMOTION_READY` |
-| `prompts/review.md` | Review scope + mandatory verdict contract |
-| `demo/` | Sacrificial crate with a reachable `unwrap` panic |
+| `emergent.toml` | The topology. The whole architecture is this file. |
+| `skills/` | Eight skills, one per model node. The procedures, versioned and reviewable. |
+| `src/signalbox/acts.py` | The irreducible I/O acts: worktree, issue, suite, merge, push, PR. |
+| `src/signalbox/agent.py` | Shape A. One verdict per execution, identity re-stamped. |
+| `src/signalbox/dispatch.py` | Shape B. Runner selection, sandbox, unspoofable identity. |
+| `src/signalbox/emit.py` | An acting agent's entire action space: three events. |
+| `src/signalbox/plan.py` | The pure invariants that license parallel shards. |
+| `src/signalbox/primitives/` | Three SDK primitives: two splitters and a joiner with a real timeout. |
+| `src/signalbox/dashboard.html` | The run board, a static viewer over the SSE stream. |
+| `tests/test_topology.py` | The architectural review questions as assertions. |
+| `bin/harness.sh` | Operator lifecycle. Knows nothing about phase order, by design. |
 
-## Thread continuity
+## The invariant tests
 
-Round 1 starts a fresh Codex session and captures the `thread_id` from the `thread.started` event; rounds 2+ run `codex exec resume` against that same thread, so the re-review carries full context of its own prior findings. The thread id travels **in the event payload** (`review.raw` → `fix.requested` → `review.requested`), not in a state file: the loop's entire state is visible in the event store. If the thread id is ever missing, the reviewer falls back to a fresh session with the prior feedback embedded in the prompt.
+`tests/test_topology.py` is the part worth reading first. It asserts things no runtime error would ever report: that the dashboard observes every topic the topology publishes, that no SSE subscription relies on a wildcard (they are silently ignored — health said `ok` while delivering zero bytes), that every subscription has a publisher and every published event has a consumer, that both sides of every depth guard are exclusive so a loop cannot run forever *or* terminate early, that every verdict type has an exhaustiveness router, that the field a join terminates on is a carried identity key, that anything writing a pending marker has something that clears it, that every `signalbox` subcommand the topology calls actually exists, and that no primitive is named `runner`, `pipeline`, or `orchestrator`.
 
-The fixer gets the same continuity, and for a sharper reason. Round 1 mints a session id and pins it with `--session-id`; rounds 2+ pass `--resume`. `bin/review.sh` never reads `fix_session_id`, it only carries it back across the round trip, exactly as `bin/fix.sh` carries `thread_id` for the reviewer. A dead or unresumable id degrades to a fresh session with the full prompt rather than stalling the loop.
+Each of those is a bug that already happened once.
 
-Without it the loop can spiral: a memoryless fixer patches code it wrote two rounds ago without recognizing it, each locally-minimal fix becomes the next round's finding, and the round guard escalates a mechanism that should never have been built. That is not hypothetical — issue #30 burned four rounds that way and the work was reverted. So the resumed rounds send only the new feedback plus one instruction the memory makes actionable: check whether this finding sits in code you added earlier, and if it does, judge whether that approach is sound instead of patching it again. The fixer can also decline outright — if a finding can only be fixed by inventing a mechanism the plan does not scope, it makes no change and answers `SCOPE-CONFLICT` with the design decision that is actually required.
+## Lineage
 
-## Situational gate
+Signalbox descends from [TRIP](https://github.com/PiLastDigit/TRIP-workflow) by PiLastDigit, the "Simple & BS-free Dev Workflow for AI Coding Agents." TRIP put clean names and discipline around a loop I had already been running by hand: plan, implement, review, promote, with verdict sentinels and a human gate. My fork of the original lives at [rrrodzilla/TRIP-workflow](https://github.com/rrrodzilla/TRIP-workflow).
 
-**Why this exists.** Most agent workflows pick one of two bad answers to "does this step need a human?": always (the human rubber-stamps forever and becomes the bottleneck) or never (autonomy is granted up front, before it is earned). Neither is how anyone actually manages people. Situational Leadership (Hersey and Blanchard's model) says the right amount of supervision is not a property of the leader or a fixed policy; it is a function of the follower's demonstrated readiness for *the specific task*: a new hire gets directing (S1), then coaching (S2), then supporting (S3), and only after a track record, delegating (S4). Readiness is rated R1 through R4, it is task-specific (proven at deploys says nothing about proven at schema migrations), and it can regress. I added this to my TRIP fork as the delegation model for AI agents because agents have exactly the same shape: they need supervision proportional to demonstrated competence on the action at hand, not a blanket trust setting. Signalbox makes it mechanical.
+What survives from upstream, gratefully: the sentinels, the review/fix bounce, and the release as the human's step. The situational gate is not upstream TRIP; I added it in my fork and carried it forward, because it answers the question every agent workflow dodges: *when* should the human stop approving?
 
-Approval therefore follows the Situational Leadership curve: whether a transition needs a human is a function of earned readiness against a floor **the LLM sets for the action at hand**. There is no hand-authored policy table.
+Approval follows the Situational Leadership curve. Hersey and Blanchard's model says the right amount of supervision is not a property of the leader or a fixed policy; it is a function of the follower's demonstrated readiness for *the specific task*. Agents have the same shape, so `assess` hands a model the action's mechanics and the live context and gets back a floor, and a jq predicate compares earned readiness to that floor. Below it, `approval.requested` and a human decides. Nothing subscribes around the gate, so the block is topological rather than behavioral. Proven at one action says nothing about another, and readiness can regress.
 
-- **The floor is the leader's judgment, per instance**: `bin/assess.sh` hands an LLM the action's mechanics (facts: what it does, how visible, how reversible) plus the live context (round, change scope, reviewer's summary), and the LLM returns `{floor, rationale}`. Same context, different actions, different floors: promoting a local artifact assesses around R2 while pushing a shared remote assesses R3+. Every determination is appended to the repo-scoped `state/assessments.jsonl` and travels in the payload, so the event trail records not just what was decided but *why*. Fail-safe: an unparseable assessment means floor 4. When the leader can't be understood, a human decides.
-- **The gate is then pure topology**: a jq handler compares earned readiness to the assessed floor. Below it, `approval.requested`: a notify sink parks the payload in the current run's `state/pending.json` (citing the floor and rationale) and prints the approval command; the review supervisor then deliberately holds that otherwise-idle engine open so the human's POST to `/approve` can still re-enter the fabric as `approval.granted`. The terminal's atomic `state/park.json` says whether that hold succeeded and records the engine PID and start identity, live approve URL and command, deadline, lease transfer, and any closed-window reason. The parked pipeline may therefore complete while one review engine remains alive; that process is the waiting gate, not a leak. Nothing subscribes around the gate, so the block is topological, not behavioral. At or above it, straight to `approval.granted`; the human observes (S4 "delegating") via narration and the event store.
-- **The ladder moves on track record, per action**: clean convergence (approved in ≤ 2 rounds) promotes that action one R-level; escalation demotes it. The repo-scoped `state/readiness.json` is a map: proven R4 on `promote` says nothing about `push-remote`, which starts at the R2 default like everything else. Autonomy is earned, never granted up front, and never transfers between actions or repos.
-- **Readiness goes stale**: levels above R2 decay one step per idle week (`DECAY_DAYS`, default 7) since the ladder last moved them, floored at the R2 default. This is TRIP-2's reset-toward-R2, generalized to time. Decay is observed lazily at read time (`bin/readiness-get.sh`), no daemon; staleness is a property of the moment of use. The ladder builds on the *decayed* base, so idle track record erodes before the next promotion stacks on it. R1 never heals by waiting: distrust is earned back through track record, not time.
-
-## Implement stream (`implement.toml`)
-
-The batched implement phase, with plan-declared concurrency sharding, something standard TRIP can't do because one Claude session can't be in two worktrees at once:
-
-```
-plan.load ─> stream-runner (stages, ack-gated = sequential dependencies)
-   stage.item ── fan-out by subscription ──> worker-0 ┐  per shard: worktree off the
-                └───────────────────────────> worker-1 ┘  integration tip + codex
-                                                          (workspace-write) + signed
-                                                          commit ──> shard.built
-   shard.built ─> slice-next (pop pending shard) ─> shard.review.requested
-                └> slice-done (queue empty) ──────> shard.done
-   shard.review.requested ─> reviewer-N (codex, delta diff vs integration tip)
-        │                                                 │
-        └── fixer-N (claude -p in the shard worktree, <───┴── REQUEST_CHANGES
-            signed fix commit, round+1)                       (round < 3)
-        APPROVED ─> shard moved pending → done, loops back to shard.built
-   shard.done ─> collector (flock barrier: all shards arrived?) ─> stage.done
-   stage.done ─> merger (rebase + ff-merge each branch, remove worktree) ─> stage.ack
-plan.done ─> finisher (configured gate in the integration worktree)
-```
-
-- **The plan is the DAG**: `plan.json` groups shards into stages. Shards within a stage must be conflict-free (disjoint files); that's the planner's contract. Stages express the sequential dependencies. A single-shard stage is the same code path, so "sequential" is just the degenerate case of "concurrent".
-- **Fan-out by subscription**: every worker receives the same `stage.item` and takes the slice where `shard_index % worker_count == its index`. An empty slice exits silently.
-- **Per-shard delta review**: nothing reaches the collector unreviewed. Each built shard is popped off a pending queue and its diff against the integration tip is reviewed by Codex (fresh thread round 1, `resume` on re-reviews, the same continuity as the code-review loop). `REQUEST_CHANGES` bounces to a headless-Claude fixer that commits on the shard branch (round cap 3, then `shard.escalated` and the stage stalls for a human). Only `APPROVED` shards join `done`/`branches`, so the merge gate is topological: the collector's input topic is only ever fed by the approved splitter. Reviewers and fixers are worker-tagged, so two shards review and fix concurrently.
-- **Fan-in**: the collector counts arrivals under `flock` and stays silent until the barrier fills; the merger rebases each shard branch onto the integration tip and `--ff-only` merges. Linear history, no merge commits, worktrees and branches cleaned as they land. In an installed harness, branches are `shard/<feature>/<stage>-<shard>` and worktrees are `<repo>-wt/<feature>-<stage>-<shard>`, so two features cannot claim the same names. Every Git worktree add, remove, and prune is serialized across the repo with the repo-scoped `state/worktree.lock`.
-- Run: `./dev.sh implement.toml` (the seed resets prior runs' worktrees/branches, integration branch `integration/stream-demo`).
-- Like the committed-buggy `demo/` baseline, the plan is booby-trapped on purpose: the `greet` shard's prompt mandates `name.chars().next().unwrap()`, a reachable panic on empty input, so a stock run exercises the full review → fix → re-review path on one shard while the other sails through round 1.
-
-## Feature audit trails (`correlation_id`)
-
-The id rides the **message envelope**, the field Emergent already models and indexes — not the payload. Every seed source declares `--correlate`, so `exec-source` mints one `correlation_id` per run as a TypeID (`cor_<uuid_v7>`, k-sortable) and stamps it on everything it publishes; every `exec-handler` copies the inbound id onto what it publishes, so the trail extends itself with no field threaded through any jq filter. `bin/phase-run.sh` exports the id as `EMERGENT_CORRELATION_ID` when launching a child engine, which is the one channel that crosses an engine boundary: the child's `exec-source` adopts it instead of minting, so plan, implement, and review all stamp the same id and `bin/audit.sh <id>` returns the whole run. A phase launched directly (`bin/run.sh --phase`, `dev.sh`) inherits nothing and mints its own; its trail covers that phase alone.
-
-Exec primitives pipe only the payload to a command's stdin, so scripts read the envelope from `EMERGENT_CORRELATION_ID` in their environment (`bin/_correlation.sh`). A script that cannot see it fails closed rather than minting a replacement: a locally invented id would exist in the artifact and nowhere the event store could find it, which is exactly the split trail issue #42 was about. Durable artifacts — `state/pipeline.json`, `state/run.json`, `results/CR.md`, `state/docs-sync.json` — still record the id, because `bin/run.sh` reads them from outside the fabric where no envelope exists.
-
-The payoff is that Emergent's event store already remembers everything, so the audit trail is one filter, not an instrumentation project. Launcher-created engine names carry the run suffix (`<repo>-pipeline-issue-42`, and likewise for the child engines), which gives each run a separate `socket_path = "auto"` socket and event-store log directory. `bin/audit.sh` discovers both those suffixed engines and the unsuffixed single-run engines:
-
-```bash
-bin/audit.sh                                              # list correlation ids across every run
-bin/audit.sh cor_01kyk5bd3xfcgbvh2tacztktzb               # full trail across matching engines
-bin/audit.sh --run issue-42 cor_01kyk5bd3xfcgbvh2tacztktzb # restrict the engine set to one run
-```
-
-The trail spans every engine in scope and prints one line per event: timestamp, topic, source, and the load-bearing payload fields (stage, shard, round, verdict, decision, merge tip). The run's `results/CR.md` and the finisher's gate banner cite the id, so any artifact can be traced back to the exact sequence of events that produced it without mixing attribution between concurrent runs.
-
-## Pipeline (`pipeline.toml`): Opus operates the phase seams
-
-The launcher API is `bin/run.sh <issue> [--phase pipeline|plan|implement|review|promote]`; the default `pipeline` phase runs the whole per-feature path (plan → implement → review → **promote**), and an unknown phase remains a usage error (exit 64). Every mode first claims the run with an exclusive, non-blocking `flock` on `runs/issue-<n>/state/launcher.lock`, held for the launcher's whole life and closed in every child that can outlive it: all five modes write the same `launch.json` and `state/engine.pid`, and promote additionally pushes a branch and merges a PR, so a second launcher of **any** mode refuses instead of racing one already in flight. The `state/engine.pid` liveness check stays — it catches an engine left behind by a launcher that already exited — but it cannot make ownership atomic on its own, because two launchers can both pass it before either writes its PID. Engine-backed launches render their run-isolated configs from `templates/` into `runs/issue-<n>/`, substituting that run's engine suffix and leased approval port. Inside the pipeline, `bin/phase-run.sh` launches each child, propagates the run slug, touches `state/pipeline-<phase>.stamp`, and watches **run-scoped disk artifacts** — never buffered engine narration — for the phase terminal: fresh `plan.json`; fresh `state/gate.json`, classified as `ARTIFACT` only for `GREEN` and otherwise `GATE_RED`; fresh `results/CR.md` or `state/pending.json`; or fresh `state/escalated.json`, with deadlines of 2400 seconds for plan, 5400 for implement, and 3600 for review. The phase runner hands its exact child PID, paired with that process's `/proc/<pid>/stat` start identity, to the detached `bin/engine-reaper.sh` in two cases: an unparked review artifact with docs-sync still in flight gets the bounded 960-second docs-sync grace, while a review `PARKED` terminal gets the human-scaled `SIGNALBOX_PARK_GRACE` deadline (base-10 seconds, default 86400) so its approval source remains reachable. For a park it also transfers the approval-port lease from the launcher to the held engine and atomically writes `state/park.json`; an engine already dead or without readable process identity produces `held: false` plus a reason instead of a fictitious live window. The foreground pipeline launcher records the outer engine PID in `state/engine.pid`; each live child phase records `state/phase-<phase>.pid`, and `bin/run.sh --list` distinguishes that active phase ownership from the held park described by `state/park.json` and from a dead engine. A successfully held park survives the launcher's exit, but it remains in the launcher's terminal session and does not survive that session's destruction; a park intended to outlive the terminal must start the launcher under `nohup` or `setsid`. The direct `SIGNALBOX_ISSUE=<n> emergent --config pipeline.toml` path uses the installed unsuffixed config and remains the single-run form.
-
-Standalone `--phase plan|implement|review` launches are supervised by the launcher itself with the same stamps, fresh-artifact conditions, and deadlines; the launcher already touches its own stamp immediately after `launch.json`, the separate issue #34 fix. At an unparked review artifact while docs-sync is still in flight, the launcher stays in the foreground and keeps its engine alive for a bounded `SIGNALBOX_DOCS_SYNC_GRACE` (base-10 seconds, 0 to 86400; default 960, which also replaces any value outside that range), preserving the chance for `bin/promote-exec.sh`'s docs-sync precondition to find evidence newer than the review stamp. At a review park, by contrast, the standalone launcher does not reap the engine: it makes the same detached-reaper handoff, approval-lease transfer, `state/park.json` record, and `SIGNALBOX_PARK_GRACE` deadline as the pipeline phase runner, then exits with the deliberately idle engine listening. Every observed standalone terminal is passed through `bin/terminal-record.sh`: `ARTIFACT` and `PARKED` become `state/complete.json`; `ESCALATED`, `GATE_RED`, `TIMEOUT`, and `ENGINE_DIED` become `state/halted.json`; both carry phase, outcome, reason, and a `correlation_id` read from the fresh artifact that settled *that* outcome — `plan.json`, `state/gate.json`, `results/CR.md`, `state/pending.json`, or `state/escalated.json` — and `null` when the outcome has no artifact of its own (`TIMEOUT`, `ENGINE_DIED`) or that artifact carries no id. A run directory is reused across launches, so reading the phase's usual artifact regardless of outcome would stamp a fresh `PARKED` or `ESCALATED` record with the previous review's id; a stale id is worse than none. Both records are forwarded to the shared sink as `pipeline.complete` or `pipeline.halted`. This is a uniform terminal contract, not a uniform verdict: the standalone record says what the launcher **observed**. Only the pipeline topology runs `bin/operator.sh`, so no independent operator has verified a standalone phase's artifacts.
-
-`bin/run.sh <issue> --phase promote` is the recovery path into promotion, not another engine topology: it launches no engine, leases no port, and writes no phase stamp. Before issue #32 this route was unreachable — `bin/phase-run.sh` correctly exits 0 because promote is not an engine, while `bin/promote-exec.sh` owns the `phase.request` topic — so recovery required an operator to construct that request by hand after the standalone engine's terminal went unobserved. The launcher now fails closed with exit 1 and writes no terminal unless `results/CR.md` exists with both a line reading exactly `PROMOTION_READY` — the form `bin/promote.sh` writes, so review prose that merely mentions the token never opens the gate — and a `correlation_id:` line and `state/pipeline-review.stamp` exists; in particular it never fabricates the review stamp, the hand-reconstruction this recovery path removes. Given that evidence, it claims the run, derives `{issue, phase: "promote"}` and carries the `CR.md` correlation on `EMERGENT_CORRELATION_ID`, updates `launch.json`'s `pid` and `phase` while preserving `started` so the dashboard continues dating the review artifacts from their original launch boundary, and pipes the payload to `bin/promote-exec.sh`. That executor still blocks on fresh, successful, correlation-matched docs-sync evidence and can return `NO_GO`; the launcher records and forwards the result through the same complete/halted terminal contract.
-
-The delegation boundary is explicit: a regular PR and merge after green CI is the workflow's job (headless Opus pushes the branch, opens the PR, watches checks, squash-merges on its own go/no-go judgment, cleans up; NO_GO leaves everything parked safely for one human look). Only **releases** (version bumps, tags, publishes) are gated on the human, and the promotion hands release-relevant consequences (like plan-declared breaking changes) off as a PR comment. Vault-doc maintenance is no longer part of that handoff: the review pipeline has already done it before the PR.
-
-Between phases sits the operator: headless Opus, applying the phantom-run discipline as topology. It never trusts the runner's reported outcome. It re-verifies first-hand (plan.json shape and scope notes; branch commits exist and the diff touches *only* the shard-declared files; CR.md carries the sentinel) and reads `state/docs-sync.json` advisorily at the review seam, while the promotion executor blocks on fresh, `status: "OK"`, correlation-matched docs-sync evidence before it will push or open a PR; the invariant remains that no PR can exist without a recorded, verified docs-sync. The operator emits `PROCEED` or `HALT` with a reason that doubles as the pipeline's narration. A docs no-op is still evidence, not absence: `updated: []` is valid when the artifact records it. Only `PROCEED` re-enters the phase loop, so the advance gate is topological; an unparseable operator verdict fails safe to `HALT`. Pipeline terminals are `PIPELINE COMPLETE` (merged, or parked at the situational gate with the approval command in the reason; the gate parking is the system working, not a failure) or `PIPELINE HALTED` naming the phase, the runner outcome, and what the operator actually found. They use the same `state/complete.json`/`state/halted.json` evidence described above, not buffered narration; `bin/run.sh` removes both before every launch so neither can be mistaken for the previous attempt's terminal.
-
-## Shared sink service and dashboard
-
-Every topology now carries one fire-and-forget forwarder sink per interesting topic, `bin/sse-forward.sh <engine-label> <topic>`. It receives the event payload, stamps repo, run slug, issue, feature, engine name, PID, start identity, and correlation id into an envelope, then POSTs that envelope to the shared service's `/ingest` route. Observability is deliberately unable to stall a pipeline, and nothing inside a run serves an SSE port any more.
-
-One systemd `--user` unit, `signalbox-sink.service`, owns the whole machine's dashboard on one fixed known port: `8099` by default, overridden by `SIGNALBOX_SINK_PORT`. The override is baked into the unit as an `Environment=` line, so the service, its health probe, and the forwarders all bind and reach the same port; changing it rewrites the unit and restarts the service. `install.sh` installs and starts it idempotently through `bin/sink-service.sh ensure`. The unit runs the canonical copy at `~/.local/share/signalbox/bin/sink-serve.sh`, so installing a second repo refreshes that one copy instead of starting a competitor for the port.
-
-Putting identity inside the event retires an entire class of attribution bug. With the old per-run listeners, a released port lease could be re-leased while a finished run's TOML still named it. Streams therefore had to be claimed by run liveness, and every SSE response had to re-assert its owner at connect time. The page now reads identity from the envelope instead of correlating an event with a separately-polled owner table, so the event and the identity that produced it cannot be drawn from different moments in external state.
-
-The instance registry calls a run `running` only when the authoritative `/proc` start identity, `<boot epoch>:<start ticks>`, still matches the `start_id` that `bin/run.sh` recorded in `launch.json`. A PID is not enough because the kernel recycles it, and a `system.*` event is not enough on two counts: registry liveness should not depend on wildcard subscription delivery, and `system.stopped.<primitive>` reports one component shutting down rather than the end of a run, so it can never retire an instance whose engine is still up. Only that process identity produces `stopped`. An instance without launch identity — a direct or init run — stays `unknown` until it goes quiet, and the idle timeout then marks it `stale`.
-
-Each instance is keyed for the whole machine, not just for its repository: the key is the repo basename, the run slug, and a digest of the canonical repository and harness paths. Two checkouts that share a basename and run the same issue stay two rows, with separate events, liveness, artifacts, and filter chips.
-
-The page starts with instance filter chips labeled by repo and issue plus an all-instances firehose. Each instance then gets its own drill-down with the phase rail, disk-artifact table, and log table. The `/status` artifact snapshot still trusts disk, not narration: every envelope registers the instance's `run_dir`, and the service, on the same machine with readable paths, stats those artifacts itself on every request. That preserves the repository's standing discipline of verifying from fresh disk artifacts across the move to a machine-level service.
-
-The remaining port allocation is deliberately narrow. The direct single-run path has one reserved approval-webhook port per repo in `~/.local/share/signalbox/ports.json`; each concurrent launcher run has one leased approval port in `~/.local/share/signalbox/leases.json`. SSE and dashboard ports no longer scale with the number of repos or concurrent runs, which is why issue #13's per-run port lease has shrunk to the single port approval actually needs. Ordinary terminals release the lease with the launcher, but a successfully held review park transfers it to the engine recorded in `state/park.json`, so the lease follows the webhook's real lifetime instead of making the endpoint dead when the launcher exits. Once that engine exits, the registry's recorded `/proc` start identity makes normal dead-owner reaping reclaim the lease; neither a reboot nor a recycled PID can keep it alive or reject a valid launch.
-
-## Plan (`plan.toml`): TRIP-1, one issue in, one validated plan out
-
-Planning is part of the workflow, not a manual step before it. `SIGNALBOX_ISSUE=<n> emergent --config plan.toml` runs the whole TRIP-1 phase:
-
-- **The seed is deterministic**: `bin/plan-request.sh` fetches the issue with `gh`, parses "Blocked by: #N" references out of the body, and fetches each blocker's current state. Event-carried context, so the planner downstream needs no network.
-- **The planner is judgment**: headless Claude (Opus) reads the vault docs, explores the actual source the issue touches (never planning from issue text alone; line numbers drift, and "dead" items have call sites in tests and Display impls), scopes around open blockers, and emits the stage/shard DAG as one JSON object. Each shard declares the `files` it will touch.
-- **The validator is mechanics**: pure jq. Schema, substantive self-contained prompts, declared files, and intra-stage file-disjointness. The conflict-free-shards contract stops being prose the moment shards declare their files; overlaps (including shared generated files like `Cargo.lock`) are caught before any worktree exists.
-- **The gate is topological**: only `VALID` plans reach the writer that persists `plan.json`, so the file the implement stream loads is validated by wiring, not convention. `INVALID` bounces back to the planner with the validator's feedback (round cap 3); `BLOCKED` and exhausted rounds escalate to a human.
-
-## Init (`init.toml`): the vault is the shared memory
-
-How the harness knows a repo's architecture: it doesn't. The **vault does**. TRIP-init's contract is that `.claude/docs` symlinks into the user's Obsidian vault, and `ARCHI.md` / `ARCHI-rules.md` / `TESTING.md` are the repo's accumulated architectural memory. The init topology fills that vault: a one-shot seed fans out one read-only Codex researcher per document (architecture, rules, testing, each producing the complete file), and a dumb writer lands them. Non-destructive: TRIP-init gates `ARCHI.md` on explicit human approval, so an existing doc is never clobbered. The research arrives as a `.proposed.md` sibling to diff and adopt.
-
-Init seeds the memory; each feature now maintains it. On approval, `docs-syncer` starts alongside the operator's review seam and the promotion phase's precondition work, and promotion blocks on its recorded outcome; the syncer reads the feature diff plus all three vault docs and rewrites in place only what that diff made stale. It always records the outcome in the run's `state/docs-sync.json` — `updated`, `unchanged`, `status: "OK" | "ERROR"`, and the run identity — so a no-op is explicit and an error cannot masquerade as silence. That file is published by writing a sibling temp file and renaming it, because its appearance is a signal to two other processes: the deferred reaper stops the review engine on it and the promotion precondition parses it, and neither may observe a document that is still being written. The vault is repo-scoped, not run-scoped, so the sync takes a repo-scoped `flock` exclusively across its whole hash-read → rewrite → hash-verify transaction, and the planner takes the same lock shared while it reads: concurrent runs sync one at a time instead of overwriting each other's documentation, and no plan is ever built on a half-synced vault. The vault is git-excluded, so none of this leaks into the feature PR. The overlap removes roughly five serialized minutes — about 20% of a 26-minute run — from the workflow's wall clock without weakening the rule that no PR can exist without verified sync evidence. This timing matters: the next issue's planner reads the vault before any human release step happens. If the feature leaves stale architecture behind, the very next plan compounds it immediately; waiting for release is already too late.
-
-The topology has no terminal condition of its own because Emergent engines are daemons. `bin/init-run.sh` supervises it the same way `bin/phase-run.sh` supervises every pipeline phase: it watches the disk artifacts, never the engine's narration, then SIGTERMs the specific child PID so its trail flushes. A re-init's `.proposed.md` siblings count as landed, so the second run terminates too.
-
-Every worktree the harness creates (integration and per-shard) gets the TRIP `.claude` symlink, so the same notes resolve everywhere: shard workers are told to read `ARCHI.md`/`ARCHI-rules.md`/`TESTING.md` before writing code, fixers must conform to `ARCHI-rules.md`, and the headless Claude fixers additionally pick up any committed root `CLAUDE.md` for free. One vault, every agent reading the same notes.
-
-## Installing into a target repo
-
-`./install.sh <repo> [--vault <vault-root> [--folder <folder>]] [--gate '<command>'] [--reinstall]` stamps a rendered harness into `<repo>/.claude/emergent/`, TRIP's local-only convention (excluded via `info/exclude`, never committed to the target).
-
-The install works on a repo that has **never used TRIP**: preflight fails fast on missing tooling (emergent + the exec/stream primitives, codex, claude, gh auth, jq, python3, curl, a git signing key in the target repo) instead of failing twenty minutes into a run, and `--vault <obsidian-vault-root> [--folder TRIP/<repo>]` performs TRIP-init's own vault wiring (vendored `bin/vault-setup.sh`, idempotent): it creates `<vault>/<folder>/{1-plans,2-changelog,3-code-review,4-unit-tests,6-memo}`, links `.claude/docs` there absolutely, and migrates a pre-existing real `docs/` directory if one exists. A repo already TRIP-wired needs no flags.
-
-Paths are baked and engine names are namespaced first by repo, then by run: installation renders bases such as `<repo>-pipeline`, while the launcher produces `<repo>-pipeline-issue-42` and corresponding suffixed child names. Because each topology keeps `socket_path = "auto"` and Emergent keys its event-store directory by engine name, concurrent runs do not share sockets or audit logs. The installer keeps fully rendered root TOMLs for the direct single-run form and also installs partially rendered `templates/{pipeline,plan,implement,emergent,init}.toml`; `bin/run.sh` fills their run suffix and leased approval port at launch.
-
-Run identity is mechanical: `SIGNALBOX_RUN_SLUG` wins when supplied, otherwise `SIGNALBOX_ISSUE=<n>` yields `issue-<n>`; only a prototype or direct topology launch with neither variable falls back to the harness root. Each launcher-created issue owns `.claude/emergent/runs/issue-<n>/{launch.json,plan.json,state/,results/,logs/,*.toml}`. Before a relaunched pipeline begins, its seed archives the previous run's singleton artifacts — `plan.json`, `results/CR.md`, the state JSON singletons, and phase stamps — under `logs/<prior-correlation-id>/`, so the new attempt starts from truthful empty singleton state. It records the new pipeline correlation ID in `state/pipeline.json` for the next relaunch. The generated `_env.sh` derives `feat/<plan.json .feature>`, the integration worktree `<repo>-wt/<feature>`, feature-namespaced shard worktrees, and the gate directory from that run. The readiness ladder and assessment ledger remain repo-scoped at `.claude/emergent/state/{readiness.json,assessments.jsonl}`, and the supervised init output remains once per repo rather than being duplicated into every run. Because those are the artifacts concurrent runs genuinely share, each is written under a repo-scoped `flock`: the ladder's read/compute/write is one serialized transaction ending in a rename, so two runs converging at the same moment can't both read `R2` and both write `R3`, and a reader never sees a half-written file.
-
-The installer also records the gate command as `GATE_CMD` in that generated `_env.sh`, where it is auditable and hand-editable. `--gate '<command>'` supplies it explicitly; on a fresh install without that flag, the first matching declaration wins: a `ci` task in `Taskfile.yml` or `Taskfile.yaml` (`task ci`), a root `Cargo.toml` (`cargo clippy --all-targets -q && cargo nextest run`), a `ci` recipe in `justfile` (`just ci`), a `ci:` target in `Makefile` (`make ci`), or a `test` script in `package.json` (`pnpm test`, `yarn test`, or `npm test`, selected by lockfile). If no gate can be detected, preflight fails with instructions to re-run using `--gate '<command>'`. Order of operations in a new repo: run `bin/init-run.sh` once to fill the vault, then run `bin/run.sh <issue>` for each feature. The `--phase plan|implement|review` modes support supervised isolated reruns, and `--phase promote` completes the recovery path after a halt: fix the cause, relaunch the halted phase (for example, `bin/run.sh <n> --phase review`), then wait for whichever terminal file appears — `state/complete.json` or `state/halted.json`, both of which the relaunch removed first. A retry can halt again, so waiting on completion alone would wait for ever; `state/halted.json` means the cause is unfixed, and the recovery path restarts from it. Only on `state/complete.json` do you verify `results/CR.md` and the feature diff first-hand, then run `bin/run.sh <n> --phase promote`. The fully rendered phase topologies remain directly invocable for the single-run path.
-
-An existing destination is still refused unless `--reinstall` is present; the refusal points to that flag and names the carry-list a manual removal would put at risk: `runs/`, `state/assessments.jsonl`, and `state/readiness.json`. That manual removal is the footgun `--reinstall` replaces: it can destroy in-flight run directories and discard the repo's readiness history. The flag is always safe to pass, because a target with no `.claude/emergent/` gets a normal fresh install. On an existing install it refreshes in place: `bin/`, `prompts/`, `templates/`, the rendered root TOMLs, and generated `bin/_env.sh` are rebuilt from source, including removal of stale scripts and prompts, while `runs/`, all of `state/`, `logs/`, and `results/` are never touched. Before any destructive refresh, the installer uses the same launch-liveness check as `bin/run.sh --list`: it reads `runs/*/launch.json` and verifies each recorded PID against its recorded `/proc` start identity. If any launcher-recorded run is live, reinstall aborts, lists the live runs, and tells the operator to finish or stop them first. A scan alone would only be a snapshot, so the check and the refresh both run while the installer holds `.install.lock` exclusively (`flock`, released when the installer exits). That lock file sits at the harness root rather than under `state/`, so the coordination the installer needs never writes into a directory reinstall promises not to touch; the root survives a refresh, so the lock keeps its identity across reinstalls. `bin/run.sh` takes that same lock shared for its startup window — from inspecting existing run state until `launch.json` records the new engine's PID and identity — and the engine itself is spawned with the descriptor closed, so it never holds the lock. A launcher therefore either records its run in time for the scan to refuse, or waits until the refreshed harness is whole; concurrent launchers, holding it shared, never block each other. Either side gives up after `SIGNALBOX_LOCK_WAIT` seconds (default 60) rather than waiting for ever. A lock binds only launchers that take it, and the harness already installed in the target may predate it — every first upgrade does. So before it destroys anything, the installer also withdraws the entry point: `bin/` is moved aside in one rename, after which `bin/run.sh` cannot be started, and a stale launcher mid-startup cannot reach an engine either, because it must still exec `bin/ports.sh` and `bin/check-placeholders.sh` before spawning `emergent`. A second liveness scan then runs; if it finds a run recorded since the first, `bin/` is put straight back and the refusal names that run, leaving the harness as it was found. That withdrawal binds only launchers that still have a `bin/` exec ahead of them: a pre-lock launcher that had already passed its last one is mid-startup at the moment of the rename and writes `launch.json` a beat later. So before the rename the installer snapshots the launch metadata under `runs/` — every `launch.json` (and launcher temp file), with its size and mtime — and compares after it: any file created or changed since the snapshot is a startup in flight, refused on its existence alone with `bin/` restored, because `run.sh` writes that metadata before the engine exists and patches the PID in afterwards. The verdict is deterministic — a property of the metadata tree, never of how long anything was watched — and metadata that merely predates the reinstall never blocks it, however fresh its timestamps: dead runs are normal residents of `runs/`. The launcher past its last `bin/` exec whose metadata write is still ahead of it is caught as a process instead: bash keeps the executing script's descriptor open for the process's whole lifetime, so the installer scans `/proc` for any process holding an open file from the withdrawn `bin/` tree and refuses while one exists. A stale launcher is therefore caught running, caught by what it wrote, or wrote nothing and never will — there is no fourth state. The check still begins with `bin/run.sh --list`, because the installer's guarantees cover only this harness's launchers, not an engine started by hand with `emergent --config`. When `--gate` is omitted, reinstall preserves the `GATE_CMD` recorded in the existing generated `_env.sh`, so a hand-edited gate survives.
-
-The installed harness is a rendered copy, not a symlink, so any harness-source merge leaves it stale. Before the next pipeline run after such a merge, signalbox's own `.claude/emergent/` must be refreshed with `./install.sh <repo> --reinstall`; the ledger and run directories are preserved by construction, with no manual carrying. That reinstall is also what invokes `bin/sink-service.sh ensure` to install and start the shared sink service.
+The translation in one line: TRIP's sentinels became event topics, its review/fix bounce became a native feedback cycle, and its round cap became a two-sided jq guard instead of prose.

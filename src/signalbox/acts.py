@@ -238,32 +238,49 @@ def merge_pr(payload: dict) -> dict:
     return {**payload, "ok": True}
 
 
-def poll_checks() -> str:
-    """One line of JSON per PR whose checks have concluded, for the interval source."""
-    code, out, _ = _run(
-        ["gh", "pr", "list", "--head", "signalbox/", "--json", "number,headRefName,statusCheckRollup"],
-        timeout=45,
-    )
-    if code != 0 or not out:
-        return ""
+def poll_check_lines(records: list[dict]) -> str:
+    """Convert completed signalbox run PR checks to interval-source JSON lines."""
     lines = []
-    for pr in json.loads(out):
-        rollup = pr.get("statusCheckRollup") or []
-        states = {check.get("conclusion") for check in rollup if check.get("conclusion")}
-        if not rollup or None in states:
+    for pr in records:
+        head = pr.get("headRefName") or ""
+        if not head.startswith("signalbox/run-"):
             continue
+        rollup = pr.get("statusCheckRollup") or []
+        if not rollup or any(not check.get("conclusion") for check in rollup):
+            continue
+        states = {str(check["conclusion"]).upper() for check in rollup}
         conclusion = "success" if states <= {"SUCCESS", "NEUTRAL", "SKIPPED"} else "failure"
         lines.append(
             json.dumps(
                 {
                     "pr": pr.get("number"),
-                    "run_id": pr.get("headRefName", "").removeprefix("signalbox/run-"),
+                    "run_id": head.removeprefix("signalbox/run-"),
                     "conclusion": conclusion,
-                    "failed": [c.get("name") for c in rollup if c.get("conclusion") not in {"SUCCESS", "NEUTRAL", "SKIPPED"}],
-                }
+                    "failed": [
+                        check.get("name")
+                        for check in rollup
+                        if str(check["conclusion"]).upper()
+                        not in {"SUCCESS", "NEUTRAL", "SKIPPED"}
+                    ],
+                },
+                separators=(",", ":"),
             )
         )
     return "\n".join(lines)
+
+
+def poll_checks() -> str:
+    """One line of JSON per PR whose checks have concluded, for the interval source."""
+    code, out, _ = _run(
+        [
+            "gh", "pr", "list", "--state", "open",
+            "--json", "number,headRefName,statusCheckRollup",
+        ],
+        timeout=45,
+    )
+    if code != 0 or not out:
+        return ""
+    return poll_check_lines(json.loads(out))
 
 
 def map_ci_findings(payload: dict) -> dict:

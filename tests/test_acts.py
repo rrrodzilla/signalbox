@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from signalbox.acts import map_ci_findings, stage_files, suite_command
+from signalbox.acts import map_ci_findings, poll_check_lines, stage_files, suite_command
 from signalbox.dispatch import environment, pending_path
 
 
@@ -34,6 +34,87 @@ def test_ci_failure_becomes_review_findings():
     assert result["round"] == 2
     assert [f["check"] for f in result["findings"]] == ["build", "clippy"]
     assert all(f["source"] == "ci" for f in result["findings"])
+
+
+def test_a_passing_rollup_emits_a_success_line():
+    """The defect hid run PRs before their successful checks could be reported."""
+    records = [
+        {
+            "number": 12,
+            "headRefName": "signalbox/run-green",
+            "statusCheckRollup": [
+                {"name": "test", "conclusion": "SUCCESS"},
+                {"name": "docs", "conclusion": "NEUTRAL"},
+                {"name": "optional", "conclusion": "SKIPPED"},
+            ],
+        }
+    ]
+    assert json.loads(poll_check_lines(records)) == {
+        "pr": 12,
+        "run_id": "green",
+        "conclusion": "success",
+        "failed": [],
+    }
+
+
+def test_a_failing_rollup_emits_a_failure_line_with_failed_check_names():
+    """The defect prevented concluded failures from reaching the fix loop."""
+    records = [
+        {
+            "number": 13,
+            "headRefName": "signalbox/run-red",
+            "statusCheckRollup": [
+                {"name": "test", "conclusion": "SUCCESS"},
+                {"name": "lint", "conclusion": "FAILURE"},
+                {"name": "build", "conclusion": "CANCELLED"},
+            ],
+        }
+    ]
+    assert json.loads(poll_check_lines(records)) == {
+        "pr": 13,
+        "run_id": "red",
+        "conclusion": "failure",
+        "failed": ["lint", "build"],
+    }
+
+
+def test_an_all_pending_rollup_emits_nothing():
+    """The defect's dead None guard allowed pending checks to look successful."""
+    records = [
+        {
+            "number": 14,
+            "headRefName": "signalbox/run-waiting",
+            "statusCheckRollup": [
+                {"name": "test"},
+                {"name": "lint", "conclusion": ""},
+            ],
+        }
+    ]
+    assert poll_check_lines(records) == ""
+
+
+def test_a_non_run_signalbox_branch_is_ignored():
+    """The defect requires branch filtering after listing open pull requests."""
+    records = [
+        {
+            "number": 15,
+            "headRefName": "signalbox/other",
+            "statusCheckRollup": [{"name": "test", "conclusion": "SUCCESS"}],
+        }
+    ]
+    assert poll_check_lines(records) == ""
+
+
+def test_run_id_is_the_head_ref_name_with_the_run_prefix_stripped():
+    """The defect fix must preserve the complete run suffix as its run_id."""
+    records = [
+        {
+            "number": 16,
+            "headRefName": "signalbox/run-sb-56-extra",
+            "statusCheckRollup": [{"name": "test", "conclusion": "SUCCESS"}],
+        }
+    ]
+    assert json.loads(poll_check_lines(records))["run_id"] == "sb-56-extra"
 
 
 def test_suite_command_is_none_when_the_repo_has_no_suite(tmp_path):

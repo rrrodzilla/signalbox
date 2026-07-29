@@ -12,7 +12,9 @@ silence has a name.
 
 Two runners can do the acting. The topology does not know which, and neither
 does anything downstream: whichever one runs, its only way to be heard is
-`signalbox emit`, and the events it emits are identical.
+`signalbox emit`, and the events it emits are identical. Both resolve the same
+SKILL.md by name from the worktree, so the procedure is one reviewable file and
+not two copies that can drift.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from signalbox.paths import SkillMissing, skill_body, state_dir, worktree_for
+from signalbox.paths import SkillMissing, require_skill, state_dir, worktree_for
 
 # Which CLI performs each acting skill. Implementation and fix run on codex;
 # the judging roles in agent.py run on Claude. Both are just processes that
@@ -109,17 +111,14 @@ def prompt_for(skill: str, payload: dict) -> str:
 
 
 def codex_prompt(skill: str, payload: dict) -> str:
-    """The same instruction, for a runner with no skill loader.
+    """The same instruction, in codex's mention syntax.
 
-    Codex cannot resolve a skill by name, so the procedure travels inline. It
-    is the same file either way, which is what keeps the two runners honest
-    about following the same rules.
+    Codex discovers project skills from `.codex/skills/` and resolves a
+    `$name` mention against them, so the procedure is referenced rather than
+    inlined — the same SKILL.md both runners read, named the same way.
     """
     return (
-        "Follow the procedure below exactly.\n\n"
-        f"--- BEGIN PROCEDURE ({skill}) ---\n"
-        f"{skill_body(skill)}\n"
-        f"--- END PROCEDURE ({skill}) ---\n\n"
+        f"Follow the ${skill} skill exactly.\n\n"
         f"Work item:\n{json.dumps(payload, indent=2)}\n\n"
         "Announce your progress by running `signalbox emit` as you work. That is "
         "the only way anything outside this session learns what you did; nothing "
@@ -164,8 +163,8 @@ def codex_command(worktree: Path, model: str | None) -> list[str]:
     ]
     if model:
         command += ["--model", model]
-    # `-` makes codex read the prompt from stdin, so a multi-kilobyte procedure
-    # never has to survive an argv round trip.
+    # `-` makes codex read the prompt from stdin, which keeps the work item off
+    # the command line where it would show up in every process listing.
     return command + ["-"]
 
 
@@ -189,21 +188,26 @@ def main(argv: list[str]) -> int:
     model = args.model or model_for(runner)
     worktree = worktree_for(payload)
 
+    if runner not in ("codex", "claude"):
+        print(f"signalbox dispatch: unknown runner {runner!r}", file=sys.stderr)
+        return 2
+
+    # A skill the runner cannot see produces no error of its own: the agent is
+    # handed a name that resolves to nothing and improvises. Fail loudly instead.
+    try:
+        require_skill(worktree, runner, args.skill)
+    except SkillMissing as exc:
+        print(f"signalbox dispatch: {exc}", file=sys.stderr)
+        return 1
+
     if runner == "codex":
         command = codex_command(worktree, model)
-        try:
-            stdin_text = codex_prompt(args.skill, payload)
-        except SkillMissing as exc:
-            print(f"signalbox dispatch: {exc}", file=sys.stderr)
-            return 1
-    elif runner == "claude":
+        stdin_text = codex_prompt(args.skill, payload)
+    else:
         command = claude_command(args.skill, payload, model)
         # The sink already closed our stdin; hand the child an empty one rather
         # than a spent pipe.
         stdin_text = ""
-    else:
-        print(f"signalbox dispatch: unknown runner {runner!r}", file=sys.stderr)
-        return 2
 
     marker = pending_path("shard", payload)
     marker.parent.mkdir(parents=True, exist_ok=True)

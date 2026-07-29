@@ -17,7 +17,7 @@ from signalbox.dispatch import (
     model_for as dispatch_model_for,
     runner_for,
 )
-from signalbox.paths import SkillMissing, skill_body, strip_frontmatter
+from signalbox.paths import SKILL_ROOTS, SkillMissing, install_skills, require_skill
 
 
 def test_every_judging_role_has_a_model():
@@ -85,23 +85,41 @@ def test_codex_runs_in_the_worktree_and_can_reach_the_control_endpoint():
     assert "workspace-write" in joined
 
 
-def test_codex_gets_the_procedure_inline_because_it_cannot_load_a_skill():
+def test_codex_names_the_skill_in_its_own_mention_syntax():
+    """Codex resolves `$name` against .codex/skills, so it is a reference.
+
+    Inlining the procedure instead would fork one reviewable file into two
+    copies that drift, and would put the whole SKILL.md in every prompt.
+    """
     prompt = codex_prompt("signalbox-implement", {"shard_id": "a"})
+    assert "$signalbox-implement" in prompt
     assert "signalbox emit" in prompt
-    # A sentence that only exists in the skill file, so this fails if the body
-    # stops being inlined rather than merely being named.
-    assert skill_body("signalbox-implement")[:80] in prompt
+    assert "BEGIN PROCEDURE" not in prompt
 
 
-def test_a_missing_skill_is_an_error_not_an_empty_procedure():
+def test_skills_are_installed_where_both_runners_look(tmp_path):
+    """Neither runner reads the other's directory, so each needs its own copy."""
+    installed = install_skills(tmp_path)
+    assert "signalbox-implement" in installed
+    for runner, root in SKILL_ROOTS.items():
+        path = tmp_path / root / "signalbox-implement" / "SKILL.md"
+        assert path.is_file(), f"{runner} would not find the skill at {path}"
+
+
+def test_a_skill_the_runner_cannot_see_is_an_error_before_it_starts(tmp_path):
+    """The failure being prevented: an agent handed a name that resolves to
+    nothing does not error, it improvises, and it edits files while doing so."""
+    install_skills(tmp_path)
+    assert require_skill(tmp_path, "codex", "signalbox-implement").is_dir()
     with pytest.raises(SkillMissing):
-        skill_body("signalbox-does-not-exist")
+        require_skill(tmp_path, "codex", "signalbox-does-not-exist")
+    with pytest.raises(SkillMissing):
+        require_skill(tmp_path, "some-other-cli", "signalbox-implement")
 
 
-def test_frontmatter_is_stripped_but_prose_survives():
-    text = "---\nname: x\ndescription: y\n---\n\n# Heading\n\nBody.\n"
-    assert strip_frontmatter(text) == "# Heading\n\nBody.\n"
-    assert strip_frontmatter("# No frontmatter\n") == "# No frontmatter\n"
+def test_an_uninstalled_worktree_fails_the_check(tmp_path):
+    with pytest.raises(SkillMissing):
+        require_skill(tmp_path, "claude", "signalbox-implement")
 
 
 def test_the_claude_runner_still_names_the_skill():

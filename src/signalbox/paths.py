@@ -43,62 +43,68 @@ def skills_dir() -> Path:
     return Path(__file__).resolve().parent.parent.parent / "skills"
 
 
+# Where each runner looks for project skills, relative to the working
+# directory. Both discover by scanning; neither reads the other's directory, so
+# a skill has to be installed once per runner. Verified empirically: a skill in
+# `.codex/skills/` is listed by codex and one in `.claude/skills/` is not.
+SKILL_ROOTS = {
+    "claude": Path(".claude") / "skills",
+    "codex": Path(".codex") / "skills",
+}
+
+
 def install_skills(worktree: Path) -> list[str]:
     """Make the skills discoverable to agents working in this worktree.
 
-    Claude Code resolves skills from the project it is running in, and every
-    agent runs with the worktree as its working directory, so the skills have
-    to be there. They are untracked and no shard declares them, so the merge
-    step cannot commit them into the target repository.
+    Both runners resolve skills from the project they are running in, and every
+    agent runs with the worktree as its working directory, so the skills have to
+    be there. Installing into every root rather than the one we expect to use
+    means a runner swap is a one-line change and not a silent loss of procedure.
+
+    They are untracked and no shard declares them, so the merge step cannot
+    commit them into the target repository.
     """
     source = skills_dir()
     if not source.is_dir():
         return []
-    target = worktree / ".claude" / "skills"
-    target.mkdir(parents=True, exist_ok=True)
+    targets = [worktree / root for root in SKILL_ROOTS.values()]
+    for target in targets:
+        target.mkdir(parents=True, exist_ok=True)
     installed = []
     for skill in sorted(source.iterdir()):
         if not (skill / "SKILL.md").is_file():
             continue
-        shutil.copytree(skill, target / skill.name, dirs_exist_ok=True)
+        for target in targets:
+            shutil.copytree(skill, target / skill.name, dirs_exist_ok=True)
         installed.append(skill.name)
     return installed
 
 
 class SkillMissing(RuntimeError):
-    """A shipped skill could not be read.
+    """A skill is not where the runner about to be launched will look.
 
-    Raised rather than substituting an empty procedure: an acting agent with no
-    procedure still edits files, and it edits them by improvisation.
+    Raised rather than dispatching anyway: an acting agent with no procedure
+    still edits files, and it edits them by improvisation.
     """
 
 
-def strip_frontmatter(text: str) -> str:
-    """The prose of a SKILL.md, without its YAML header.
+def require_skill(worktree: Path, runner: str, name: str) -> Path:
+    """The installed skill a runner will resolve, or an error saying it will not.
 
-    The header exists so a skill loader can advertise the skill. A runner that
-    has no skill loader has no use for it, and it reads as noise in a prompt.
+    Nothing about a missing skill is visible at runtime — the agent is simply
+    handed a name that resolves to nothing and proceeds on its own judgment. So
+    the check happens here, before the process starts.
     """
-    if not text.startswith("---"):
-        return text
-    end = text.find("\n---", 3)
-    if end == -1:
-        return text
-    return text[end + 4 :].lstrip("\n")
-
-
-def skill_body(name: str) -> str:
-    """The procedure a skill describes, as text.
-
-    Claude Code resolves skills by name, so it only needs the name. Codex has
-    no skill loader at all, so for those runners the procedure has to travel in
-    the prompt — which means it has to be readable from here.
-    """
-    path = skills_dir() / name / "SKILL.md"
     try:
-        return strip_frontmatter(path.read_text())
-    except OSError as exc:
-        raise SkillMissing(f"cannot read skill {name!r} at {path}: {exc}") from exc
+        root = SKILL_ROOTS[runner]
+    except KeyError as exc:
+        raise SkillMissing(f"no skill root known for runner {runner!r}") from exc
+    path = worktree / root / name
+    if not (path / "SKILL.md").is_file():
+        raise SkillMissing(
+            f"{runner} will not find skill {name!r}: no SKILL.md at {path}"
+        )
+    return path
 
 
 class WorktreeMissing(RuntimeError):

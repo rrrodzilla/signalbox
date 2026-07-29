@@ -228,6 +228,105 @@ def test_the_base_branch_survives_every_seam_that_dropped_stage_count():
     assert joined["base_branch"] == "redesign/event-first"
 
 
+def test_every_carried_key_survives_every_payload_building_seam():
+    """CARRIED_KEYS is the contract across payload-building seams.
+
+    This deliberately excludes dispatch.environment and emit._ENV_KEYS: those
+    are key-to-environment-variable mappings and cannot be projected
+    mechanically.
+    """
+    from signalbox.identity import CARRIED_KEYS
+    from signalbox.plan import _stamp_stage, shard_events
+    from signalbox.primitives.join_terminal import Pending, summarise
+    from signalbox.primitives.split_notes import note_events
+
+    carried = {key: f"value-{key}" for key in CARRIED_KEYS}
+    carried.update(
+        {
+            "attempt": 0,
+            "stage_id": "stage-1",
+            "stage_count": 1,
+            "shard_id": "shard-1",
+            "shard_count": 1,
+            "declared": ["tests/test_checks.py"],
+            "round": 1,
+            "note": "architecture",
+            "note_count": 1,
+        }
+    )
+    plan = {
+        **carried,
+        "stages": [
+            {
+                "stage_id": carried["stage_id"],
+                "shards": [
+                    {
+                        "shard_id": carried["shard_id"],
+                        "files": carried["declared"],
+                        "intent": "exercise the identity seams",
+                    }
+                ],
+            }
+        ],
+    }
+
+    stage = _stamp_stage(plan["stages"][0], plan)
+    shard = shard_events(stage, stage)[0]
+    note = note_events({**shard, "notes": [carried["note"]]})[0]
+    summary = summarise(
+        "joined",
+        "terminal",
+        Pending(expected=1, results=[note]),
+        False,
+    )
+
+    for payload in (stage, shard, note, summary):
+        for key in CARRIED_KEYS:
+            assert payload[key] == carried[key]
+
+
+def test_a_future_carried_key_survives_every_payload_building_seam(monkeypatch):
+    """New carried keys cross every builder when present and stay absent otherwise."""
+    from signalbox import identity
+    from signalbox.plan import _stamp_stage, shard_events
+    from signalbox.primitives.join_terminal import Pending, summarise
+    from signalbox.primitives.split_notes import note_events
+
+    monkeypatch.setattr(identity, "CARRIED_KEYS", (*identity.CARRIED_KEYS, "sentinel"))
+
+    def cross_seams(envelope):
+        plan = {
+            **envelope,
+            "stages": [
+                {
+                    "stage_id": "stage-1",
+                    "shards": [
+                        {
+                            "shard_id": "shard-1",
+                            "files": ["tests/test_checks.py"],
+                            "intent": "exercise a future identity key",
+                        }
+                    ],
+                }
+            ],
+        }
+        stage = _stamp_stage(plan["stages"][0], plan)
+        shard = shard_events(stage, stage)[0]
+        note = note_events({**shard, "notes": ["architecture"]})[0]
+        summary = summarise(
+            "joined",
+            "terminal",
+            Pending(expected=1, results=[note]),
+            False,
+        )
+        return stage, shard, note, summary
+
+    for payload in cross_seams({"sentinel": "future-value"}):
+        assert payload["sentinel"] == "future-value"
+    for payload in cross_seams({}):
+        assert "sentinel" not in payload
+
+
 def test_prepare_workspace_names_the_branch_it_actually_branched_from(tmp_path, monkeypatch):
     """The base is discovered here and used at open-pr, so it must be recorded.
 

@@ -21,7 +21,7 @@ SINKS = CONFIG["sinks"]
 
 # Raw ingress envelopes. The routers immediately turn these into meaningful
 # topics, and it is those the dashboard shows.
-RAW = {"http.request", "exec.output"}
+RAW = {"http.request", "exec.output", "exec.exit"}
 
 
 def published() -> set[str]:
@@ -222,3 +222,41 @@ def test_the_join_count_a_run_terminates_on_is_an_identity_key():
     joiner = named(HANDLERS, "join-run")
     count_field = joiner["args"][joiner["args"].index("--count-field") + 1]
     assert count_field in CARRIED_KEYS
+
+
+def test_the_dashboard_stream_has_something_to_carry_while_idle():
+    """An idle sse-sink stream sends zero bytes, so a browser calls it dead.
+
+    Its headers are chunked and do not flush until the first event, so with no
+    run in flight the dashboard reports "can't establish a connection" — broken
+    exactly when it should read as quiet. Verified live: curl received 0 bytes
+    from an idle stream for three seconds, then headers and data arrived
+    together the instant an event was posted.
+
+    Something must therefore flow while nothing is running, and the only such
+    traffic is the interval sources' output.
+    """
+    dashboard = named(SINKS, "dashboard")
+    interval_topics: set[str] = set()
+    for source in SOURCES:
+        args = source.get("args", [])
+        if "--interval" in args:
+            interval_topics.update(source.get("publishes", []))
+    assert interval_topics, "no interval source, so nothing keeps the stream warm"
+    assert interval_topics & set(dashboard["subscribes"]), (
+        "the dashboard subscribes to nothing that flows while idle; its stream "
+        f"will never open. Interval traffic is {sorted(interval_topics)}"
+    )
+
+
+def test_the_page_treats_heartbeat_traffic_as_proof_of_life_not_content():
+    """Subscribing to interval output must not put reaper noise on the board."""
+    page = (ROOT / "src" / "signalbox" / "dashboard.html").read_text()
+    assert "HEARTBEAT" in page, "the page has no heartbeat filter"
+    dashboard = named(SINKS, "dashboard")
+    for source in SOURCES:
+        if "--interval" not in source.get("args", []):
+            continue
+        for topic in source.get("publishes", []):
+            if topic in dashboard["subscribes"]:
+                assert f'"{topic}"' in page, f"{topic} is subscribed but not filtered from the feed"

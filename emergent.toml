@@ -40,14 +40,14 @@ name = "reap-shards"
 path = "~/.local/share/emergent/primitives/bin/exec-source"
 args = ["--interval", "60000", "--shell", "bash", "--command",
   "signalbox reap --kind shard --stale-minutes 20"]
-publishes = ["exec.output"]
+publishes = ["exec.output", "exec.exit"]
 
 [[sources]]
 name = "poll-checks"
 path = "~/.local/share/emergent/primitives/bin/exec-source"
 args = ["--interval", "45000", "--shell", "bash", "--command",
   "signalbox poll-checks"]
-publishes = ["exec.output"]
+publishes = ["exec.output", "exec.exit"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # INGRESS ROUTERS — one topic per thing an agent or human can announce.
@@ -574,11 +574,24 @@ publishes = ["run.completed"]
 # streams nothing, which is a silent blindness rather than an error. Every topic is
 # therefore listed explicitly, and a test asserts this list covers everything the
 # topology publishes.
+#
+# The two exec topics are here for a different reason: they are the only traffic
+# that flows while nothing is running. An idle sse-sink stream sends zero bytes,
+# and a browser reports that as a server it cannot reach — so the dashboard reads
+# as broken exactly when it should read as quiet.
+#
+# `exec.exit` is the load-bearing one. An interval source publishes `exec.output`
+# only when its command actually wrote to stdout, and both of ours are silent by
+# design when there is nothing to report: the reaper finds no stale marker, and
+# poll-checks finds no PR. `exec.exit` fires on every tick regardless, so it is
+# what keeps the stream open. The page treats both as proof of life and renders
+# neither.
 [[sinks]]
 name = "dashboard"
 path = "~/.local/share/emergent/primitives/bin/sse-sink"
 args = ["--port", "8101"]
-subscribes = ["approval.granted", "approval.requested", "assess.failed", "branch.push-failed",
+subscribes = ["exec.output", "exec.exit",
+              "approval.granted", "approval.requested", "assess.failed", "branch.push-failed",
               "branch.pushed", "checks.failed", "checks.passed", "checks.reported",
               "codebase.surveyed", "control.unknown-event", "fix.opened", "gate.assessed",
               "gate.blocked", "gate.cleared", "gate.invalid-verdict", "issue.fetch-failed",

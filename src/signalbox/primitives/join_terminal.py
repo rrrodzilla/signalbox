@@ -25,6 +25,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
+from signalbox import identity
+
 
 @dataclass
 class Pending:
@@ -77,21 +79,15 @@ def summarise_item(item: dict) -> dict:
 def summarise(key_name: str, key_value: str, pending: Pending, timed_out: bool) -> dict:
     """The joined payload. Pure, so the interesting part is testable."""
     first = pending.results[0] if pending.results else {}
-    return {
+    summary = {
         key_name: key_value,
-        "run_id": first.get("run_id"),
-        "repo": first.get("repo"),
-        "issue": first.get("issue"),
-        "base_sha": first.get("base_sha"),
-        # Carried for the same reason as base_sha: `open-pr` runs downstream of
-        # this join, and a base it cannot read is a base `gh` picks instead.
-        "base_branch": first.get("base_branch"),
-        "stage_count": first.get("stage_count"),
         "expected": pending.expected,
         "received": len(pending.results),
         "timed_out": timed_out,
         "results": [summarise_item(item) for item in pending.results],
     }
+    summary.update(identity.project(first))
+    return summary
 
 
 class Joiner:

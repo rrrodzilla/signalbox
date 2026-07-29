@@ -4,7 +4,26 @@ from __future__ import annotations
 
 from signalbox.agent import extract_verdict
 from signalbox.emit import ALLOWED_EVENTS, build_body, identity_from_env, parse_fields
-from signalbox.identity import carry, spoofed_keys
+from signalbox import identity
+from signalbox.identity import CARRIED_KEYS, carry, project, spoofed_keys
+
+
+def test_project_includes_every_present_carried_key():
+    source = {key: f"value-{index}" for index, key in enumerate(CARRIED_KEYS)}
+    source["verdict"] = "done"
+    assert project(source) == {key: source[key] for key in CARRIED_KEYS}
+
+
+def test_project_omits_absent_carried_keys():
+    result = project({"run_id": "r1", "verdict": "done"})
+    assert result == {"run_id": "r1"}
+    for key in ("note", "note_count", "pr", "attempt"):
+        assert key not in result
+
+
+def test_project_follows_new_carried_keys(monkeypatch):
+    monkeypatch.setattr(identity, "CARRIED_KEYS", (*CARRIED_KEYS, "sentinel"))
+    assert project({"run_id": "r1", "sentinel": "carried"})["sentinel"] == "carried"
 
 
 def test_carry_overrides_model_supplied_identity():

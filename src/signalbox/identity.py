@@ -5,6 +5,10 @@ to. Those keys are the join keys, the scope declaration, and the loop counters,
 so a model that forgets one, renames one, or invents one would silently corrupt
 routing. So the model never supplies them: whatever it produces is merged *onto*
 the identity of the envelope it was handed.
+
+Payload builders must project identity through :data:`CARRIED_KEYS`, never by
+hand-enumerating keys. sb-60 lost ``base_branch`` that way on 2026-07-29
+(issue #65).
 """
 
 from __future__ import annotations
@@ -34,6 +38,11 @@ CARRIED_KEYS: tuple[str, ...] = (
     "note_count",
     "pr",
 )
+
+
+def project(source: dict) -> dict:
+    """Return the carried identity keys that are present in ``source``."""
+    return {key: source[key] for key in CARRIED_KEYS if key in source}
 
 
 def carry(inbound: dict, produced: dict) -> dict:

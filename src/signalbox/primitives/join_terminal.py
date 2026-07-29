@@ -42,6 +42,38 @@ def expected_count(payload: dict, count_field: str) -> int | None:
     return count if count > 0 else None
 
 
+# What a joined item may be asked about. A join is used at three levels — shards
+# into a stage, stages into a run, notes into a set — so the item's shape is not
+# knowable here. Report the keys it actually has.
+ITEM_KEYS = (
+    "stage_id", "shard_id", "note", "round", "outcome", "declared",
+    "files", "sha", "ok",
+)
+
+
+def summarise_item(item: dict) -> dict:
+    """One joined item, described by the keys it actually carries.
+
+    A fixed shard-shaped template was wrong for the run-level join, whose items
+    are stages. Every shard field came back null and `outcome` came back the
+    fabricated string "unknown", so `run.built` reported a run whose stages had
+    all merged clean as a run with one unidentifiable result.
+
+    That record has a consumer. The assessor reads it to verify that merged work
+    stayed inside its declared scope and that each shard's review closed rather
+    than being abandoned, and it cannot clear a gate on evidence it does not
+    have — so it correctly sent a green, in-scope, 113-test-passing run to a
+    human. The verdict was right and the record was lying.
+    """
+    record = {key: item[key] for key in ITEM_KEYS if key in item}
+    # A stage carries its own shards' outcomes. Keep them: scope verification
+    # needs the leaves, and flattening them away is what lost them.
+    nested = item.get("results")
+    if isinstance(nested, list) and nested:
+        record["results"] = nested
+    return record
+
+
 def summarise(key_name: str, key_value: str, pending: Pending, timed_out: bool) -> dict:
     """The joined payload. Pure, so the interesting part is testable."""
     first = pending.results[0] if pending.results else {}
@@ -55,16 +87,7 @@ def summarise(key_name: str, key_value: str, pending: Pending, timed_out: bool) 
         "expected": pending.expected,
         "received": len(pending.results),
         "timed_out": timed_out,
-        "results": [
-            {
-                "shard_id": item.get("shard_id"),
-                "note": item.get("note"),
-                "outcome": item.get("outcome", "unknown"),
-                "round": item.get("round"),
-                "declared": item.get("declared") or [],
-            }
-            for item in pending.results
-        ],
+        "results": [summarise_item(item) for item in pending.results],
     }
 
 

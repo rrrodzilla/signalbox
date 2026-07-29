@@ -161,3 +161,58 @@ def test_note_events_carry_the_count_so_the_join_terminates():
     assert len(events) == 3
     assert all(e["note_count"] == 3 for e in events)
     assert [e["note"] for e in events] == ["arch", "testing", "shards"]
+
+
+def test_a_stage_item_keeps_the_identity_a_stage_actually_has():
+    """The record `run.built` carried was a lie, and the assessor believed it.
+
+    This is the real stage.merged payload from run sb-56. The joiner's per-item
+    template only looked for shard fields, so a stage produced
+    {shard_id: null, round: null, outcome: "unknown", declared: []} — and the
+    assessor, which reads this to verify merged work stayed in declared scope,
+    could not clear a run that had in fact merged one clean in-scope stage with
+    113 tests passing. It sent it to a human. Correctly, on that evidence.
+    """
+    from signalbox.primitives.join_terminal import summarise_item
+
+    stage_merged = {
+        "run_id": "sb-56",
+        "stage_id": "s1-poll-checks-fix",
+        "files": ["src/signalbox/acts.py", "tests/test_acts.py"],
+        "sha": "7cbce1b501d768d277d7862527f7adda0b0f40c2",
+        "ok": True,
+        "stage_count": 1,
+        "results": [
+            {
+                "shard_id": "s1-poll-checks-fix",
+                "outcome": "approved",
+                "round": 1,
+                "declared": ["src/signalbox/acts.py", "tests/test_acts.py"],
+            }
+        ],
+    }
+    item = summarise_item(stage_merged)
+    assert item["stage_id"] == "s1-poll-checks-fix"
+    assert item["ok"] is True
+    assert item["sha"].startswith("7cbce1b")
+    assert item["files"] == ["src/signalbox/acts.py", "tests/test_acts.py"]
+    # The leaves are what scope verification needs; flattening them lost them.
+    assert item["results"][0]["outcome"] == "approved"
+    assert item["results"][0]["declared"] == ["src/signalbox/acts.py", "tests/test_acts.py"]
+
+
+def test_a_shard_item_is_unchanged_by_that():
+    from signalbox.primitives.join_terminal import summarise_item
+
+    shard = {"shard_id": "a", "outcome": "approved", "round": 2,
+             "declared": ["src/a.py"], "run_id": "r1"}
+    item = summarise_item(shard)
+    assert item == {"shard_id": "a", "round": 2, "outcome": "approved",
+                    "declared": ["src/a.py"]}
+
+
+def test_a_missing_outcome_is_absent_rather_than_the_word_unknown():
+    """"unknown" reads as a verified fact about the item. Absence reads as absence."""
+    from signalbox.primitives.join_terminal import summarise_item
+
+    assert "outcome" not in summarise_item({"stage_id": "s1"})

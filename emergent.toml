@@ -242,6 +242,17 @@ args = ["-s", "fix.opened", "-t", "2400000", "--",
         "signalbox", "dispatch", "--skill", "signalbox-fix"]
 subscribes = ["fix.opened"]
 
+# The other half of the reaper's contract. A shard that announced is not silent,
+# so its marker has to go; without this the reaper reported every successful
+# shard as `shard.silent` once it aged past the threshold. A scope violation
+# terminates the shard too, and terminates it without a submission.
+[[sinks]]
+name = "clear-pending"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "shard.submitted", "-s", "scope.violated", "-t", "10000", "--",
+        "signalbox", "clear-pending", "--kind", "shard"]
+subscribes = ["shard.submitted", "scope.violated"]
+
 # Scope enforcement, at write time rather than review time. One predicate.
 # This is what the previous implementation's scope subsystem collapses into.
 [[handlers]]

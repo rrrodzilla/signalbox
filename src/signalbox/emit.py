@@ -20,15 +20,22 @@ ALLOWED_EVENTS = frozenset(
     {"shard.file-written", "shard.check-ran", "shard.submitted"}
 )
 
+# An agent's emission is the narrowest point every identity key has to pass
+# through: what is not listed here is gone for the rest of the run, because
+# nothing downstream can reconstruct it.
 _ENV_KEYS = {
     "run_id": "SIGNALBOX_RUN_ID",
     "repo": "SIGNALBOX_REPO",
     "issue": "SIGNALBOX_ISSUE",
+    "base_sha": "SIGNALBOX_BASE_SHA",
     "stage_id": "SIGNALBOX_STAGE_ID",
     "shard_id": "SIGNALBOX_SHARD_ID",
     "shard_count": "SIGNALBOX_SHARD_COUNT",
+    "stage_count": "SIGNALBOX_STAGE_COUNT",
     "round": "SIGNALBOX_ROUND",
 }
+
+_NUMERIC_FIELDS = frozenset({"shard_count", "stage_count", "round", "issue"})
 
 
 def control_url() -> str:
@@ -42,7 +49,7 @@ def identity_from_env(env: dict[str, str]) -> dict:
         value = env.get(var)
         if value in (None, ""):
             continue
-        identity[field] = int(value) if field in {"shard_count", "round", "issue"} and value.isdigit() else value
+        identity[field] = int(value) if field in _NUMERIC_FIELDS and value.isdigit() else value
 
     declared = env.get("SIGNALBOX_DECLARED")
     if declared:

@@ -193,3 +193,32 @@ def test_run_built_carries_identity_rather_than_a_bare_count():
     assert joiner["subscribes"] == ["stage.merged"]
     args = " ".join(joiner["args"])
     assert "--key run_id" in args and "--count-field stage_count" in args
+
+
+def test_every_pending_marker_has_something_that_clears_it():
+    """The reaper turns silence into an event; something must end the silence.
+
+    Without a clearer, every marker eventually ages past the stale threshold and
+    a successful shard is reported as `shard.silent`. Both of demo-3's shards
+    were reported silent nineteen minutes after being merged.
+    """
+    clearer = named(SINKS, "clear-pending")
+    assert "shard.submitted" in clearer["subscribes"], (
+        "an agent that announced is not silent"
+    )
+    assert "scope.violated" in clearer["subscribes"], (
+        "a scope violation terminates the shard without a submission"
+    )
+    dispatchers = [s for s in SINKS if "dispatch" in " ".join(s.get("args", []))]
+    assert dispatchers, "no dispatcher writes markers, so this invariant is stale"
+
+
+def test_the_join_count_a_run_terminates_on_is_an_identity_key():
+    """`join-run` waits on stage_count, so stage_count must be carried, not
+    reconstructed. It was carried into shard.opened and lost at the agent's
+    emission, which stalled every run after its final stage merged."""
+    from signalbox.identity import CARRIED_KEYS
+
+    joiner = named(HANDLERS, "join-run")
+    count_field = joiner["args"][joiner["args"].index("--count-field") + 1]
+    assert count_field in CARRIED_KEYS

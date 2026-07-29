@@ -19,6 +19,10 @@ CARRIED_KEYS: tuple[str, ...] = (
     "stage_id",
     "shard_id",
     "shard_count",
+    # The run join's expected count. Without it `join-run` never learns how many
+    # stages to wait for, so a run stalls after its last stage merges — which is
+    # what happened to demo-3 on 2026-07-29.
+    "stage_count",
     "declared",
     "round",
     "note",

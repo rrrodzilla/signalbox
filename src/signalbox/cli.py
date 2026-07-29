@@ -16,7 +16,8 @@ import sys
 # dispatch but missing here, and every run failed on its first step.
 ACT_COMMANDS = frozenset({
     "prepare-workspace", "fetch-issue", "run-suite", "merge-stage", "push-branch",
-    "open-pr", "merge-pr", "poll-checks", "map-ci-findings", "reap", "notify", "launch",
+    "open-pr", "merge-pr", "poll-checks", "map-ci-findings", "reap", "clear-pending",
+    "notify", "launch",
 })
 
 COMMANDS = ACT_COMMANDS | {"primitive", "check-plan", "agent", "dispatch", "emit", "dashboard"}

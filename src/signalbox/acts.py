@@ -291,6 +291,22 @@ def reap(kind: str, stale_minutes: int) -> str:
     return "\n".join(lines)
 
 
+def clear_pending(kind: str, payload: dict) -> bool:
+    """Forget the marker for a shard that has now been heard from.
+
+    The marker exists to give silence a name, and an agent that announced is not
+    silent. Nothing cleared these before, so the reaper eventually reported every
+    successful shard as `shard.silent` — demo-3's two shards were both reported
+    silent nineteen minutes after they were approved and merged.
+    """
+    from signalbox.dispatch import pending_path
+
+    marker = pending_path(kind, payload)
+    existed = marker.exists()
+    marker.unlink(missing_ok=True)
+    return existed
+
+
 def notify(payload: dict) -> None:
     label = payload.get("reason") or payload.get("decision") or "attention"
     print(f"[signalbox] {label}: run={payload.get('run_id')} shard={payload.get('shard_id')}")
@@ -348,6 +364,15 @@ def main(command: str, argv: list[str]) -> int:
             request["body"] = Path(args.body_file).read_text()
         post(request)
         print(run_id)
+        return 0
+
+    if command == "clear-pending":
+        import argparse
+
+        parser = argparse.ArgumentParser(prog="signalbox clear-pending")
+        parser.add_argument("--kind", default="shard")
+        args = parser.parse_args(argv)
+        clear_pending(args.kind, _payload())
         return 0
 
     payload = _payload()

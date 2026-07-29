@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from signalbox.acts import map_ci_findings, stage_files, suite_command
+from signalbox.acts import map_ci_findings, pr_state_is_merged, stage_files, suite_command
 from signalbox.dispatch import environment, pending_path
 
 
@@ -25,6 +25,96 @@ def test_stage_files_deduplicates_and_preserves_order():
 
 def test_stage_files_of_an_empty_stage_is_empty():
     assert stage_files({}) == []
+
+
+def _merge_result(tmp_path, monkeypatch, responses):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    root = tmp_path / "worktrees" / "sb-65"
+    root.mkdir(parents=True)
+    calls = []
+
+    def fake_run(cmd, cwd=None, timeout=120):
+        calls.append((cmd, cwd, timeout))
+        return responses.pop(0)
+
+    monkeypatch.setattr(acts, "_run", fake_run)
+    return acts.merge_pr({"run_id": "sb-65", "pr": 65}), calls
+
+
+def test_merge_pr_reports_true_when_the_merge_lands_and_verifies(tmp_path, monkeypatch):
+    """sb-65 landed, so the observed PR state must make ok true."""
+    result, calls = _merge_result(
+        tmp_path,
+        monkeypatch,
+        [
+            (0, "", ""),
+            (0, '{"state":"MERGED","mergedAt":"2026-07-29T00:00:00Z"}', ""),
+            (0, "", ""),
+        ],
+    )
+    assert result["ok"] is True
+    assert calls[0][0] == ["gh", "pr", "merge", "65", "--squash"]
+    assert calls[1][0] == ["gh", "pr", "view", "65", "--json", "state,mergedAt"]
+    assert calls[2][0][-1].endswith("/signalbox/run-sb-65")
+    assert all(call[1] == str(tmp_path / "worktrees" / "sb-65") for call in calls)
+
+
+def test_merge_pr_reports_false_when_the_merge_does_not_land(tmp_path, monkeypatch):
+    """Unlike sb-65, a rejected merge must remain false and retain gh's error."""
+    result, calls = _merge_result(
+        tmp_path,
+        monkeypatch,
+        [
+            (1, "", "merge blocked by checks"),
+            (0, '{"state":"OPEN","mergedAt":null}', ""),
+        ],
+    )
+    assert result["ok"] is False
+    assert result["error"] == "merge blocked by checks"
+    assert len(calls) == 2
+
+
+def test_merge_pr_trusts_merged_state_after_local_cleanup_error(tmp_path, monkeypatch):
+    """sb-65 landed despite gh's worktree checkout failure, so ok must be true."""
+    result, calls = _merge_result(
+        tmp_path,
+        monkeypatch,
+        [
+            (1, "", "fatal: branch is already checked out"),
+            (0, '{"state":"MERGED","mergedAt":"2026-07-29T00:00:00Z"}', ""),
+            (0, "", ""),
+        ],
+    )
+    assert result["ok"] is True
+    assert "error" not in result
+    assert len(calls) == 3
+
+
+def test_merge_pr_warns_when_remote_ref_survives_a_verified_merge(tmp_path, monkeypatch):
+    """sb-65's surviving origin ref is cleanup trouble, not a failed merge."""
+    result, _ = _merge_result(
+        tmp_path,
+        monkeypatch,
+        [
+            (0, "", ""),
+            (0, '{"state":"MERGED","mergedAt":"2026-07-29T00:00:00Z"}', ""),
+            (1, "", "ref deletion denied"),
+        ],
+    )
+    assert result["ok"] is True
+    assert result["warning"] == "ref deletion denied"
+
+
+def test_pr_state_is_merged_judges_raw_json_without_a_network():
+    assert pr_state_is_merged(
+        '{"state":"MERGED","mergedAt":"2026-07-29T00:00:00Z"}'
+    ) is True
+    assert pr_state_is_merged('{"state":"OPEN","mergedAt":null}') is False
+    assert pr_state_is_merged('{"state":"MERGED","mergedAt":null}') is False
+    assert pr_state_is_merged("not json") is False
+    assert pr_state_is_merged("[]") is False
 
 
 def test_ci_failure_becomes_review_findings():

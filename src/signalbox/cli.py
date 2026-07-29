@@ -11,6 +11,17 @@ import json
 import sys
 
 
+# The acts, declared once so a test can compare them against what the topology
+# actually calls. prepare-workspace was wired into the topology and the acts
+# dispatch but missing here, and every run failed on its first step.
+ACT_COMMANDS = frozenset({
+    "prepare-workspace", "fetch-issue", "run-suite", "merge-stage", "push-branch",
+    "open-pr", "merge-pr", "poll-checks", "map-ci-findings", "reap", "notify", "launch",
+})
+
+COMMANDS = ACT_COMMANDS | {"primitive", "check-plan", "agent", "dispatch", "emit", "dashboard"}
+
+
 def _stdin_payload() -> dict:
     raw = sys.stdin.read()
     if not raw.strip():
@@ -64,19 +75,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return dashboard.main(rest)
 
-    if command in {
-        "fetch-issue",
-        "run-suite",
-        "merge-stage",
-        "push-branch",
-        "open-pr",
-        "merge-pr",
-        "poll-checks",
-        "map-ci-findings",
-        "reap",
-        "notify",
-        "launch",
-    }:
+    if command in ACT_COMMANDS:
         from signalbox import acts
 
         return acts.main(command, rest)

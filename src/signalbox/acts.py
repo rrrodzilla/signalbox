@@ -19,7 +19,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from signalbox.dispatch import state_dir
+from signalbox.paths import branch_for, install_skills, state_dir, worktree_for
 
 
 def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[int, str, str]:
@@ -45,12 +45,6 @@ def _out(payload: dict) -> int:
     return 0
 
 
-def worktree_for(payload: dict) -> Path:
-    return state_dir() / "worktrees" / str(payload.get("run_id", "unknown"))
-
-
-def branch_for(payload: dict) -> str:
-    return f"signalbox/run-{payload.get('run_id', 'unknown')}"
 
 
 # ── workspace ────────────────────────────────────────────────────────────────
@@ -74,7 +68,9 @@ def prepare_workspace(payload: dict) -> dict:
         return {**payload, "ok": False, "error": err or "cannot resolve base"}
 
     if root.exists():
-        return {**payload, "ok": True, "worktree": str(root), "branch": branch, "base_sha": base_sha}
+        install_skills(root)
+        return {**payload, "ok": True, "worktree": str(root), "branch": branch,
+                "base_sha": base_sha}
 
     root.parent.mkdir(parents=True, exist_ok=True)
     code, _, err = _run(
@@ -82,13 +78,21 @@ def prepare_workspace(payload: dict) -> dict:
     )
     if code != 0:
         return {**payload, "ok": False, "error": err}
-    return {**payload, "ok": True, "worktree": str(root), "branch": branch, "base_sha": base_sha}
+    skills = install_skills(root)
+    return {**payload, "ok": True, "worktree": str(root), "branch": branch,
+            "base_sha": base_sha, "skills": skills}
 
 
 # ── issue ────────────────────────────────────────────────────────────────────
 
 
 def fetch_issue(payload: dict) -> dict:
+    # A launch may carry the issue text directly, for a repository with no
+    # GitHub remote. There is then nothing to fetch, and saying so is more
+    # honest than calling gh and failing.
+    if str(payload.get("body") or "").strip():
+        return {**payload, "ok": True, "source": "launch"}
+
     issue = payload.get("issue")
     repo = payload.get("repo")
     cmd = ["gh", "issue", "view", str(issue), "--json", "number,title,body,labels"]
@@ -313,11 +317,29 @@ def main(command: str, argv: list[str]) -> int:
 
         parser = argparse.ArgumentParser(prog="signalbox launch")
         parser.add_argument("issue", type=int)
-        parser.add_argument("--repo", default=None)
+        parser.add_argument("--repo", default=None, help="owner/name, for gh")
+        parser.add_argument("--repo-path", default=None, help="the git repo to branch from")
         parser.add_argument("--run-id", default=None)
+        parser.add_argument("--title", default=None)
+        parser.add_argument("--body-file", default=None, help="issue text, when there is no remote")
+        parser.add_argument("--base-branch", default=None)
         args = parser.parse_args(argv)
+
         run_id = args.run_id or f"{args.issue}-{os.getpid()}"
-        post({"event": "run.requested", "run_id": run_id, "issue": args.issue, "repo": args.repo})
+        request = {
+            "event": "run.requested",
+            "run_id": run_id,
+            "issue": args.issue,
+            "repo": args.repo,
+            "repo_path": os.path.abspath(args.repo_path) if args.repo_path else os.getcwd(),
+        }
+        if args.title:
+            request["title"] = args.title
+        if args.base_branch:
+            request["base_branch"] = args.base_branch
+        if args.body_file:
+            request["body"] = Path(args.body_file).read_text()
+        post(request)
         print(run_id)
         return 0
 

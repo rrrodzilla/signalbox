@@ -19,16 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from signalbox.paths import state_dir, worktree_for
 
-def state_dir() -> Path:
-    root = os.environ.get(
-        "SIGNALBOX_STATE",
-        os.path.join(
-            os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
-            "signalbox",
-        ),
-    )
-    return Path(root)
 
 
 def pending_path(kind: str, payload: dict) -> Path:
@@ -100,6 +92,7 @@ def main(argv: list[str]) -> int:
                 "--allowedTools",
                 "Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill",
             ],
+            cwd=str(worktree_for(payload)),
             env=environment(payload, dict(os.environ)),
             capture_output=True,
             text=True,

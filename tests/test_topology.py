@@ -143,3 +143,37 @@ def test_no_primitive_is_named_like_a_conductor():
     for primitive in SOURCES + HANDLERS + SINKS:
         word = primitive["name"].lower().replace("-", " ").split()
         assert not banned.intersection(word), f"{primitive['name']} reads as a conductor"
+
+
+def test_every_signalbox_subcommand_the_topology_calls_actually_exists():
+    """A handler naming a command the CLI does not have fails only at runtime.
+
+    Found the hard way: prepare-workspace was wired into the topology and into
+    the acts dispatch, but never added to the CLI's command list, so the very
+    first act of every run failed.
+    """
+    from signalbox.cli import COMMANDS
+
+    called = set()
+    for primitive in SOURCES + HANDLERS + SINKS:
+        args = primitive.get("args", [])
+        for index, arg in enumerate(args):
+            if arg == "signalbox" and index + 1 < len(args):
+                nxt = args[index + 1]
+                if not nxt.startswith("-"):
+                    called.add(nxt)
+    assert called, "no signalbox subcommand found in the topology"
+    assert called <= COMMANDS, f"topology calls unknown commands: {sorted(called - COMMANDS)}"
+
+
+def test_every_act_is_reachable_from_the_acts_dispatch():
+    """The mirror of the above: a command the CLI routes but acts cannot handle."""
+    from signalbox.cli import ACT_COMMANDS
+
+    handled = {"poll-checks", "reap", "launch", "notify"}  # handled before the table
+    from signalbox import acts
+    import inspect
+
+    source = inspect.getsource(acts.main)
+    for command in sorted(ACT_COMMANDS - handled):
+        assert f'"{command}"' in source, f"acts.main cannot dispatch {command}"

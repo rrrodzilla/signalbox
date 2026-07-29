@@ -17,6 +17,7 @@ import subprocess
 import sys
 
 from signalbox.identity import carry, spoofed_keys
+from signalbox.paths import worktree_for
 
 # Each role is a skill, so the procedure is versioned and reviewable on its own
 # rather than living in an argv string.
@@ -92,6 +93,16 @@ def tools_for(role: str) -> list[str]:
     return ["Read", "Grep", "Glob", "Skill", "Bash", "Write", "Edit"]
 
 
+def _workdir(payload: dict) -> str | None:
+    """Judging agents read the run's worktree, not the engine's directory.
+
+    It is also where the skills were installed, so this is what makes them
+    resolvable at all.
+    """
+    tree = worktree_for(payload)
+    return str(tree) if tree.is_dir() else None
+
+
 def run(role: str, payload: dict, model: str = "opus") -> tuple[dict, int]:
     """Invoke the model and return (verdict, exit_code)."""
     completed = subprocess.run(
@@ -104,6 +115,7 @@ def run(role: str, payload: dict, model: str = "opus") -> tuple[dict, int]:
             "--allowedTools",
             *tools_for(role),
         ],
+        cwd=_workdir(payload),
         capture_output=True,
         text=True,
         check=False,

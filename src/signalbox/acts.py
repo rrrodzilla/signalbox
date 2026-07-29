@@ -251,14 +251,57 @@ def open_pr(payload: dict) -> dict:
     return {**payload, "ok": True, "url": out, "pr": out.rstrip("/").rsplit("/", 1)[-1]}
 
 
+def pr_state_is_merged(raw: str) -> bool:
+    """Whether a PR-state response says the merge landed.
+
+    Pure, and separated from the commands on purpose: `gh pr merge` may exit
+    non-zero after GitHub accepted the merge when its local branch cleanup
+    fails. The remote PR state, not that process status, is authoritative.
+    """
+    try:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return (
+        isinstance(body, dict)
+        and str(body.get("state") or "").upper() == "MERGED"
+        and bool(body.get("mergedAt"))
+    )
+
+
 def merge_pr(payload: dict) -> dict:
-    code, out, err = _run(
-        ["gh", "pr", "merge", str(payload.get("pr")), "--squash", "--delete-branch"],
-        cwd=str(worktree_for(payload)),
+    root = str(worktree_for(payload))
+    pr = str(payload.get("pr"))
+    merge_code, merge_out, merge_err = _run(
+        ["gh", "pr", "merge", pr, "--squash"],
+        cwd=root,
         timeout=120,
     )
-    if code != 0:
-        return {**payload, "ok": False, "error": err or out}
+    state_code, state_out, state_err = _run(
+        ["gh", "pr", "view", pr, "--json", "state,mergedAt"],
+        cwd=root,
+        timeout=45,
+    )
+    if state_code != 0 or not pr_state_is_merged(state_out):
+        error = merge_err or merge_out or state_err or state_out
+        if not error:
+            error = (
+                f"merge exited {merge_code}; PR state could not verify that the merge landed"
+            )
+        return {**payload, "ok": False, "error": error}
+
+    branch = branch_for(payload)
+    delete_code, delete_out, delete_err = _run(
+        [
+            "gh", "api", "-X", "DELETE",
+            f"repos/{{owner}}/{{repo}}/git/refs/heads/{branch}",
+        ],
+        cwd=root,
+        timeout=45,
+    )
+    if delete_code != 0:
+        warning = delete_err or delete_out or f"remote branch deletion exited {delete_code}"
+        return {**payload, "ok": True, "warning": warning}
     return {**payload, "ok": True}
 
 

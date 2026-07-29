@@ -1,0 +1,1 @@
+Updated only [demo/src/lib.rs](/home/rodzilla/code/active/trip-emergent-wt/s2-wire-wire/demo/src/lib.rs) with the requested module declarations and re-exports. `parse_pairs` and all other files remain unchanged.

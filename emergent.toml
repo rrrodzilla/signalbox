@@ -1,298 +1,582 @@
-# TRIP code-review loop as an Emergent topology.
+# signalbox — one engine, many concurrent runs.
 #
-# Cycle:  review.requested -> reviewer (codex) -> review.raw
-#         review.raw -> verdict parsers -> review.approved | review.changes_requested
-#         review.changes_requested -> round guard -> fix.requested | review.escalated
-#         fix.requested -> fixer (claude -p) -> review.requested   <- the loop edge
+# Run identity is a NATURAL KEY in the payload (run_id / stage_id / shard_id),
+# never correlation_id: launches arrive over HTTP, which stamps no correlation,
+# and one long-lived engine would collide every run into a single bucket.
+# correlation_id stays useful for event-store queries. It is not an item key.
 #
-# TRIP sentinels become topics; the round guard bounds the cycle at 3 fix
-# attempts (rounds 1-4); approval writes results/CR.md under PROMOTION_READY.
+# Nothing here sequences anything. stream-runner paces stages because stage N+1
+# genuinely depends on N's merge. Shards inside a stage are disjoint by an
+# invariant check-plan enforces, so they are split with the SDK splitter and are
+# all in flight at once.
 
-# Engine names are namespaced per repo at install time and per run at launch.
-# With socket_path = "auto", two concurrent runs of the same repo get distinct
-# sockets; the name is also the event-store log directory, so their audit
-# trails stay separate.
 [engine]
-name = "signalbox-review-loop__SIGNALBOX_RUN_SUFFIX__"
+name = "signalbox"
 socket_path = "auto"
+api_port = 8890
 
-# ── Entry: one-shot seed emits the first review request ─────────────────────
+[event_store]
+json_log_dir = "auto"
+sqlite_path = "auto"
+retention_days = 90
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SOURCES
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The single actuator. Launches, every emission from a working agent, and human
+# approvals all arrive here as POSTs shaped {"event": "<topic>", ...fields}.
+# Loopback only: whatever can POST here drives the system.
 [[sources]]
-name = "seed"
-path = "~/.local/share/emergent/primitives/bin/exec-source"
-args = ["--correlate", "--shell", "bash", "--command", "__SIGNALBOX_ROOT__/bin/seed.sh"]
-publishes = ["exec.output"]
-
-# jq's clock formatting is always UTC while seed scripts stamped local time, so
-# one run minted two indistinguishable ids (issue #42). bin/seed.sh is now the
-# sole generator; this handler only unwraps the envelope.
-[[handlers]]
-name = "unwrap-seed"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "exec.output", "--publish-as", "review.requested", "--", "jq", "-c", ".stdout | fromjson"]
-subscribes = ["exec.output"]
-publishes = ["review.requested"]
-
-# ── Reviewer: fresh Codex review per round, read-only sandbox ────────────────
-
-[[handlers]]
-name = "reviewer"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "review.requested", "--publish-as", "review.raw", "-t", "1800000", "--", "__SIGNALBOX_ROOT__/bin/review.sh"]
-subscribes = ["review.requested"]
-publishes = ["review.raw"]
-env = { CODEX_MODEL = "gpt-5.6-sol", CODEX_EFFORT = "high" }
-
-# ── Verdict parsing: sentinel string -> topic (jq silent-filter split) ───────
-
-[[handlers]]
-name = "verdict-approved"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "review.raw", "--publish-as", "review.approved", "--", "jq", "-c", "select(.verdict == \"APPROVED\")"]
-subscribes = ["review.raw"]
-publishes = ["review.approved"]
-
-[[handlers]]
-name = "verdict-changes"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "review.raw", "--publish-as", "review.changes_requested", "--", "jq", "-c", "select(.verdict == \"REQUEST_CHANGES\")"]
-subscribes = ["review.raw"]
-publishes = ["review.changes_requested"]
-
-# ── Round guard: bound the cycle; round >= 4 escalates to a human ────────────
-
-[[handlers]]
-name = "round-guard"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "review.changes_requested", "--publish-as", "fix.requested", "--", "jq", "-c", "select(.round < 4)"]
-subscribes = ["review.changes_requested"]
-publishes = ["fix.requested"]
-
-[[handlers]]
-name = "escalation-guard"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "review.changes_requested", "--publish-as", "review.escalated", "--", "jq", "-c", "select(.round >= 4)"]
-subscribes = ["review.changes_requested"]
-publishes = ["review.escalated"]
-
-# ── Fixer: headless Claude addresses feedback, closes the loop ───────────────
-
-[[handlers]]
-name = "fixer"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "fix.requested", "--publish-as", "review.requested", "-t", "1800000", "--", "__SIGNALBOX_ROOT__/bin/fix.sh"]
-subscribes = ["fix.requested"]
-publishes = ["review.requested"]
-
-# ── Situational gate: the LLM sets the floor for the action at hand ──────────
-# No policy table. The assessor (an LLM) is handed the action's mechanics and
-# the live context and determines the readiness floor for THIS instance, with
-# its rationale in the payload — so the event trail records not just what was
-# decided but why. The gate itself is then a pure comparison: earned
-# per-action readiness vs the assessed floor.
-
-[[handlers]]
-name = "assessor"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "review.approved", "--publish-as", "gate.assessed", "-t", "120000", "--", "__SIGNALBOX_ROOT__/bin/assess.sh"]
-subscribes = ["review.approved"]
-publishes = ["gate.assessed"]
-
-[[handlers]]
-name = "gate"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "gate.assessed", "--publish-as", "gate.decided", "--", "jq", "-c", ". + {decision: (if .readiness >= .floor then \"auto\" else \"human\" end)}"]
-subscribes = ["gate.assessed"]
-publishes = ["gate.decided"]
-
-[[handlers]]
-name = "route-auto"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "gate.decided", "--publish-as", "approval.granted", "--", "jq", "-c", "select(.decision == \"auto\")"]
-subscribes = ["gate.decided"]
-publishes = ["approval.granted"]
-
-[[handlers]]
-name = "route-human"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "gate.decided", "--publish-as", "approval.requested", "--", "jq", "-c", "select(.decision == \"human\")"]
-subscribes = ["gate.decided"]
-publishes = ["approval.requested"]
-
-# Leader-directed return path: the human's webhook POST re-enters the fabric
-# as approval.granted. No handler shortcuts this — the gate is topological.
-
-[[sources]]
-name = "approval-webhook"
+name = "control"
 path = "~/.local/share/emergent/primitives/bin/http-source"
-args = ["--port", "__SIGNALBOX_PORT_APPROVAL__", "--path", "/approve"]
+args = ["--host", "127.0.0.1", "--port", "8100", "--path", "/emit"]
 publishes = ["http.request"]
 
+# Silence has to have a name. An agent that crashes, refuses, or emits nothing
+# produces no event at all; this turns that absence into one.
+[[sources]]
+name = "reap-shards"
+path = "~/.local/share/emergent/primitives/bin/exec-source"
+args = ["--interval", "60000", "--shell", "bash", "--command",
+  "signalbox reap --kind shard --stale-minutes 20"]
+publishes = ["exec.output"]
+
+[[sources]]
+name = "poll-checks"
+path = "~/.local/share/emergent/primitives/bin/exec-source"
+args = ["--interval", "45000", "--shell", "bash", "--command",
+  "signalbox poll-checks"]
+publishes = ["exec.output"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INGRESS ROUTERS — one topic per thing an agent or human can announce.
+# The agent's action space is exactly this vocabulary.
+# ─────────────────────────────────────────────────────────────────────────────
+
 [[handlers]]
-name = "unwrap-approval"
+name = "route-run-requested"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "http.request", "--publish-as", "approval.granted", "--", "jq", "-c", ".body"]
+args = ["-s", "http.request", "--publish-as", "run.requested", "--",
+        "jq", "-c", 'select(.body.event == "run.requested") | .body']
+subscribes = ["http.request"]
+publishes = ["run.requested"]
+
+[[handlers]]
+name = "route-file-written"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "http.request", "--publish-as", "shard.file-written", "--",
+        "jq", "-c", 'select(.body.event == "shard.file-written") | .body']
+subscribes = ["http.request"]
+publishes = ["shard.file-written"]
+
+[[handlers]]
+name = "route-check-ran"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "http.request", "--publish-as", "shard.check-ran", "--",
+        "jq", "-c", 'select(.body.event == "shard.check-ran") | .body']
+subscribes = ["http.request"]
+publishes = ["shard.check-ran"]
+
+[[handlers]]
+name = "route-shard-submitted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "http.request", "--publish-as", "shard.submitted", "--",
+        "jq", "-c", 'select(.body.event == "shard.submitted") | .body']
+subscribes = ["http.request"]
+publishes = ["shard.submitted"]
+
+[[handlers]]
+name = "route-approval-granted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "http.request", "--publish-as", "approval.granted", "--",
+        "jq", "-c", 'select(.body.event == "approval.granted") | .body']
 subscribes = ["http.request"]
 publishes = ["approval.granted"]
 
-# ── Vault sync: overlap work without weakening the promotion gate ───────────
-# The syncer and CR-writing promoter are independent consumers of
-# approval.granted, so vault sync overlaps the operator's review seam and the
-# promotion phase's precondition work instead of blocking them. The guarantee
-# that no PR can exist without a recorded docs-sync is not abandoned; it moves
-# downstream to bin/promote-exec.sh, which blocks on a fresh, status: "OK",
-# correlation-matched state/docs-sync.json before it will push or open a PR (see
-# bin/docs-sync-wait.sh). bin/phase-run.sh hands its engine to a deferred reaper
-# at the review terminal, so this handler is not killed mid-sync when the CR
-# artifact lands first.
+# Anything POSTed that is not recognised vocabulary becomes an event rather
+# than a silent drop. Untrusted input, treated as such.
+[[handlers]]
+name = "route-unknown-emission"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "http.request", "--publish-as", "control.unknown-event", "--",
+        "jq", "-c", 'select((.body.event // "") | IN("run.requested","shard.file-written","shard.check-ran","shard.submitted","approval.granted") | not) | .body']
+subscribes = ["http.request"]
+publishes = ["control.unknown-event"]
 
 [[handlers]]
-name = "docs-syncer"
+name = "raise-reaped"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "approval.granted", "--publish-as", "docs.synced", "-t", "900000", "--", "__SIGNALBOX_ROOT__/bin/docs-sync.sh"]
-subscribes = ["approval.granted"]
-publishes = ["docs.synced"]
+args = ["-s", "exec.output", "--publish-as", "shard.silent", "--",
+        "jq", "-c", 'select(.command | test("reap")) | .stdout | select(length > 0) | fromjson']
+subscribes = ["exec.output"]
+publishes = ["shard.silent"]
 
-# ── Readiness ladder: autonomy is earned, not granted ────────────────────────
+[[handlers]]
+name = "raise-checks"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "exec.output", "--publish-as", "checks.reported", "--",
+        "jq", "-c", 'select(.command | test("poll-checks")) | .stdout | select(length > 0) | fromjson']
+subscribes = ["exec.output"]
+publishes = ["checks.reported"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PLAN — judgment produces one type; routers turn it into vocabulary.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# One worktree per run, branched from a pinned base sha. The base branch moves
+# while a run is in flight; a run that re-read it later would land against a
+# tree it never saw.
+[[handlers]]
+name = "prepare-workspace"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "run.requested", "--publish-as", "workspace.ready",
+        "-e", "workspace.failed", "-t", "60000", "--",
+        "signalbox", "prepare-workspace"]
+subscribes = ["run.requested"]
+publishes = ["workspace.ready", "workspace.failed"]
+
+[[handlers]]
+name = "fetch-issue"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "workspace.ready", "--publish-as", "issue.fetched",
+        "-e", "issue.fetch-failed", "-t", "30000", "--",
+        "signalbox", "fetch-issue"]
+subscribes = ["workspace.ready"]
+publishes = ["issue.fetched", "issue.fetch-failed"]
+
+[[handlers]]
+name = "survey-codebase"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "issue.fetched", "--publish-as", "codebase.surveyed",
+        "-e", "survey.failed", "-t", "300000", "--",
+        "signalbox", "agent", "survey"]
+subscribes = ["issue.fetched"]
+publishes = ["codebase.surveyed", "survey.failed"]
+
+# Fan-in: first drafts and redrafts are the same act, so one primitive.
+# plan.rejected re-entering here is FEEDBACK EDGE 1.
+[[handlers]]
+name = "draft-plan"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "codebase.surveyed", "-s", "plan.rejected",
+        "--publish-as", "plan.submitted", "-e", "plan.draft-failed",
+        "-t", "600000", "--", "signalbox", "agent", "plan"]
+subscribes = ["codebase.surveyed", "plan.rejected"]
+publishes = ["plan.submitted", "plan.draft-failed"]
+
+[[handlers]]
+name = "check-plan"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.submitted", "--publish-as", "plan.checked", "--",
+        "signalbox", "check-plan"]
+subscribes = ["plan.submitted"]
+publishes = ["plan.checked"]
+
+[[handlers]]
+name = "route-plan-ok"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.checked", "--publish-as", "plan.accepted", "--",
+        "jq", "-c", "select(.ok == true)"]
+subscribes = ["plan.checked"]
+publishes = ["plan.accepted"]
+
+# Both sides of the guard are exclusive. An unbounded feedback loop is the one
+# failure mode of this architecture that fills a disk.
+[[handlers]]
+name = "route-plan-retry"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.checked", "--publish-as", "plan.rejected", "--",
+        "jq", "-c", "select(.ok == false and .attempt < 3)"]
+subscribes = ["plan.checked"]
+publishes = ["plan.rejected"]
+
+[[handlers]]
+name = "route-plan-exhausted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.checked", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(.ok == false and .attempt >= 3) | . + {reason: "plan never satisfied its invariants"}']
+subscribes = ["plan.checked"]
+publishes = ["run.halted"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGES paced sequentially / SHARDS split in parallel
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Ack is stage.merged, so consumption sets the pace. Nothing sleeps.
+[[handlers]]
+name = "pace-stages"
+path = "~/.local/share/emergent/primitives/bin/stream-runner"
+args = ["--load-topic", "plan.accepted", "--publish-as", "stage.opened",
+        "--ack-topic", "stage.merged", "--end-topic", "run.built",
+        "--items-key", "stages"]
+subscribes = ["plan.accepted", "stage.merged"]
+publishes = ["stage.opened", "run.built"]
+
+# The SDK splitter: N shard.opened events, causation intact, none held back.
+# Also subscribes to stage.conflicted — FEEDBACK EDGE 3 reopens only the
+# shards a merge conflict actually implicated.
+[[handlers]]
+name = "split-shards"
+path = "signalbox"
+args = ["primitive", "split-shards"]
+subscribes = ["stage.opened", "stage.conflicted"]
+publishes = ["shard.opened"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IMPLEMENT — the agent re-enters through the control endpoint, announcing as
+# it works. It writes code; it never decides what happens next.
+# ─────────────────────────────────────────────────────────────────────────────
 
 [[sinks]]
-name = "readiness-up"
+name = "dispatch-implement"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "approval.granted", "--", "__SIGNALBOX_ROOT__/bin/readiness.sh", "up"]
-subscribes = ["approval.granted"]
+args = ["-s", "shard.opened", "-t", "2400000", "--",
+        "signalbox", "dispatch", "--skill", "signalbox-implement"]
+subscribes = ["shard.opened"]
 
 [[sinks]]
-name = "readiness-down"
+name = "dispatch-fix"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "review.escalated", "--", "__SIGNALBOX_ROOT__/bin/readiness.sh", "down"]
-subscribes = ["review.escalated"]
+args = ["-s", "fix.opened", "-t", "2400000", "--",
+        "signalbox", "dispatch", "--skill", "signalbox-fix"]
+subscribes = ["fix.opened"]
 
-# ── Sinks: narration, approval request, promotion, escalation, errors ────────
+# Scope enforcement, at write time rather than review time. One predicate.
+# This is what the previous implementation's scope subsystem collapses into.
+[[handlers]]
+name = "scope-guard"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "shard.file-written", "--publish-as", "scope.violated", "--",
+        "jq", "-c", 'select([.declared[] == .path] | any | not) | . + {outcome: "scope_violation"}']
+subscribes = ["shard.file-written"]
+publishes = ["scope.violated"]
 
-[[sinks]]
-name = "narrator"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "review.raw", "--", "jq", "-r", "\"[round \\(.round)] verdict: \\(.verdict)\""]
-subscribes = ["review.raw"]
+[[handlers]]
+name = "route-shard-done"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "shard.submitted", "--publish-as", "shard.built", "--",
+        "jq", "-c", 'select(.verdict == "done")']
+subscribes = ["shard.submitted"]
+publishes = ["shard.built"]
 
-[[sinks]]
-name = "gate-narrator"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "gate.decided", "--", "jq", "-r", "\"[gate] \\(.action): floor R\\(.floor) vs readiness R\\(.readiness) -> \\(.decision) (\\(.rationale))\""]
-subscribes = ["gate.decided"]
+[[handlers]]
+name = "route-shard-blocked"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "shard.submitted", "--publish-as", "shard.abandoned", "--",
+        "jq", "-c", 'select(.verdict == "blocked") | . + {outcome: "abandoned"}']
+subscribes = ["shard.submitted"]
+publishes = ["shard.abandoned"]
 
-[[sinks]]
-name = "approval-notify"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "approval.requested", "--", "__SIGNALBOX_ROOT__/bin/notify.sh"]
-subscribes = ["approval.requested"]
+[[handlers]]
+name = "route-shard-invalid"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "shard.submitted", "--publish-as", "shard.invalid-verdict", "--",
+        "jq", "-c", 'select((.verdict // "") | IN("done", "blocked") | not) | . + {outcome: "invalid"}']
+subscribes = ["shard.submitted"]
+publishes = ["shard.invalid-verdict"]
 
-[[sinks]]
-name = "promoter"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "approval.granted", "--", "__SIGNALBOX_ROOT__/bin/promote.sh"]
-subscribes = ["approval.granted"]
+# ─────────────────────────────────────────────────────────────────────────────
+# REVIEW — Shape A: one verdict type, then exclusive routers.
+# ─────────────────────────────────────────────────────────────────────────────
 
-[[sinks]]
-name = "escalation"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "review.escalated", "--", "__SIGNALBOX_ROOT__/bin/escalate-mark.sh", "review"]
-subscribes = ["review.escalated"]
+[[handlers]]
+name = "review-shard"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "shard.built", "--publish-as", "review.submitted",
+        "-e", "review.failed", "-t", "900000", "--",
+        "signalbox", "agent", "review"]
+subscribes = ["shard.built"]
+publishes = ["review.submitted", "review.failed"]
 
-[[sinks]]
-name = "errors"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "exec.error", "--", "jq", "-c", "."]
-subscribes = ["exec.error"]
+[[handlers]]
+name = "route-approved"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.submitted", "--publish-as", "shard.approved", "--",
+        "jq", "-c", 'select(.verdict == "approved") | . + {outcome: "approved"}']
+subscribes = ["review.submitted"]
+publishes = ["shard.approved"]
 
-# Forward events to the one shared machine-level sink service on its fixed
-# known port (default 8099, SIGNALBOX_SINK_PORT); this topology allocates and
-# serves no port. Forwarding is fire-and-forget, so a down sink service cannot
-# stall or fail a run. exec-sink gives its child only the payload, with no topic
-# metadata, so one block per topic passes the exact label as a literal argument.
-# The wildcard lifecycle blocks have no single literal to pass, so they rebuild
-# the concrete topic from the payload's own "name" field before forwarding.
-[[sinks]]
-name = "forward-review-requested"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "review.requested", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "review", "review.requested"]
-subscribes = ["review.requested"]
+[[handlers]]
+name = "route-changes"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.submitted", "--publish-as", "shard.changes-requested", "--",
+        "jq", "-c", 'select(.verdict == "changes_requested")']
+subscribes = ["review.submitted"]
+publishes = ["shard.changes-requested"]
 
-[[sinks]]
-name = "forward-review-raw"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "review.raw", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "review", "review.raw"]
-subscribes = ["review.raw"]
+[[handlers]]
+name = "route-review-invalid"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.submitted", "--publish-as", "review.invalid-verdict", "--",
+        "jq", "-c", 'select((.verdict // "") | IN("approved", "changes_requested") | not)']
+subscribes = ["review.submitted"]
+publishes = ["review.invalid-verdict"]
 
-[[sinks]]
-name = "forward-fix-requested"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "fix.requested", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "review", "fix.requested"]
-subscribes = ["fix.requested"]
+# FEEDBACK EDGE 2. Fixes re-enter the IMPLEMENTATION vocabulary, so scope-guard
+# and the reaper apply to them with no additional wiring.
+[[handlers]]
+name = "guard-rounds-continue"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "shard.changes-requested", "--publish-as", "fix.opened", "--",
+        "jq", "-c", "select(.round < 5) | .round += 1"]
+subscribes = ["shard.changes-requested"]
+publishes = ["fix.opened"]
 
-[[sinks]]
-name = "forward-review-approved"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "review.approved", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "review", "review.approved"]
-subscribes = ["review.approved"]
+[[handlers]]
+name = "guard-rounds-exhaust"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "shard.changes-requested", "--publish-as", "shard.escalated", "--",
+        "jq", "-c", 'select(.round >= 5) | . + {outcome: "escalated"}']
+subscribes = ["shard.changes-requested"]
+publishes = ["shard.escalated"]
 
-[[sinks]]
-name = "forward-review-escalated"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "review.escalated", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "review", "review.escalated"]
-subscribes = ["review.escalated"]
+# ─────────────────────────────────────────────────────────────────────────────
+# JOIN + MERGE — the join is stateful with a real timeout, because a lost shard
+# result would matter here. It subscribes to every terminal shard outcome, so a
+# stage cannot hang waiting on a shard that died.
+# ─────────────────────────────────────────────────────────────────────────────
 
-[[sinks]]
-name = "forward-gate-assessed"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "gate.assessed", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "review", "gate.assessed"]
+[[handlers]]
+name = "join-stage"
+path = "signalbox"
+args = ["primitive", "join-terminal", "--key", "stage_id",
+        "--count-field", "shard_count", "--timeout-seconds", "5400",
+        "--publish-as", "stage.closed"]
+subscribes = ["shard.approved", "shard.escalated", "shard.abandoned",
+              "shard.invalid-verdict", "shard.silent", "scope.violated"]
+publishes = ["stage.closed"]
+
+[[handlers]]
+name = "route-stage-clean"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "stage.closed", "--publish-as", "stage.mergeable", "--",
+        "jq", "-c", 'select([.results[].outcome] | all(. == "approved"))']
+subscribes = ["stage.closed"]
+publishes = ["stage.mergeable"]
+
+[[handlers]]
+name = "route-stage-dirty"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "stage.closed", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select([.results[].outcome] | all(. == "approved") | not) | . + {reason: "stage closed with unresolved shards"}']
+subscribes = ["stage.closed"]
+publishes = ["run.halted"]
+
+[[handlers]]
+name = "merge-stage"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "stage.mergeable", "--publish-as", "merge.attempted",
+        "-t", "120000", "--", "signalbox", "merge-stage"]
+subscribes = ["stage.mergeable"]
+publishes = ["merge.attempted"]
+
+[[handlers]]
+name = "route-merge-ok"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "merge.attempted", "--publish-as", "stage.merged", "--",
+        "jq", "-c", "select(.ok == true)"]
+subscribes = ["merge.attempted"]
+publishes = ["stage.merged"]
+
+[[handlers]]
+name = "route-merge-conflict"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "merge.attempted", "--publish-as", "stage.conflicted", "--",
+        "jq", "-c", "select(.ok == false)"]
+subscribes = ["merge.attempted"]
+publishes = ["stage.conflicted"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE — suite.ran is a typed event with counts. The gate cannot be TOLD the
+# suite passed; it can only observe the event or its absence.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[handlers]]
+name = "run-suite"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "run.built", "--publish-as", "suite.ran",
+        "-e", "suite.errored", "-t", "1800000", "--", "signalbox", "run-suite"]
+subscribes = ["run.built"]
+publishes = ["suite.ran", "suite.errored"]
+
+[[handlers]]
+name = "assess"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "suite.ran", "--publish-as", "gate.assessed",
+        "-e", "assess.failed", "-t", "600000", "--",
+        "signalbox", "agent", "assess"]
+subscribes = ["suite.ran"]
+publishes = ["gate.assessed", "assess.failed"]
+
+[[handlers]]
+name = "route-gate-auto"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "gate.assessed", "--publish-as", "gate.cleared", "--",
+        "jq", "-c", 'select(.decision == "clear")']
 subscribes = ["gate.assessed"]
+publishes = ["gate.cleared"]
+
+[[handlers]]
+name = "route-gate-human"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "gate.assessed", "--publish-as", "approval.requested", "--",
+        "jq", "-c", 'select(.decision == "needs_human")']
+subscribes = ["gate.assessed"]
+publishes = ["approval.requested"]
+
+[[handlers]]
+name = "route-gate-blocked"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "gate.assessed", "--publish-as", "gate.blocked", "--",
+        "jq", "-c", 'select(.decision == "block")']
+subscribes = ["gate.assessed"]
+publishes = ["gate.blocked"]
+
+[[handlers]]
+name = "route-gate-invalid"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "gate.assessed", "--publish-as", "gate.invalid-verdict", "--",
+        "jq", "-c", 'select((.decision // "") | IN("clear","needs_human","block") | not)']
+subscribes = ["gate.assessed"]
+publishes = ["gate.invalid-verdict"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROMOTE — four irreducible I/O acts, each independently retryable. A failed
+# step publishes a failure event; none of them can stall silently.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[handlers]]
+name = "push-branch"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "gate.cleared", "-s", "approval.granted",
+        "--publish-as", "branch.pushed", "-e", "branch.push-failed",
+        "-t", "120000", "--", "signalbox", "push-branch"]
+subscribes = ["gate.cleared", "approval.granted"]
+publishes = ["branch.pushed", "branch.push-failed"]
+
+[[handlers]]
+name = "open-pr"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "branch.pushed", "--publish-as", "pr.opened",
+        "-e", "pr.open-failed", "-t", "60000", "--", "signalbox", "open-pr"]
+subscribes = ["branch.pushed"]
+publishes = ["pr.opened", "pr.open-failed"]
+
+[[handlers]]
+name = "route-checks-passed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "checks.reported", "--publish-as", "checks.passed", "--",
+        "jq", "-c", 'select(.conclusion == "success")']
+subscribes = ["checks.reported"]
+publishes = ["checks.passed"]
+
+[[handlers]]
+name = "route-checks-failed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "checks.reported", "--publish-as", "checks.failed", "--",
+        "jq", "-c", 'select(.conclusion == "failure")']
+subscribes = ["checks.reported"]
+publishes = ["checks.failed"]
+
+# FEEDBACK EDGE 4. Nobody wrote "handle CI failure". A red build becomes
+# findings entering the review vocabulary, and the fix loop already exists.
+[[handlers]]
+name = "map-ci-to-findings"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "checks.failed", "--publish-as", "shard.changes-requested",
+        "-t", "60000", "--", "signalbox", "map-ci-findings"]
+subscribes = ["checks.failed"]
+publishes = ["shard.changes-requested"]
+
+[[handlers]]
+name = "merge-pr"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "checks.passed", "--publish-as", "pr.merged",
+        "-e", "pr.merge-failed", "-t", "120000", "--", "signalbox", "merge-pr"]
+subscribes = ["checks.passed"]
+publishes = ["pr.merged", "pr.merge-failed"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTES — one event per note. No shared document, no lock, nothing serialises.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[handlers]]
+name = "plan-notes"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "pr.merged", "--publish-as", "notes.planned",
+        "-e", "notes.plan-failed", "-t", "300000", "--",
+        "signalbox", "agent", "plan-notes"]
+subscribes = ["pr.merged"]
+publishes = ["notes.planned", "notes.plan-failed"]
+
+[[handlers]]
+name = "split-notes"
+path = "signalbox"
+args = ["primitive", "split-notes"]
+subscribes = ["notes.planned"]
+publishes = ["note.drafted"]
+
+[[handlers]]
+name = "write-note"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "note.drafted", "--publish-as", "note.written",
+        "-e", "note.write-failed", "-t", "300000", "--",
+        "signalbox", "agent", "write-note"]
+subscribes = ["note.drafted"]
+publishes = ["note.written", "note.write-failed"]
+
+[[handlers]]
+name = "join-notes"
+path = "signalbox"
+args = ["primitive", "join-terminal", "--key", "run_id",
+        "--count-field", "note_count", "--timeout-seconds", "900",
+        "--publish-as", "notes.synced"]
+subscribes = ["note.written", "note.write-failed"]
+publishes = ["notes.synced"]
+
+[[handlers]]
+name = "complete-run"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "notes.synced", "--publish-as", "run.completed", "--",
+        "jq", "-c", '. + {at: (now | todate)}']
+subscribes = ["notes.synced"]
+publishes = ["run.completed"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EGRESS — genuine egress only. Four sinks replace seventy-six.
+# ─────────────────────────────────────────────────────────────────────────────
 
 [[sinks]]
-name = "forward-gate-decided"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "gate.decided", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "review", "gate.decided"]
-subscribes = ["gate.decided"]
+name = "dashboard"
+path = "~/.local/share/emergent/primitives/bin/sse-sink"
+args = ["--port", "8101"]
+subscribes = ["run.*", "workspace.*", "issue.*", "plan.*", "codebase.*", "stage.*", "shard.*",
+              "fix.*", "review.*", "scope.*", "merge.*", "suite.*", "gate.*",
+              "approval.*", "branch.*", "pr.*", "checks.*", "note.*", "notes.*",
+              "control.*", "system.started.*", "system.stopped.*", "system.error.*"]
 
 [[sinks]]
-name = "forward-approval-requested"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "approval.requested", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "review", "approval.requested"]
-subscribes = ["approval.requested"]
+name = "topology"
+path = "~/.local/share/emergent/primitives/bin/topology-viewer"
+args = ["--port", "8102"]
+subscribes = ["system.started.*", "system.stopped.*", "system.error.*"]
 
 [[sinks]]
-name = "forward-approval-granted"
+name = "notify"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "approval.granted", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "review", "approval.granted"]
-subscribes = ["approval.granted"]
+args = ["-s", "approval.requested", "-s", "shard.escalated", "-s", "run.halted",
+        "-s", "scope.violated", "-s", "gate.blocked", "-t", "30000", "--",
+        "signalbox", "notify"]
+subscribes = ["approval.requested", "shard.escalated", "run.halted",
+              "scope.violated", "gate.blocked"]
 
 [[sinks]]
-name = "forward-docs-synced"
+name = "trace"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "docs.synced", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "review", "docs.synced"]
-subscribes = ["docs.synced"]
-
-[[sinks]]
-name = "forward-exec-error"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "exec.error", "-t", "5000", "--", "__SIGNALBOX_ROOT__/bin/sse-forward.sh", "review", "exec.error"]
-subscribes = ["exec.error"]
-
-[[sinks]]
-name = "forward-system-started-any"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "system.started.*", "-t", "5000", "--", "bash", "-c", 'payload=$(cat); name=$(jq -r ".name // empty" <<<"$payload" 2>/dev/null); printf "%s" "$payload" | "$0" review "system.started.${name:-unknown}"', "__SIGNALBOX_ROOT__/bin/sse-forward.sh"]
-subscribes = ["system.started.*"]
-
-[[sinks]]
-name = "forward-system-stopped-any"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "system.stopped.*", "-t", "5000", "--", "bash", "-c", 'payload=$(cat); name=$(jq -r ".name // empty" <<<"$payload" 2>/dev/null); printf "%s" "$payload" | "$0" review "system.stopped.${name:-unknown}"', "__SIGNALBOX_ROOT__/bin/sse-forward.sh"]
-subscribes = ["system.stopped.*"]
-
-[[sinks]]
-name = "forward-system-error-any"
-path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "system.error.*", "-t", "5000", "--", "bash", "-c", 'payload=$(cat); name=$(jq -r ".name // empty" <<<"$payload" 2>/dev/null); printf "%s" "$payload" | "$0" review "system.error.${name:-unknown}"', "__SIGNALBOX_ROOT__/bin/sse-forward.sh"]
-subscribes = ["system.error.*"]
+args = ["-s", "run.completed", "-s", "run.halted", "-s", "control.unknown-event",
+        "-s", "review.invalid-verdict", "-s", "shard.invalid-verdict",
+        "-s", "gate.invalid-verdict", "--", "jq", "-c", "."]
+subscribes = ["run.completed", "run.halted", "control.unknown-event",
+              "review.invalid-verdict", "shard.invalid-verdict",
+              "gate.invalid-verdict"]

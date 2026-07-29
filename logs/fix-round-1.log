@@ -1,0 +1,1 @@
+Fixed both issues in `src/lib.rs`: segments now split with `splitn(2, '=')` so values keep any embedded `=` characters, and empty or malformed segments (empty input, consecutive/trailing `;`, no `=`) are filtered out via `filter`/`filter_map` instead of panicking on `unwrap`. Doc comment updated to describe the new skip behavior.

@@ -1,6 +1,5 @@
-/logs/
-/results/
-/state/
-demo/target/
-/rendered/
-/runs/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+uv.lock

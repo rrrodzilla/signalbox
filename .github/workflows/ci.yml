@@ -1,0 +1,38 @@
+# The promote path is push-driven: a run waits for GitHub to deliver
+# `check_suite.completed`, and GitHub creates a check suite only if a workflow
+# exists. With no workflow this repo reported `total_count: 0` check suites for
+# every commit, so a gate-cleared run sat at `pr.opened` forever with nothing to
+# subscribe to. This file is what makes the notification exist.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A superseded run tells us nothing, and a stale conclusion arriving late would
+# be routed as though it described the current head.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      # The same command signalbox detects and runs for itself, so a green run
+      # here means the suite the assessor gates on is the suite that ran.
+      - name: Run tests
+        run: uv run pytest -q

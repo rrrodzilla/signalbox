@@ -48,19 +48,23 @@ run.requested ─> workspace.ready ─> issue.fetched ─> codebase.surveyed
                                    │                                        │
                                    └──────────> branch.pushed <── approval.granted
                                                      │
-                                                 pr.opened ─> checks.reported
-                                                     │               │
-                                          ┌──────────┴──────┐   checks.failed
-                                     pr.merged        notes.planned    │
-                                                           │   shard.changes-requested
-                                                     note.written              │
-                                                           │            (fix.opened)
-                                                     notes.synced
-                                                           │
-                                                     run.completed
+                                                 pr.opened
+                                                     │
+                        (GitHub check_suite) ─> checks.observed ─> checks.reported
+                                                     │                   │
+                                          ┌──────────┴──────┐       checks.failed
+                                     pr.merged        notes.planned      │
+                                          │                │      checks.detailed
+                                          │          note.written        │
+                                          │                │   shard.changes-requested
+                                          │          notes.synced        │
+                                          │                │      (fix.opened)
+                                          └────────> run.completed
 ```
 
 Four feedback edges close loops nobody sequenced: a rejected plan re-enters the planner, a review that requests changes re-enters implementation, a merge conflict reopens only the shards whose declared files collide, and a red CI run becomes review findings in the vocabulary the fix loop already speaks.
+
+The promote path waits on a push, not a poll. GitHub delivers `check_suite.completed` to a loopback `http-source` and routers turn it into the vocabulary; `gh webhook forward` opens the tunnel, since GitHub cannot reach `127.0.0.1`. What that buys is a conclusion in about a second instead of up to a poll interval, and no `gh` call per tick — but it does not remove the reaper. A push source makes arrivals observable and silence invisible, so a missing workflow, a revoked hook, and a dropped delivery are indistinguishable from "still building": all three produce zero events. `reap-prs` is what turns that into `checks.silent`.
 
 ## Principles the wiring enforces
 
@@ -68,7 +72,7 @@ Four feedback edges close loops nobody sequenced: a rejected plan re-enters the 
 - **A model announces; handlers decide.** Every judging node prints one JSON verdict and stops. Deterministic routers turn that one event type into the domain vocabulary, and an unrecognized verdict becomes `*.invalid-verdict` rather than a silent drop. Swapping a model for a rule later disturbs nothing around it.
 - **Identity is never typed by a model.** Run, stage, shard, declared scope, and round counters are stamped from the inbound envelope, and an acting agent reads them from its environment. A model cannot reassign a shard, widen its scope, or reset a round counter by saying so.
 - **Scope is enforced at write time.** One predicate on `shard.file-written` publishes `scope.violated` for a path no shard declared, which closes the stage before review ever sees it.
-- **Silence has a name.** An agent that crashes or refuses produces no event at all; a pending marker plus an interval reaper turns that absence into `shard.silent`, and a sink clears the marker the moment the agent does speak.
+- **Silence has a name.** An agent that crashes or refuses produces no event at all, and neither does a CI system that was never configured; a pending marker plus an interval reaper turns each absence into `shard.silent` or `checks.silent`, and the marker is cleared the moment the thing does speak. This is the one invariant that does not get easier when a path moves from polling to push — it gets harder, and matters more.
 - **No sink does work with consequences.** Sinks cannot publish, so anything whose result matters is a handler. The previous implementation put work in sinks and had to route every consequence out of band through the filesystem, which is where its artifact-polling, phase runner, readiness ledger, port leasing, and vault lock all came from. Removing that one assumption removed all five.
 
 ## Models per node
@@ -96,20 +100,24 @@ Per-role overrides: `SIGNALBOX_MODEL_REVIEW` and friends for one role, `SIGNALBO
 
 ## Quick start
 
-Prerequisites: the Emergent engine and its primitives, `claude`, `codex`, `gh` (authenticated), `git` with a signing key, `jq`, `python3`, and `uv`. `bin/harness.sh preflight` checks all of it and names what is missing.
+Prerequisites: the Emergent engine and its primitives, `claude`, `codex`, `gh` (authenticated, with the `cli/gh-webhook` extension), `git` with a signing key, `jq`, `python3`, and `uv`. `bin/harness.sh preflight` checks all of it and names what is missing.
 
 ```bash
 emergent marketplace install exec-source exec-handler exec-sink \
     stream-runner http-source sse-sink topology-viewer
+gh extension install cli/gh-webhook
 
 ./bin/harness.sh install      # editable CLI install, then the invariant suite
 ./bin/harness.sh up           # engine + dashboard
+./bin/harness.sh forward owner/name   # tunnel that repo's check suites in
 ./bin/harness.sh status       # what is listening, and which runs have worktrees
 
 ./bin/harness.sh launch 42 --repo owner/name --repo-path ~/code/my-repo
 ```
 
 Watch it at **http://127.0.0.1:8103** (the run board) and **http://127.0.0.1:8102** (the live topology). A run's whole trail is in the event store; `bin/harness.sh down` sends SIGTERM so that trail flushes.
+
+The forwarder is the operator's job rather than the topology's, for two reasons: a primitive that opened a tunnel would be a primitive reaching outside the topology, and the engine cannot detect its own missing deliveries. Without it a run reaches `pr.opened` and waits for the reaper. `status` says plainly whether it is up, and the target repo needs a CI workflow at all — with none configured, GitHub creates no check suite and there is nothing to forward.
 
 The install is editable on purpose. A built wheel is the one reliable way to end up running a stale copy of the code and skills while the source in front of you reads correct, and that failure is invisible — a stale skill reports a verdict, just the wrong one. `signalbox paths` prints where the running CLI actually resolves its package, skills, and state.
 
@@ -119,7 +127,7 @@ The install is editable on purpose. A built wheel is the one reliable way to end
 ./bin/harness.sh dogfood 57      # launches issue 57 against this checkout as run sb-57
 ```
 
-Two things about the target being this repository. A run branches from the checkout's **current HEAD**, read at `prepare-workspace` time, so check out the branch you want as the base before launching. And the CLI is installed editable, so a run in flight is using the working tree it is also reading: land your edits and restart the engine (`./bin/harness.sh restart`) rather than editing underneath a live run.
+Three things about the target being this repository. A run branches from the checkout's **current HEAD**, read at `prepare-workspace` time, so check out the branch you want as the base before launching — and that branch has to exist on the remote, because the PR opens against it by name. The CLI is installed editable, so a run in flight is using the working tree it is also reading: land your edits and restart the engine (`./bin/harness.sh restart`) rather than editing underneath a live run. And `dogfood` starts the webhook forwarder itself from the `origin` remote, which `launch` does not.
 
 ## Run the demo
 

@@ -33,6 +33,24 @@ path = "~/.local/share/emergent/primitives/bin/http-source"
 args = ["--host", "127.0.0.1", "--port", "8100", "--path", "/emit"]
 publishes = ["http.request"]
 
+# GitHub's own notification, rather than us asking. `gh webhook forward` tunnels
+# deliveries here, so a concluded check suite arrives as an event within a second
+# instead of being discovered by the next poll.
+#
+# This replaced a 45s interval poller that called `gh pr list` on every tick and
+# recomputed a conclusion GitHub had already computed. The poller was also where
+# issue #56 lived: `--head "signalbox/"` matches a branch name exactly, never a
+# prefix, so it silently found nothing.
+#
+# Both http-sources publish `http.request` — the primitive's topic is fixed — so
+# every router below distinguishes them by shape. Control POSTs carry `.body.event`
+# and GitHub deliveries carry an `x-github-event` header.
+[[sources]]
+name = "github"
+path = "~/.local/share/emergent/primitives/bin/http-source"
+args = ["--host", "127.0.0.1", "--port", "8104", "--path", "/github"]
+publishes = ["http.request"]
+
 # Silence has to have a name. An agent that crashes, refuses, or emits nothing
 # produces no event at all; this turns that absence into one.
 [[sources]]
@@ -42,11 +60,16 @@ args = ["--interval", "60000", "--shell", "bash", "--command",
   "signalbox reap --kind shard --stale-minutes 20"]
 publishes = ["exec.output", "exec.exit"]
 
+# The push path's blind spot. A webhook makes arrivals observable and silence
+# invisible: a missing workflow, a revoked hook, and a dropped delivery are all
+# indistinguishable from "still building", because in every case the number of
+# events is zero. Moving to push does not remove this reaper, it is what makes it
+# necessary. Forty minutes is a deliberate multiple of the 10-minute CI timeout.
 [[sources]]
-name = "poll-checks"
+name = "reap-prs"
 path = "~/.local/share/emergent/primitives/bin/exec-source"
-args = ["--interval", "45000", "--shell", "bash", "--command",
-  "signalbox poll-checks"]
+args = ["--interval", "300000", "--shell", "bash", "--command",
+  "signalbox reap --kind pr --stale-minutes 40"]
 publishes = ["exec.output", "exec.exit"]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -96,29 +119,80 @@ publishes = ["approval.granted"]
 
 # Anything POSTed that is not recognised vocabulary becomes an event rather
 # than a silent drop. Untrusted input, treated as such.
+#
+# The header guard is load-bearing. GitHub deliveries share this topic and carry
+# no `.body.event`, so without it every webhook would also be reported here as an
+# unknown emission — a real event, wrongly, on every CI conclusion.
 [[handlers]]
 name = "route-unknown-emission"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "http.request", "--publish-as", "control.unknown-event", "--",
-        "jq", "-c", 'select((.body.event // "") | IN("run.requested","shard.file-written","shard.check-ran","shard.submitted","approval.granted") | not) | .body']
+        "jq", "-c", 'select(.headers["x-github-event"] == null) | select((.body.event // "") | IN("run.requested","shard.file-written","shard.check-ran","shard.submitted","approval.granted") | not) | .body']
 subscribes = ["http.request"]
 publishes = ["control.unknown-event"]
 
+# GitHub's push notification for a concluded check suite, turned into the
+# vocabulary the promote path already speaks.
+#
+# Two conclusions are dropped rather than routed. `cancelled` and `stale` mean
+# superseded, which the workflow's own cancel-in-progress produces on every
+# amended push — routing them as failures would open a spurious fix loop against
+# work that was never judged. A suite with no associated PR is dropped for the
+# same reason: there is nothing to merge, so it is not a promote signal. Both
+# absences are covered by the pr reaper rather than assumed benign.
+[[handlers]]
+name = "route-check-suite"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "http.request", "--publish-as", "checks.observed", "--",
+        "jq", "-c", '''select(.headers["x-github-event"] == "check_suite")
+        | select(.body.action == "completed")
+        | .body.repository.full_name as $repo
+        | .body.check_suite
+        | select((.head_branch // "") | startswith("signalbox/run-"))
+        | select(((.conclusion // "") | ascii_upcase) | IN("CANCELLED", "STALE") | not)
+        | select((.pull_requests | length) > 0)
+        | {pr: .pull_requests[0].number,
+           run_id: (.head_branch | ltrimstr("signalbox/run-")),
+           repo: $repo,
+           sha: .head_sha,
+           check_runs_url: .check_runs_url,
+           conclusion: (if ((.conclusion // "") | ascii_upcase)
+                           | IN("SUCCESS", "NEUTRAL", "SKIPPED")
+                        then "success" else "failure" end)}''']
+subscribes = ["http.request"]
+publishes = ["checks.observed"]
+
+# A webhook knows about a commit, not about a run. It cannot carry `issue` or
+# `base_sha`, which the notes stage downstream of pr.merged needs, so identity is
+# restored from the marker `pr.opened` wrote rather than reconstructed. Clearing
+# that marker is the same act: a suite that concluded is not a silent one.
+[[handlers]]
+name = "rehydrate-pr"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "checks.observed", "--publish-as", "checks.reported",
+        "-e", "checks.unknown-pr", "-t", "15000", "--",
+        "signalbox", "rehydrate", "--kind", "pr"]
+subscribes = ["checks.observed"]
+publishes = ["checks.reported", "checks.unknown-pr"]
+
+# Two reapers now share `exec.output`, so each selector names its own kind. A
+# bare test("reap") matched both and would have published a stalled PR as
+# `shard.silent`.
 [[handlers]]
 name = "raise-reaped"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "exec.output", "--publish-as", "shard.silent", "--",
-        "jq", "-c", 'select(.command | test("reap")) | .stdout | select(length > 0) | fromjson']
+        "jq", "-c", 'select(.command | test("reap --kind shard")) | .stdout | select(length > 0) | fromjson']
 subscribes = ["exec.output"]
 publishes = ["shard.silent"]
 
 [[handlers]]
-name = "raise-checks"
+name = "raise-pr-reaped"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "exec.output", "--publish-as", "checks.reported", "--",
-        "jq", "-c", 'select(.command | test("poll-checks")) | .stdout | select(length > 0) | fromjson']
+args = ["-s", "exec.output", "--publish-as", "checks.silent", "--",
+        "jq", "-c", 'select(.command | test("reap --kind pr")) | .stdout | select(length > 0) | fromjson']
 subscribes = ["exec.output"]
-publishes = ["checks.reported"]
+publishes = ["checks.silent"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PLAN — judgment produces one type; routers turn it into vocabulary.
@@ -246,6 +320,16 @@ subscribes = ["fix.opened"]
 # so its marker has to go; without this the reaper reported every successful
 # shard as `shard.silent` once it aged past the threshold. A scope violation
 # terminates the shard too, and terminates it without a submission.
+# The wait for CI, made observable. Written when the PR opens and read back by
+# `rehydrate` when a suite concludes; if no suite ever concludes, `reap-prs` finds
+# this and publishes `checks.silent` instead of the run hanging with no event.
+[[sinks]]
+name = "mark-pr-pending"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "pr.opened", "-t", "10000", "--",
+        "signalbox", "mark-pending", "--kind", "pr"]
+subscribes = ["pr.opened"]
+
 [[sinks]]
 name = "clear-pending"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
@@ -502,14 +586,32 @@ args = ["-s", "checks.reported", "--publish-as", "checks.failed", "--",
 subscribes = ["checks.reported"]
 publishes = ["checks.failed"]
 
+# A check_suite payload carries one conclusion and no per-check detail, so the
+# names of what broke have to be fetched. Its own act, on the failure path only:
+# one irreducible I/O call, independently retryable, and never reached by a run
+# whose checks passed.
+[[handlers]]
+name = "detail-failed-checks"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "checks.failed", "--publish-as", "checks.detailed",
+        "-e", "checks.detail-failed", "-t", "60000", "--",
+        "signalbox", "check-details"]
+subscribes = ["checks.failed"]
+publishes = ["checks.detailed", "checks.detail-failed"]
+
 # FEEDBACK EDGE 4. Nobody wrote "handle CI failure". A red build becomes
 # findings entering the review vocabulary, and the fix loop already exists.
+#
+# Subscribed to both the detailed event and the failure to detail it: a fix loop
+# that cannot name the broken check is worse than one with no names, and losing
+# the whole feedback edge to a failed `gh api` call would be worse still.
 [[handlers]]
 name = "map-ci-to-findings"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "checks.failed", "--publish-as", "shard.changes-requested",
+args = ["-s", "checks.detailed", "-s", "checks.detail-failed",
+        "--publish-as", "shard.changes-requested",
         "-t", "60000", "--", "signalbox", "map-ci-findings"]
-subscribes = ["checks.failed"]
+subscribes = ["checks.detailed", "checks.detail-failed"]
 publishes = ["shard.changes-requested"]
 
 [[handlers]]
@@ -567,7 +669,7 @@ subscribes = ["notes.synced"]
 publishes = ["run.completed"]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EGRESS — genuine egress only. Four sinks replace seventy-six.
+# EGRESS — genuine egress only, where seventy-six sinks used to do work.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # sse-sink does NOT deliver on wildcard subscriptions — it accepts the client and
@@ -581,18 +683,19 @@ publishes = ["run.completed"]
 # as broken exactly when it should read as quiet.
 #
 # `exec.exit` is the load-bearing one. An interval source publishes `exec.output`
-# only when its command actually wrote to stdout, and both of ours are silent by
-# design when there is nothing to report: the reaper finds no stale marker, and
-# poll-checks finds no PR. `exec.exit` fires on every tick regardless, so it is
-# what keeps the stream open. The page treats both as proof of life and renders
-# neither.
+# only when its command actually wrote to stdout, and both reapers are silent by
+# design when there is nothing to report — no stale shard, no stalled PR.
+# `exec.exit` fires on every tick regardless, so it is what keeps the stream open.
+# The page treats both as proof of life and renders neither.
 [[sinks]]
 name = "dashboard"
 path = "~/.local/share/emergent/primitives/bin/sse-sink"
 args = ["--port", "8101"]
 subscribes = ["exec.output", "exec.exit",
               "approval.granted", "approval.requested", "assess.failed", "branch.push-failed",
-              "branch.pushed", "checks.failed", "checks.passed", "checks.reported",
+              "branch.pushed", "checks.detail-failed", "checks.detailed",
+              "checks.failed", "checks.observed", "checks.passed", "checks.reported",
+              "checks.silent", "checks.unknown-pr",
               "codebase.surveyed", "control.unknown-event", "fix.opened", "gate.assessed",
               "gate.blocked", "gate.cleared", "gate.invalid-verdict", "issue.fetch-failed",
               "issue.fetched", "merge.attempted", "note.drafted", "note.write-failed",
@@ -617,21 +720,25 @@ path = "~/.local/share/emergent/primitives/bin/topology-viewer"
 args = ["--port", "8102"]
 subscribes = ["system.started.*", "system.stopped.*", "system.error.*"]
 
+# `checks.silent` is here because a run that reached `pr.opened` and never heard
+# back is finished making progress on its own. It is the terminal event for the
+# stall that used to be nothing at all.
 [[sinks]]
 name = "notify"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "approval.requested", "-s", "shard.escalated", "-s", "run.halted",
-        "-s", "scope.violated", "-s", "gate.blocked", "-t", "30000", "--",
-        "signalbox", "notify"]
+        "-s", "scope.violated", "-s", "gate.blocked", "-s", "checks.silent",
+        "-t", "30000", "--", "signalbox", "notify"]
 subscribes = ["approval.requested", "shard.escalated", "run.halted",
-              "scope.violated", "gate.blocked"]
+              "scope.violated", "gate.blocked", "checks.silent"]
 
 [[sinks]]
 name = "trace"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "run.completed", "-s", "run.halted", "-s", "control.unknown-event",
         "-s", "review.invalid-verdict", "-s", "shard.invalid-verdict",
-        "-s", "gate.invalid-verdict", "--", "jq", "-c", "."]
+        "-s", "gate.invalid-verdict", "-s", "checks.unknown-pr",
+        "-s", "checks.silent", "--", "jq", "-c", "."]
 subscribes = ["run.completed", "run.halted", "control.unknown-event",
               "review.invalid-verdict", "shard.invalid-verdict",
-              "gate.invalid-verdict"]
+              "gate.invalid-verdict", "checks.unknown-pr", "checks.silent"]

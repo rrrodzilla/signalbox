@@ -74,6 +74,9 @@ def environment(payload: dict, base: dict[str, str]) -> dict[str, str]:
             "SIGNALBOX_REPO": str(payload.get("repo", "")),
             "SIGNALBOX_ISSUE": str(payload.get("issue", "")),
             "SIGNALBOX_BASE_SHA": str(payload.get("base_sha", "")),
+            # The promote path opens the PR against this. Dropped here, it is gone
+            # by `shard.submitted` and `open-pr` has nothing to target.
+            "SIGNALBOX_BASE_BRANCH": str(payload.get("base_branch", "")),
             "SIGNALBOX_STAGE_ID": str(payload.get("stage_id", "")),
             "SIGNALBOX_SHARD_ID": str(payload.get("shard_id", "")),
             "SIGNALBOX_SHARD_COUNT": str(payload.get("shard_count", "")),

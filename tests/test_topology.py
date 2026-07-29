@@ -195,12 +195,26 @@ def test_run_built_carries_identity_rather_than_a_bare_count():
     assert "--key run_id" in args and "--count-field stage_count" in args
 
 
+def reaped_kinds() -> set[str]:
+    """Every `--kind` an interval reaper sweeps."""
+    kinds = set()
+    for source in SOURCES:
+        args = " ".join(source.get("args", []))
+        if "signalbox reap" not in args:
+            continue
+        kinds.add(args.split("--kind")[1].split()[0])
+    return kinds
+
+
 def test_every_pending_marker_has_something_that_clears_it():
     """The reaper turns silence into an event; something must end the silence.
 
     Without a clearer, every marker eventually ages past the stale threshold and
     a successful shard is reported as `shard.silent`. Both of demo-3's shards
     were reported silent nineteen minutes after being merged.
+
+    Generalised over kinds when the pr reaper arrived: the shard-only version of
+    this test would have passed a pr marker that nothing ever cleared.
     """
     clearer = named(SINKS, "clear-pending")
     assert "shard.submitted" in clearer["subscribes"], (
@@ -211,6 +225,79 @@ def test_every_pending_marker_has_something_that_clears_it():
     )
     dispatchers = [s for s in SINKS if "dispatch" in " ".join(s.get("args", []))]
     assert dispatchers, "no dispatcher writes markers, so this invariant is stale"
+
+    # Every kind swept must be both written and un-written by something.
+    for kind in reaped_kinds():
+        writers = [
+            p for p in HANDLERS + SINKS
+            if f"mark-pending --kind {kind}" in " ".join(p.get("args", []))
+            or (kind == "shard" and "dispatch" in " ".join(p.get("args", [])))
+        ]
+        assert writers, f"nothing writes a {kind} marker, so the reaper sweeps nothing"
+        erasers = [
+            p for p in HANDLERS + SINKS
+            if f"clear-pending --kind {kind}" in " ".join(p.get("args", []))
+            or f"rehydrate --kind {kind}" in " ".join(p.get("args", []))
+        ]
+        assert erasers, f"nothing clears a {kind} marker, so success reads as silence"
+
+
+def test_each_reaper_raises_only_its_own_kind():
+    """Both reapers publish through `exec.output`, so the selectors must not
+    overlap. A bare test("reap") matched both and would have announced a stalled
+    PR as `shard.silent`."""
+    raisers = {
+        h["name"]: h["args"][-1]
+        for h in HANDLERS
+        if h.get("subscribes") == ["exec.output"] and "reap" in h["args"][-1]
+    }
+    assert len(raisers) == len(reaped_kinds()), "a reaped kind has no raiser"
+    for kind in reaped_kinds():
+        matching = [n for n, prog in raisers.items() if f"--kind {kind}" in prog]
+        assert len(matching) == 1, f"{kind} is raised by {matching}, expected exactly one"
+
+
+def test_the_promote_path_waits_on_a_push_rather_than_a_poll():
+    """`checks.reported` must originate from GitHub telling us, not us asking.
+
+    The poller it replaced burned a `gh pr list` every 45s to recompute a
+    conclusion GitHub had already computed, and hid issue #56 while doing it.
+    """
+    for source in SOURCES:
+        assert "poll-checks" not in " ".join(source.get("args", [])), (
+            "the promote path is polling again"
+        )
+    assert named(SOURCES, "github")["publishes"] == ["http.request"]
+    router = named(HANDLERS, "route-check-suite")
+    assert router["subscribes"] == ["http.request"]
+    # The webhook cannot carry issue or base_sha, so identity is restored, and
+    # `checks.reported` is what carries it onward.
+    rehydrator = named(HANDLERS, "rehydrate-pr")
+    assert rehydrator["subscribes"] == router["publishes"]
+    assert "checks.reported" in rehydrator["publishes"]
+
+
+def test_both_http_sources_are_distinguishable_by_shape():
+    """http-source publishes a fixed topic, so control POSTs and GitHub deliveries
+    arrive as the same event type and every router must tell them apart itself."""
+    ingress = [s for s in SOURCES if "http-source" in s["path"]]
+    assert len(ingress) == 2, "this invariant assumes exactly two ingress sources"
+    assert all(s["publishes"] == ["http.request"] for s in ingress)
+
+    ports = {s["args"][s["args"].index("--port") + 1] for s in ingress}
+    assert len(ports) == 2, "two http-sources cannot share a port"
+    for source in ingress:
+        assert source["args"][source["args"].index("--host") + 1] == "127.0.0.1", (
+            "an ingress actuator must not be reachable off-loopback"
+        )
+
+    for handler in HANDLERS:
+        if handler.get("subscribes") != ["http.request"]:
+            continue
+        prog = handler["args"][-1]
+        assert "x-github-event" in prog or ".body.event" in prog, (
+            f"{handler['name']} reads http.request without distinguishing its origin"
+        )
 
 
 def test_the_join_count_a_run_terminates_on_is_an_identity_key():
@@ -247,6 +334,104 @@ def test_the_dashboard_stream_has_something_to_carry_while_idle():
         "the dashboard subscribes to nothing that flows while idle; its stream "
         f"will never open. Interval traffic is {sorted(interval_topics)}"
     )
+
+
+# ── routing, executed rather than inspected ──────────────────────────────────
+#
+# Every test above reads the config. These run the jq, because a selector that
+# matches nothing parses perfectly and fails silently — which is precisely how a
+# gate-cleared run sat at `pr.opened` with no event to wait for.
+
+
+def route(handler_name: str, payload: dict) -> dict | None:
+    """Run a router's jq against a payload. None when it does not match."""
+    import json
+    import shutil
+    import subprocess
+
+    if shutil.which("jq") is None:
+        pytest.skip("jq is not installed")
+    prog = named(HANDLERS, handler_name)["args"][-1]
+    done = subprocess.run(
+        ["jq", "-c", prog], input=json.dumps(payload),
+        capture_output=True, text=True, check=False,
+    )
+    assert done.returncode == 0, f"{handler_name} jq failed: {done.stderr}"
+    out = done.stdout.strip()
+    return json.loads(out) if out else None
+
+
+def delivery(conclusion: str, branch: str = "signalbox/run-sb-56",
+             prs: tuple[int, ...] = (57,), action: str = "completed") -> dict:
+    return {
+        "headers": {"x-github-event": "check_suite"},
+        "body": {
+            "action": action,
+            "repository": {"full_name": "rrrodzilla/signalbox"},
+            "check_suite": {
+                "head_branch": branch,
+                "head_sha": "e0a1742",
+                "conclusion": conclusion,
+                "check_runs_url": "https://api.github.com/x/check-runs",
+                "pull_requests": [{"number": n} for n in prs],
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "conclusion, expected",
+    [("success", "success"), ("neutral", "success"), ("skipped", "success"),
+     ("failure", "failure"), ("timed_out", "failure"), ("action_required", "failure")],
+)
+def test_a_concluded_suite_becomes_a_promote_signal(conclusion, expected):
+    routed = route("route-check-suite", delivery(conclusion))
+    assert routed is not None, f"{conclusion} was dropped"
+    assert routed["conclusion"] == expected
+    assert routed["pr"] == 57
+    assert routed["run_id"] == "sb-56", "run identity comes from the branch name"
+    assert routed["repo"] == "rrrodzilla/signalbox"
+
+
+@pytest.mark.parametrize("conclusion", ["cancelled", "stale"])
+def test_a_superseded_suite_is_dropped_rather_than_called_a_failure(conclusion):
+    """cancel-in-progress produces one of these on every amended push.
+
+    Routing them as failures would open a fix loop against work that was never
+    judged, and the fix loop writes commits — so this is not a cosmetic drop.
+    """
+    assert route("route-check-suite", delivery(conclusion)) is None
+
+
+@pytest.mark.parametrize(
+    "payload, why",
+    [
+        (delivery("success", branch="feature/unrelated"), "not a run branch"),
+        (delivery("success", prs=()), "no PR to merge"),
+        (delivery("success", action="requested"), "not concluded"),
+        ({"headers": {"x-github-event": "push"}, "body": {"ref": "main"}}, "not a suite"),
+        ({"headers": {}, "body": {"event": "shard.submitted"}}, "a control POST"),
+    ],
+)
+def test_only_a_concluded_run_suite_is_routed(payload, why):
+    assert route("route-check-suite", payload) is None, f"routed something that is {why}"
+
+
+def test_a_github_delivery_is_not_reported_as_an_unknown_emission():
+    """The catch-all fires on anything without known vocabulary in `.body.event`.
+
+    GitHub deliveries share the topic and have no `.body.event` at all, so without
+    a header guard every CI conclusion would also publish `control.unknown-event`
+    — a real, wrong, notified event on every green build.
+    """
+    assert route("route-unknown-emission", delivery("success")) is None
+    assert route("route-unknown-emission",
+                 {"headers": {"x-github-event": "push"}, "body": {}}) is None
+
+    # Still reports genuine unknown vocabulary from the control port.
+    unknown = route("route-unknown-emission",
+                    {"headers": {}, "body": {"event": "shard.vibes", "run_id": "x"}})
+    assert unknown == {"event": "shard.vibes", "run_id": "x"}
 
 
 def test_the_page_treats_heartbeat_traffic_as_proof_of_life_not_content():

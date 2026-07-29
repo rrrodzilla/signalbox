@@ -28,6 +28,7 @@ _ENV_KEYS = {
     "repo": "SIGNALBOX_REPO",
     "issue": "SIGNALBOX_ISSUE",
     "base_sha": "SIGNALBOX_BASE_SHA",
+    "base_branch": "SIGNALBOX_BASE_BRANCH",
     "stage_id": "SIGNALBOX_STAGE_ID",
     "shard_id": "SIGNALBOX_SHARD_ID",
     "shard_count": "SIGNALBOX_SHARD_COUNT",

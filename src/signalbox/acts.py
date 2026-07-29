@@ -64,16 +64,29 @@ def prepare_workspace(payload: dict) -> dict:
     branch = branch_for(payload)
     source = payload.get("repo_path") or os.getcwd()
 
-    code, base_sha, err = _run(
-        ["git", "rev-parse", str(payload.get("base_branch") or "HEAD")], cwd=source
-    )
+    # The base branch is resolved by NAME here, not left for `gh pr create` to
+    # default. gh defaults to the repository's default branch, which is only the
+    # right answer when the run was launched from it: run sb-56 branched from
+    # `redesign/event-first`, was gated on a two-file diff, and opened a PR
+    # against `main` containing 132 files. The gate judged one thing and the PR
+    # presented another, which is the worst available outcome now that a green
+    # suite merges without a human.
+    base_branch = payload.get("base_branch")
+    if not base_branch:
+        code, base_branch, err = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=source)
+        if code != 0 or base_branch in {"", "HEAD"}:
+            return {**payload, "ok": False,
+                    "error": err or "cannot name the base branch (detached HEAD?)"}
+
+    code, base_sha, err = _run(["git", "rev-parse", str(base_branch)], cwd=source)
     if code != 0:
         return {**payload, "ok": False, "error": err or "cannot resolve base"}
 
+    resolved = {"base_branch": base_branch, "base_sha": base_sha}
+
     if root.exists():
         install_skills(root)
-        return {**payload, "ok": True, "worktree": str(root), "branch": branch,
-                "base_sha": base_sha}
+        return {**payload, **resolved, "ok": True, "worktree": str(root), "branch": branch}
 
     root.parent.mkdir(parents=True, exist_ok=True)
     code, _, err = _run(
@@ -82,8 +95,8 @@ def prepare_workspace(payload: dict) -> dict:
     if code != 0:
         return {**payload, "ok": False, "error": err}
     skills = install_skills(root)
-    return {**payload, "ok": True, "worktree": str(root), "branch": branch,
-            "base_sha": base_sha, "skills": skills}
+    return {**payload, **resolved, "ok": True, "worktree": str(root), "branch": branch,
+            "skills": skills}
 
 
 # ── issue ────────────────────────────────────────────────────────────────────
@@ -212,15 +225,26 @@ def push_branch(payload: dict) -> dict:
 
 
 def open_pr(payload: dict) -> dict:
+    """Open the PR against the base the run was actually pinned to.
+
+    An absent base is a failure rather than a default. Letting `gh` choose meant
+    letting it choose the repository default branch, so a run launched from any
+    other branch opened a PR carrying every commit between the two — reviewed,
+    gated, and sized as if it were the shard's diff alone.
+    """
+    base_branch = payload.get("base_branch")
+    if not base_branch:
+        return {**payload, "ok": False,
+                "error": "no base_branch on the run; refusing to let gh pick one"}
+
     root = str(worktree_for(payload))
     cmd = [
         "gh", "pr", "create",
+        "--base", str(base_branch),
         "--head", branch_for(payload),
         "--title", f"{payload.get('title') or 'signalbox'} (#{payload.get('issue')})",
         "--body", f"Closes #{payload.get('issue')}\n\nOpened by signalbox run `{payload.get('run_id')}`.",
     ]
-    if payload.get("base_branch"):
-        cmd += ["--base", str(payload["base_branch"])]
     code, out, err = _run(cmd, cwd=root, timeout=60)
     if code != 0:
         return {**payload, "ok": False, "error": err}
@@ -238,32 +262,48 @@ def merge_pr(payload: dict) -> dict:
     return {**payload, "ok": True}
 
 
-def poll_checks() -> str:
-    """One line of JSON per PR whose checks have concluded, for the interval source."""
-    code, out, _ = _run(
-        ["gh", "pr", "list", "--head", "signalbox/", "--json", "number,headRefName,statusCheckRollup"],
-        timeout=45,
-    )
+# Conclusions GitHub reports that do not mean "this broke". Shared by the suite
+# router in the topology and the per-check detail fetch below, so the two can
+# never disagree about what counts as green.
+PASSING_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
+
+
+def failed_check_names(records: list[dict]) -> list[str]:
+    """Which check runs did not pass, from a check-runs listing.
+
+    Pure, and separated from the fetch on purpose: the judgment worth testing is
+    which conclusions count as failure, and that should not need a network.
+    """
+    return [
+        str(run.get("name") or "unnamed")
+        for run in records
+        if str(run.get("conclusion") or "").upper() not in PASSING_CONCLUSIONS
+    ]
+
+
+def check_details(payload: dict) -> dict:
+    """Name the checks behind a failed suite, so CI findings say what broke.
+
+    A `check_suite` webhook carries one conclusion and no per-check detail, so the
+    names have to be fetched. This is the only I/O on the failure path and the
+    happy path never reaches it. Failure to fetch is data, not an exception: the
+    fix loop still gets its event, with an empty list and a stated reason.
+    """
+    url = payload.get("check_runs_url")
+    if not url:
+        return {**payload, "failed": [], "detail_ok": False,
+                "reason": "the suite carried no check_runs_url"}
+    code, out, err = _run(["gh", "api", str(url)], timeout=45)
     if code != 0 or not out:
-        return ""
-    lines = []
-    for pr in json.loads(out):
-        rollup = pr.get("statusCheckRollup") or []
-        states = {check.get("conclusion") for check in rollup if check.get("conclusion")}
-        if not rollup or None in states:
-            continue
-        conclusion = "success" if states <= {"SUCCESS", "NEUTRAL", "SKIPPED"} else "failure"
-        lines.append(
-            json.dumps(
-                {
-                    "pr": pr.get("number"),
-                    "run_id": pr.get("headRefName", "").removeprefix("signalbox/run-"),
-                    "conclusion": conclusion,
-                    "failed": [c.get("name") for c in rollup if c.get("conclusion") not in {"SUCCESS", "NEUTRAL", "SKIPPED"}],
-                }
-            )
-        )
-    return "\n".join(lines)
+        return {**payload, "failed": [], "detail_ok": False,
+                "reason": err or "gh api returned nothing"}
+    try:
+        body = json.loads(out)
+    except json.JSONDecodeError as exc:
+        return {**payload, "failed": [], "detail_ok": False,
+                "reason": f"unreadable check-runs listing: {exc}"}
+    records = body.get("check_runs") if isinstance(body, dict) else body
+    return {**payload, "failed": failed_check_names(records or []), "detail_ok": True}
 
 
 def map_ci_findings(payload: dict) -> dict:
@@ -305,6 +345,67 @@ def reap(kind: str, stale_minutes: int) -> str:
     return "\n".join(lines)
 
 
+def mark_pending(kind: str, payload: dict) -> Path:
+    """Record that something is now being waited on, so its silence can be named.
+
+    A push source makes arrivals observable and silence invisible. If GitHub never
+    delivers `check_suite.completed` — no workflow on the branch, a revoked hook, a
+    dropped delivery — there is no event to subscribe to and the run waits forever,
+    which is exactly how a gate-cleared run sat at `pr.opened` indefinitely. The
+    marker is the thing a reaper can find later; without it, waiting and hanging
+    are the same observation.
+    """
+    from signalbox.dispatch import pending_path
+
+    marker = pending_path(kind, payload)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps(payload))
+    return marker
+
+
+def rehydrated(stored: dict, observed: dict) -> dict:
+    """Stored identity fills the gaps; observed facts win. Pure.
+
+    Observed wins because the marker describes what we asked for and the event
+    describes what happened — a suite's `sha` is the commit actually tested, which
+    is the truer value even when the marker holds an earlier one.
+    """
+    return {**stored, **observed}
+
+
+class PendingMissing(RuntimeError):
+    """No marker for something we were asked to rehydrate."""
+
+
+def rehydrate(kind: str, payload: dict) -> dict:
+    """Restore run identity from the pending marker, and clear it.
+
+    A webhook knows about a commit, not about a run. GitHub can tell us the head
+    branch and the conclusion, but not the issue number or the base sha the run
+    was pinned to, and the notes stage past pr.merged needs both. They are read
+    back from what `pr.opened` recorded rather than guessed.
+
+    Clearing is the same act deliberately: a check suite that concluded is not a
+    silent one, and a separate clearer is a second thing to forget to wire.
+
+    A missing marker raises rather than returning `ok: false`. Every other act
+    treats a false outcome as data, but this is not an outcome — it means a suite
+    arrived for a signalbox branch this engine is not tracking (a leftover PR from
+    an earlier run, most likely), and there is no run to attribute it to.
+    """
+    from signalbox.dispatch import pending_path
+
+    marker = pending_path(kind, payload)
+    try:
+        stored = json.loads(marker.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PendingMissing(
+            f"no {kind} marker at {marker}: {exc}"
+        ) from exc
+    marker.unlink(missing_ok=True)
+    return rehydrated(stored, payload)
+
+
 def clear_pending(kind: str, payload: dict) -> bool:
     """Forget the marker for a shard that has now been heard from.
 
@@ -333,10 +434,6 @@ def notify(payload: dict) -> None:
 
 
 def main(command: str, argv: list[str]) -> int:
-    if command == "poll-checks":
-        print(poll_checks())
-        return 0
-
     if command == "reap":
         import argparse
 
@@ -380,13 +477,17 @@ def main(command: str, argv: list[str]) -> int:
         print(run_id)
         return 0
 
-    if command == "clear-pending":
+    if command in {"mark-pending", "clear-pending", "rehydrate"}:
         import argparse
 
-        parser = argparse.ArgumentParser(prog="signalbox clear-pending")
+        parser = argparse.ArgumentParser(prog=f"signalbox {command}")
         parser.add_argument("--kind", default="shard")
         args = parser.parse_args(argv)
-        clear_pending(args.kind, _payload())
+        payload = _payload()
+        if command == "rehydrate":
+            return _out(rehydrate(args.kind, payload))
+        act = mark_pending if command == "mark-pending" else clear_pending
+        act(args.kind, payload)
         return 0
 
     payload = _payload()
@@ -403,6 +504,7 @@ def main(command: str, argv: list[str]) -> int:
         "push-branch": push_branch,
         "open-pr": open_pr,
         "merge-pr": merge_pr,
+        "check-details": check_details,
         "map-ci-findings": map_ci_findings,
     }
     return _out(handlers[command](payload))

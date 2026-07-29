@@ -15,6 +15,11 @@ CARRIED_KEYS: tuple[str, ...] = (
     "repo",
     "issue",
     "base_sha",
+    # The base the PR opens against. Carried for the same reason base_sha is: it
+    # is decided at launch and must not be re-derived later. `gh pr create` will
+    # happily default it to the repository's default branch, which turned a
+    # two-file gated diff into a 132-file pull request.
+    "base_branch",
     "attempt",
     "stage_id",
     "shard_id",

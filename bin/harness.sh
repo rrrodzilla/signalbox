@@ -14,11 +14,18 @@ CONFIG="$ROOT/emergent.toml"
 LOG_DIR="${SIGNALBOX_LOG_DIR:-$ROOT/.harness}"
 ENGINE_LOG="$LOG_DIR/engine.log"
 DASHBOARD_LOG="$LOG_DIR/dashboard.log"
+FORWARD_LOG="$LOG_DIR/forward.log"
+FORWARD_PIDFILE="$LOG_DIR/forward.pid"
 
 CONTROL_PORT=8100
 STREAM_PORT=8101
 TOPOLOGY_PORT=8102
 DASHBOARD_PORT=8103
+GITHUB_PORT=8104
+
+# The repo whose deliveries the forwarder tunnels. Only set for a dogfood run or
+# an explicit `forward`; a run against another repo passes its own.
+FORWARD_REPO="${SIGNALBOX_FORWARD_REPO:-}"
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'harness: %s\n' "$*" >&2; exit 1; }
@@ -133,8 +140,16 @@ status() {
   else
     say "engine:    down"
   fi
+  local fpid
+  fpid="$(forward_pid || true)"
+  if [[ -n "$fpid" ]]; then
+    say "forwarder: up (pid $fpid, $(cat "$LOG_DIR/forward.repo" 2>/dev/null || echo unknown))"
+  else
+    say "forwarder: down — a run will reach pr.opened and then wait for a delivery that cannot arrive"
+  fi
   for entry in "control:$CONTROL_PORT" "stream:$STREAM_PORT" \
-               "topology:$TOPOLOGY_PORT" "dashboard:$DASHBOARD_PORT"; do
+               "topology:$TOPOLOGY_PORT" "dashboard:$DASHBOARD_PORT" \
+               "github:$GITHUB_PORT"; do
     local label="${entry%%:*}" port="${entry##*:}"
     if port_held "$port"; then
       printf '  %-10s %s\n' "$label" "http://127.0.0.1:$port"
@@ -146,6 +161,70 @@ status() {
   if [[ -d "$worktrees" ]]; then
     say "worktrees: $(find "$worktrees" -maxdepth 1 -mindepth 1 -type d -printf '%f ' 2>/dev/null)"
   fi
+}
+
+# ── webhook forwarding ───────────────────────────────────────────────────────
+# The promote path waits for GitHub to say a check suite concluded. GitHub cannot
+# reach 127.0.0.1, so `gh webhook forward` opens the tunnel: it creates a
+# temporary repo webhook, holds a websocket, and POSTs each delivery locally.
+#
+# This is a genuine operator concern rather than a topology one. The engine cannot
+# start it — an engine primitive that opened a tunnel would be a primitive that
+# reaches outside the topology — and a dead tunnel is invisible to the engine by
+# construction, which is why `reap-prs` exists to give that silence a name.
+
+forward_pid() {
+  [[ -f "$FORWARD_PIDFILE" ]] || return 1
+  local pid
+  pid="$(cat "$FORWARD_PIDFILE" 2>/dev/null)" || return 1
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && printf '%s' "$pid"
+}
+
+forward_up() {
+  local repo="${1:-$FORWARD_REPO}"
+  [[ -n "$repo" ]] || fail "usage: $0 forward <owner/name>"
+
+  gh extension list 2>/dev/null | grep -q 'cli/gh-webhook' \
+    || fail "the webhook forwarder is not installed
+  install it with: gh extension install cli/gh-webhook"
+
+  if [[ -n "$(forward_pid || true)" ]]; then
+    say "forwarder already running for $(cat "$LOG_DIR/forward.repo" 2>/dev/null || echo unknown) (pid $(forward_pid))"
+    return 0
+  fi
+
+  mkdir -p "$LOG_DIR"
+  printf '%s' "$repo" >"$LOG_DIR/forward.repo"
+  say "forwarding $repo check suites to http://127.0.0.1:$GITHUB_PORT/github"
+  nohup gh webhook forward \
+    --repo="$repo" \
+    --events=check_suite \
+    --url="http://127.0.0.1:$GITHUB_PORT/github" \
+    >"$FORWARD_LOG" 2>&1 &
+  printf '%s' "$!" >"$FORWARD_PIDFILE"
+
+  # It either establishes the websocket or it does not; a forwarder that failed
+  # to authenticate looks exactly like one waiting for a delivery.
+  sleep 3
+  if [[ -z "$(forward_pid || true)" ]]; then
+    say "  forwarder exited immediately:"
+    sed 's/^/    /' "$FORWARD_LOG" >&2
+    fail "webhook forwarding did not start"
+  fi
+  say "  forwarder up (pid $(forward_pid))"
+}
+
+forward_down() {
+  local pid
+  pid="$(forward_pid || true)"
+  if [[ -z "$pid" ]]; then
+    say "no forwarder running"
+  else
+    say "stopping forwarder: $pid"
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 1
+  fi
+  rm -f "$FORWARD_PIDFILE"
 }
 
 # ── launch ───────────────────────────────────────────────────────────────────
@@ -167,6 +246,17 @@ dogfood() {
   local branch
   branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
   say "dogfooding on $ROOT (branch $branch, base $(git -C "$ROOT" rev-parse --short HEAD))"
+
+  # Without the tunnel the run reaches pr.opened and waits 40 minutes for a
+  # reaper. Start it here rather than making the operator remember.
+  local origin
+  origin="$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)"
+  if [[ "$origin" =~ github\.com[:/]([^/]+/[^/.]+) ]]; then
+    forward_up "${BASH_REMATCH[1]}"
+  else
+    say "  no github origin; skipping webhook forwarding"
+  fi
+
   launch "$issue" --repo-path "$ROOT" --run-id "sb-$issue" "$@"
 }
 
@@ -174,11 +264,13 @@ case "${1:-}" in
   preflight) shift; preflight "$@" ;;
   install)   shift; install "$@" ;;
   up)        shift; up "$@" ;;
-  down)      shift; down "$@" ;;
-  restart)   shift; down; up ;;
+  down)      shift; forward_down; down "$@" ;;
+  restart)   shift; forward_down; down; up ;;
   status)    shift; status "$@" ;;
   launch)    shift; launch "$@" ;;
   dogfood)   shift; dogfood "$@" ;;
+  forward)   shift; forward_up "$@" ;;
+  unforward) shift; forward_down ;;
   *)
     cat >&2 <<USAGE
 usage: $0 <command>
@@ -188,9 +280,11 @@ usage: $0 <command>
   up         start the engine and the dashboard viewer
   down       SIGTERM the engine so the event store flushes
   restart    down, then up
-  status     engine, listening ports, and live run worktrees
+  status     engine, forwarder, listening ports, and live run worktrees
   launch     signalbox launch <issue> [...] against a running engine
   dogfood    launch against this checkout as run sb-<issue>
+  forward    tunnel a repo's check_suite deliveries to the github port
+  unforward  stop the tunnel
 USAGE
     exit 64 ;;
 esac

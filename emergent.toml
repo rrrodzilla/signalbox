@@ -547,15 +547,34 @@ publishes = ["run.completed"]
 # EGRESS — genuine egress only. Four sinks replace seventy-six.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# sse-sink does NOT deliver on wildcard subscriptions — it accepts the client and
+# streams nothing, which is a silent blindness rather than an error. Every topic is
+# therefore listed explicitly, and a test asserts this list covers everything the
+# topology publishes.
 [[sinks]]
 name = "dashboard"
 path = "~/.local/share/emergent/primitives/bin/sse-sink"
 args = ["--port", "8101"]
-subscribes = ["run.*", "workspace.*", "issue.*", "plan.*", "codebase.*", "stage.*", "shard.*",
-              "fix.*", "review.*", "scope.*", "merge.*", "suite.*", "gate.*",
-              "approval.*", "branch.*", "pr.*", "checks.*", "note.*", "notes.*",
-              "control.*", "system.started.*", "system.stopped.*", "system.error.*"]
+subscribes = ["approval.granted", "approval.requested", "assess.failed", "branch.push-failed",
+              "branch.pushed", "checks.failed", "checks.passed", "checks.reported",
+              "codebase.surveyed", "control.unknown-event", "fix.opened", "gate.assessed",
+              "gate.blocked", "gate.cleared", "gate.invalid-verdict", "issue.fetch-failed",
+              "issue.fetched", "merge.attempted", "note.drafted", "note.write-failed",
+              "note.written", "notes.plan-failed", "notes.planned", "notes.synced",
+              "plan.accepted", "plan.checked", "plan.draft-failed", "plan.rejected",
+              "plan.submitted", "pr.merge-failed", "pr.merged", "pr.open-failed", "pr.opened",
+              "review.failed", "review.invalid-verdict", "review.submitted", "run.built",
+              "run.completed", "run.halted", "run.requested", "scope.violated",
+              "shard.abandoned", "shard.approved", "shard.built", "shard.changes-requested",
+              "shard.check-ran", "shard.escalated", "shard.file-written",
+              "shard.invalid-verdict", "shard.opened", "shard.silent", "shard.submitted",
+              "stage.closed", "stage.conflicted", "stage.mergeable", "stage.merged",
+              "stage.opened", "suite.errored", "suite.ran", "survey.failed",
+              "workspace.failed", "workspace.ready"]
 
+# Lifecycle belongs here rather than on the dashboard: topology-viewer resolves
+# its own subscriptions internally, which is why wildcards work for it and not
+# for sse-sink.
 [[sinks]]
 name = "topology"
 path = "~/.local/share/emergent/primitives/bin/topology-viewer"

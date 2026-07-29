@@ -117,18 +117,32 @@ def fetch_issue(payload: dict) -> dict:
 # ── suite ────────────────────────────────────────────────────────────────────
 
 
-SUITE_COMMANDS = (
-    ("Cargo.toml", ["cargo", "nextest", "run"]),
-    ("pyproject.toml", ["pytest", "-q"]),
-    ("package.json", ["pnpm", "test"]),
+# One marker, then the runners that can reach that marker's suite, in order of
+# preference. A test runner is usually not a bare binary on PATH — it lives in
+# the project's own environment — so the project's manager has to be tried first.
+SUITE_COMMANDS: tuple[tuple[str, tuple[list[str], ...]], ...] = (
+    ("Cargo.toml", (["cargo", "nextest", "run"], ["cargo", "test"])),
+    ("pyproject.toml", (["uv", "run", "pytest", "-q"], ["pytest", "-q"])),
+    ("package.json", (["pnpm", "test"], ["npm", "test"])),
 )
 
 
 def suite_command(root: Path) -> list[str] | None:
-    """The suite this repo actually has, or None."""
-    for marker, cmd in SUITE_COMMANDS:
-        if (root / marker).exists() and shutil.which(cmd[0]):
-            return cmd
+    """The suite this repo actually has and a runner that can reach it, or None.
+
+    "Is the binary on PATH" is not the same question as "can this repo's suite
+    run". signalbox's own 102 tests live behind `uv run pytest`; bare `pytest` is
+    not installed anywhere, so detection reported "no suite detected" against its
+    own checkout. Nothing errors when that happens — `run_suite` publishes
+    `ran: false`, and the assessor then refuses to clear the gate, correctly, for
+    a run whose suite never ran. A whole repository silently becomes ungateable.
+    """
+    for marker, candidates in SUITE_COMMANDS:
+        if not (root / marker).exists():
+            continue
+        for cmd in candidates:
+            if shutil.which(cmd[0]):
+                return cmd
     return None
 
 

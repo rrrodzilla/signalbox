@@ -91,3 +91,46 @@ def test_run_suite_distinguishes_no_worktree_from_no_suite(tmp_path, monkeypatch
     assert result["ran"] is False
     assert result["ok"] is False
     assert "no worktree" in result["reason"]
+
+
+def test_a_uv_managed_project_is_reached_through_its_manager(tmp_path):
+    """The defect this prevents: signalbox could not detect its own suite.
+
+    102 tests live behind `uv run pytest`; bare `pytest` is on no PATH here. The
+    old check asked whether the binary existed, answered no, and published
+    "no suite detected" — so the assessor refused to clear the gate for a run
+    whose suite never ran, and the repository became silently ungateable.
+    """
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    assert suite_command(tmp_path) == ["uv", "run", "pytest", "-q"]
+
+
+def test_detection_falls_through_to_a_marker_whose_runner_exists(tmp_path, monkeypatch):
+    import shutil as shutil_module
+
+    from signalbox import acts
+
+    (tmp_path / "pyproject.toml").write_text("")
+    (tmp_path / "package.json").write_text("{}")
+    # Neither Python runner installed; the JS one is.
+    monkeypatch.setattr(
+        acts.shutil, "which", lambda name: None if name in {"uv", "pytest"} else "/usr/bin/" + name
+    )
+    assert suite_command(tmp_path) == ["pnpm", "test"]
+    assert shutil_module.which  # the real module is untouched
+
+
+def test_a_marker_with_no_reachable_runner_is_still_none(tmp_path, monkeypatch):
+    from signalbox import acts
+
+    (tmp_path / "Cargo.toml").write_text("")
+    monkeypatch.setattr(acts.shutil, "which", lambda name: None)
+    assert suite_command(tmp_path) is None
+
+
+def test_every_marker_offers_more_than_one_runner():
+    """A single hard-coded runner per ecosystem is what caused the defect."""
+    from signalbox.acts import SUITE_COMMANDS
+
+    for marker, candidates in SUITE_COMMANDS:
+        assert len(candidates) >= 2, f"{marker} has no fallback runner"

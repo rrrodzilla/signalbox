@@ -13,6 +13,8 @@ hand-enumerating keys. sb-60 lost ``base_branch`` that way on 2026-07-29
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 # Keys that are the system's to assign, in the order they read naturally.
 CARRIED_KEYS: tuple[str, ...] = (
     "run_id",
@@ -54,6 +56,21 @@ CARRIED_KEYS: tuple[str, ...] = (
     "pr",
 )
 
+# Carried keys that are nevertheless authored by a particular model role.
+# Keeping this exemption role- and key-specific prevents plan authorship from
+# weakening the protection around declarations, loop counters, or sessions.
+ROLE_PRODUCT_KEYS: dict[str, frozenset[str]] = {
+    "plan": frozenset({"stages"}),
+}
+
+
+class MergeResult(NamedTuple):
+    """A role-aware merge and the two kinds of conflicting model output."""
+
+    payload: dict
+    envelope_overridden: list[str]
+    product_overridden: list[str]
+
 
 def project(source: dict) -> dict:
     """Return the carried identity keys that are present in ``source``."""
@@ -83,4 +100,30 @@ def spoofed_keys(inbound: dict, produced: dict) -> list[str]:
         key
         for key in CARRIED_KEYS
         if key in produced and key in inbound and produced[key] != inbound[key]
+    )
+
+
+def merge(inbound: dict, produced: dict, role: str) -> MergeResult:
+    """Merge a role's product onto an inbound envelope.
+
+    The inbound envelope wins for ordinary carried keys. A role's explicitly
+    declared product keys instead remain model-authored, and a conflicting
+    inbound value is reported separately from an attempted envelope rewrite.
+    """
+    product_keys = ROLE_PRODUCT_KEYS.get(role, frozenset())
+    merged = dict(inbound)
+    merged.update(produced)
+    for key in CARRIED_KEYS:
+        if key in inbound and key not in product_keys:
+            merged[key] = inbound[key]
+
+    conflicts = {
+        key
+        for key in CARRIED_KEYS
+        if key in produced and key in inbound and produced[key] != inbound[key]
+    }
+    return MergeResult(
+        payload=merged,
+        envelope_overridden=sorted(conflicts - product_keys),
+        product_overridden=sorted(conflicts & product_keys),
     )

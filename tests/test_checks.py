@@ -354,6 +354,34 @@ def test_merge_stage_preserves_the_plan_cursor(monkeypatch, tmp_path):
     assert merged["stages"] == stages
 
 
+def test_product_keys_are_a_narrow_exemption_from_carried_identity():
+    """Only the plan drafter may author a carried key.
+
+    Derive this guard from the role map itself rather than enumerating today's
+    agent seams: a new role must not silently acquire permission to rewrite an
+    envelope key, and the non-drafting seams below must remain ordinary carried
+    identity seams as the map grows.
+    """
+    from signalbox.identity import CARRIED_KEYS, ROLE_PRODUCT_KEYS
+
+    carried = set(CARRIED_KEYS)
+    claimed = {
+        role: set(product_keys)
+        for role, product_keys in ROLE_PRODUCT_KEYS.items()
+        if product_keys
+    }
+
+    assert set().union(*claimed.values(), set()) <= carried
+    assert set(claimed) == {"plan"}
+    assert {
+        "declared",
+        "round",
+        "run_id",
+        "shard_id",
+        "session_id",
+    }.isdisjoint(set().union(*claimed.values(), set()))
+
+
 def test_every_carried_key_survives_every_payload_building_seam():
     """CARRIED_KEYS is the contract across payload-building seams.
 

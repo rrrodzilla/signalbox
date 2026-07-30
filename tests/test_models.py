@@ -365,6 +365,85 @@ def test_non_notes_roles_receive_neither_vault_access_nor_a_stamped_env(
     assert "env" not in kwargs
 
 
+def test_plan_verdict_keeps_model_authored_stages_at_agent_seam(monkeypatch):
+    inbound_stages = [{"stage_id": "rejected"}]
+    authored_stages = [{"stage_id": "redraft"}]
+    monkeypatch.setattr(agent, "_workdir", lambda payload: "/tmp/wt")
+    monkeypatch.setattr(
+        agent.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"verdict": "done", "stages": authored_stages}),
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(agent, "post_provenance", lambda *args, **kwargs: None)
+
+    verdict, code = agent.run(
+        "plan", {"run_id": "r1", "stages": inbound_stages}, model="opus"
+    )
+
+    assert code == 0
+    assert verdict["stages"] == authored_stages
+    assert "identity_overridden" not in verdict
+    assert verdict["product_overridden"] == ["stages"]
+
+
+@pytest.mark.parametrize("role", ["implement", "review"])
+def test_non_authoring_verdict_has_stages_restamped_and_reported(monkeypatch, role):
+    inbound_stages = [{"stage_id": "planned"}]
+    monkeypatch.setattr(agent, "_workdir", lambda payload: "/tmp/wt")
+    monkeypatch.setattr(agent, "prompt_for", lambda role, payload: "prompt")
+    monkeypatch.setattr(
+        agent.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {"verdict": "done", "stages": [{"stage_id": "spoofed"}]}
+            ),
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(agent, "post_provenance", lambda *args, **kwargs: None)
+
+    verdict, code = agent.run(
+        role, {"run_id": "r1", "stages": inbound_stages}, model="opus"
+    )
+
+    assert code == 0
+    assert verdict["stages"] == inbound_stages
+    assert verdict["identity_overridden"] == ["stages"]
+    assert "product_overridden" not in verdict
+
+
+def test_agent_seam_does_not_publish_stale_non_carried_envelope_fields(monkeypatch):
+    monkeypatch.setattr(agent, "_workdir", lambda payload: "/tmp/wt")
+    monkeypatch.setattr(
+        agent.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"objections": []}),
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(agent, "post_provenance", lambda *args, **kwargs: None)
+
+    verdict, code = agent.run(
+        "audit",
+        {
+            "run_id": "r1",
+            "verdict": "changes_requested",
+            "violations": ["stale feedback"],
+        },
+    )
+
+    assert code == 0
+    assert verdict == {"run_id": "r1", "objections": []}
+
+
 def test_a_missing_notes_vault_is_a_clean_cli_error(monkeypatch, capsys):
     """Incident #70 configuration errors follow the paths.py caller convention."""
     monkeypatch.setattr(

@@ -427,9 +427,8 @@ let selected = null;
    only on reload. */
 const HORIZON_MS = 60 * 60 * 1000;
 
-function runFor(id) {
-  if (!runs.has(id)) {
-    runs.set(id, {
+function freshRun(id) {
+  return {
       key: id, repo: "unknown", issue: null, title: null,
       blocks: Object.fromEntries(BLOCKS.map((b) => [b, "idle"])),
       counts: Object.fromEntries(BLOCKS.map((b) => [b, 0])),
@@ -445,9 +444,30 @@ function runFor(id) {
       // Every event moves these three, which is what guarantees the card
       // reacts even when no block changes state.
       events: 0, tick: null, pulse: null,
-    });
-  }
+  };
+}
+
+function runFor(id) {
+  if (!runs.has(id)) runs.set(id, freshRun(id));
   return runs.get(id);
+}
+
+/* A relaunch reuses the run id, so without this the new run inherits the old
+   one's card: sb-113 relaunched on 2026-07-30 and drew `attempt 2`, `stage 1 of
+   3`, `1/2 shards` before its planner had said anything, all of it left over
+   from a run that had already been parked. `run.requested` is the only event
+   that means "this run is starting", so it is the only place a card may be
+   thrown away — every other event has to be free to arrive out of order.
+
+   Replay gets the same treatment for free: backfilling a run id with two
+   launches in its history resets at the second one and ends on the live state
+   rather than a merge of both. */
+function restartRun(id, at) {
+  const run = freshRun(id);
+  run.first = at;
+  run.last = at;
+  runs.set(id, run);
+  return run;
 }
 
 function shardState(run, id) {
@@ -551,8 +571,9 @@ function isAttributed(msg) {
 function apply(msg) {
   const t = msg.type;
   const p = msg.payload || {};
-  const run = runFor(p.run_id);
-  run.last = msg.timestamp || Date.now();
+  const at = msg.timestamp || Date.now();
+  const run = t === "run.requested" ? restartRun(p.run_id, at) : runFor(p.run_id);
+  run.last = at;
 
   if (p.repo) run.repo = p.repo;
   else if (p.repo_path) run.repo = String(p.repo_path).split("/").filter(Boolean).pop();

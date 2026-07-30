@@ -221,6 +221,30 @@ def test_failed_invocation_diagnostics_are_visible_on_the_run():
     assert "renderInvocationFailures(run)" in run
 
 
+def test_a_relaunched_run_starts_its_card_over():
+    """A run id is reused across launches, so the card cannot be.
+
+    sb-113 relaunched on 2026-07-30 and drew `attempt 2`, `stage 1 of 3` and
+    `1/2 shards` before its planner had said a word — every one of those left
+    over from a run that had already been parked. Only `run.requested` may
+    discard a card: it is the one event that means the run is starting, and
+    every other event has to stay free to arrive out of order.
+    """
+    page = PAGE.read_text()
+    fresh = page[page.index("function freshRun") : page.index("function runFor")]
+    restart = page[page.index("function restartRun") : page.index("function shardState")]
+    apply_fn = page[page.index("function apply(msg)") :][:400]
+
+    assert 'run.requested" ? restartRun(' in apply_fn
+    assert "freshRun(id)" in restart and "runs.set(id, run)" in restart
+
+    # What "starts over" has to mean, or the reset is decorative.
+    for cleared in ("attempt: 1", "rounds: 0", "merged: 0", "events: 0",
+                    "shards: new Map()", "stages: new Map()", "stageCount: null",
+                    "currentStage: null", 'state: "running"'):
+        assert cleared in fresh, f"a restarted card keeps stale {cleared}"
+
+
 def test_the_lifecycle_stops_the_viewer_it_starts():
     """`down` has to name the viewer or it survives every restart.
 

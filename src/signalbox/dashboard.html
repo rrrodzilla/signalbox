@@ -331,8 +331,8 @@ const EVENT = {
   "shard.changes-requested":["build","stop"], "fix.opened":["build","work"],
   "shard.escalated":["build","stop"], "stage.closed":["build","work"],
   "stage.mergeable":["build","judge"], "merge.attempted":["build","judge"],
-  "stage.merged":["build","go"], "stage.conflicted":["build","stop"],
-  "stages.exhausted":["build","work"], "run.built":["build","go"],
+  "stage.merged":["build","work"], "stage.conflicted":["build","stop"],
+  "stages.exhausted":["build","go"], "run.built":["build","go"],
 
   "suite.ran":["gate","judge"], "suite.errored":["gate","stop"],
   "gate.assessed":["gate","judge"], "assess.failed":["gate","stop"],
@@ -471,19 +471,16 @@ function recordProvenance(p) {
   provenance.set(identityKey(id), { ...id, runner: p.runner, model: p.model });
 }
 
-/* Three topics arrive with no run_id, for three different reasons, and none of
-   them is a run: `stages.exhausted` because stream-runner's end event is
-   literally {"count": N} (emergent.toml says so where join-run works around it),
-   the exec-handler `-e` error topics because a failure publishes {command,
-   exit_code, stderr} instead of the inbound payload (#66), and reaper telemetry
-   which never had identity. Bucketing them under a fake key built a card that
-   looked like a run nobody launched. They stay in the register, where they are
-   real events, and are counted here so their absence from the board is a stated
-   number rather than a silent drop. */
+/* Two families arrive with no run_id, and neither is a run: the exec-handler
+   `-e` error topics publish {command, exit_code, stderr} instead of the inbound
+   payload (#66), and reaper telemetry never had identity. Bucketing them under
+   a fake key built a card that looked like a run nobody launched. They stay in
+   the register, where they are real events, and are counted here so their
+   absence from the board is a stated number rather than a silent drop. */
 let unattributed = 0;
 
 function isAttributed(msg) {
-  return Boolean(msg.payload && msg.payload.run_id);
+  return identity(msg.payload).run_id !== undefined;
 }
 
 function apply(msg) {

@@ -7,7 +7,7 @@ import pytest
 from signalbox.agent import extract_verdict
 from signalbox.emit import ALLOWED_EVENTS, build_body, identity_from_env, parse_fields
 from signalbox import identity
-from signalbox.identity import CARRIED_KEYS, carry, project, spoofed_keys
+from signalbox.identity import CARRIED_KEYS, carry, merge, project, spoofed_keys
 
 
 def test_project_includes_every_present_carried_key():
@@ -47,15 +47,40 @@ def test_carry_overrides_model_supplied_identity():
     assert result["verdict"] == "done"
 
 
-def test_carry_overrides_model_supplied_stage_cursor():
+def test_non_drafting_role_cannot_override_model_supplied_stage_cursor():
     stages = [{"stage_id": "s1"}, {"stage_id": "s2"}]
     inbound = {"stage_index": 1, "stages": stages}
     produced = {"stage_index": 0, "stages": [{"stage_id": "spoofed"}]}
 
-    result = carry(inbound, produced)
+    result = merge(inbound, produced, "implement")
 
-    assert result["stage_index"] == 1
-    assert result["stages"] == stages
+    assert result.payload["stage_index"] == 1
+    assert result.payload["stages"] == stages
+    assert result.envelope_overridden == ["stage_index", "stages"]
+    assert result.product_overridden == []
+
+
+@pytest.mark.parametrize(
+    ("feedback_key", "feedback"),
+    [
+        ("objections", ["the stage ordering is unsafe"]),
+        ("violations", ["stage s2 names a missing dependency"]),
+    ],
+)
+def test_plan_redraft_replaces_rejected_stages_and_keeps_feedback(
+    feedback_key, feedback
+):
+    rejected = [{"stage_id": "rejected"}]
+    redraft = [{"stage_id": "redrafted"}]
+    inbound = {"run_id": "r1", "stages": rejected, feedback_key: feedback}
+    produced = {"stages": redraft}
+
+    result = merge(inbound, produced, "plan")
+
+    assert result.payload["stages"] == redraft
+    assert result.payload[feedback_key] == feedback
+    assert result.envelope_overridden == []
+    assert result.product_overridden == ["stages"]
 
 
 def test_carry_leaves_non_identity_fields_alone():

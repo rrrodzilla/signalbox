@@ -112,7 +112,7 @@ def test_attempt_increments_so_the_retry_guard_terminates():
 
 
 def test_stages_are_stamped_with_run_identity():
-    """stream-runner emits the item, not the envelope, so items must self-describe."""
+    """The advance router emits an item, not its envelope, so it must self-describe."""
     result = check_plan(_plan())
     stage = result["stages"][0]
     assert stage["run_id"] == "r1"
@@ -149,6 +149,36 @@ def test_stages_carry_a_stage_count_so_the_run_join_terminates():
     assert events[0]["stage_count"] == 2
 
 
+def test_every_stage_and_shard_event_carries_the_authoritative_stage_cursor():
+    source_stages = [
+        {
+            "stage_id": "s1",
+            "shards": [_shard("a", ["src/a.py"]), _shard("b", ["src/b.py"])],
+            "stages": [{"stage_id": "stale-nested-cursor"}],
+        },
+        {"stage_id": "s2", "shards": [_shard("c", ["src/c.py"])]},
+    ]
+    result = check_plan(_plan(stages=source_stages))
+    expected_stages = [
+        {key: value for key, value in stage.items() if key != "stages"}
+        for stage in source_stages
+    ]
+
+    assert [stage["stage_index"] for stage in result["stages"]] == [0, 1]
+    assert all(stage["stages"] == expected_stages for stage in result["stages"])
+    assert all(
+        "stages" not in carried_stage
+        for stage in result["stages"]
+        for carried_stage in stage["stages"]
+    )
+
+    for stage_index, stage in enumerate(result["stages"]):
+        events = shard_events(stage, stage)
+        assert events
+        assert all(event["stage_index"] == stage_index for event in events)
+        assert all(event["stages"] == expected_stages for event in events)
+
+
 def test_every_carried_plan_key_survives_the_stage_and_shard_seams():
     """Regression for sb-60: issue #65 found base_branch silently dropped here on 2026-07-29."""
     carried = {key: f"value-{key}" for key in CARRIED_KEYS}
@@ -157,6 +187,7 @@ def test_every_carried_plan_key_survives_the_stage_and_shard_seams():
     # envelope. A run-scoped placeholder would compare against the wrong thing.
     carried.update({
         "attempt": 0,
+        "stages": _plan()["stages"],
         "stage_id": "s1",
         "shard_id": "a",
         "shard_count": 2,
@@ -171,8 +202,12 @@ def test_every_carried_plan_key_survives_the_stage_and_shard_seams():
 
     assert set(CARRIED_KEYS) <= stage.keys()
     assert set(CARRIED_KEYS) <= shard.keys()
-    assert all(stage[key] == carried[key] for key in CARRIED_KEYS)
-    assert all(shard[key] == carried[key] for key in CARRIED_KEYS)
+    inherited_keys = set(CARRIED_KEYS) - {"stage_index", "stages"}
+    assert all(stage[key] == carried[key] for key in inherited_keys)
+    assert all(shard[key] == carried[key] for key in inherited_keys)
+    assert stage["stage_index"] == 0
+    assert shard["stage_index"] == 0
+    assert stage["stages"] == shard["stages"]
 
 
 def test_a_future_carried_key_crosses_plan_seams_without_editing_plan_py(monkeypatch):

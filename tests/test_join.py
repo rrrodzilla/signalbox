@@ -334,6 +334,25 @@ def test_summarise_carries_every_identity_key_from_the_first_result():
     assert all(summary[key] == carried[key] for key in CARRIED_KEYS)
 
 
+def test_stage_join_preserves_the_plan_cursor_from_its_first_result():
+    stages = [
+        {"stage_id": "s1", "shards": []},
+        {"stage_id": "s2", "shards": []},
+    ]
+    summary = summarise(
+        "stage_id",
+        "s1",
+        Pending(
+            expected=1,
+            results=[_shard(stage_index=0, stages=stages)],
+        ),
+        False,
+    )
+
+    assert summary["stage_index"] == 0
+    assert summary["stages"] == stages
+
+
 def test_a_future_carried_key_crosses_the_join_without_changing_its_summary(monkeypatch):
     monkeypatch.setattr(identity, "CARRIED_KEYS", (*CARRIED_KEYS, "sentinel"))
     summary = summarise(
@@ -366,8 +385,14 @@ def test_plan_splitter_projection_keeps_the_issue_title():
 
 
 def test_split_reopens_only_the_shards_a_conflict_implicated():
+    stages = [
+        {"stage_id": "s1", "shards": []},
+        {"stage_id": "s2", "shards": []},
+    ]
     payload = {
         "stage_id": "s1",
+        "stage_index": 0,
+        "stages": stages,
         "run_id": "r1",
         "conflicts": ["src/b.py"],
         "shards": [
@@ -378,6 +403,8 @@ def test_split_reopens_only_the_shards_a_conflict_implicated():
     events = reopened_shards(payload)
     assert [e["shard_id"] for e in events] == ["b"]
     assert events[0]["reopened_from"] == "merge_conflict"
+    assert events[0]["stage_index"] == 0
+    assert events[0]["stages"] == stages
 
 
 def test_events_for_opens_every_shard_when_there_is_no_conflict():

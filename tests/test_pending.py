@@ -128,6 +128,24 @@ def test_an_absent_count_is_omitted_rather_than_sent_as_an_empty_string():
     assert "shard_count" not in identity
 
 
+def test_stage_cursor_survives_an_agents_emission():
+    stages = [
+        {"stage_id": "s1", "shards": [{"shard_id": "a"}]},
+        {"stage_id": "s2", "shards": [{"shard_id": "b"}]},
+    ]
+    env = environment(_shard(stage_index=0, stages=stages), {})
+
+    body = build_body("shard.submitted", {"outcome": "done"}, env)
+
+    assert body["stage_index"] == 0
+    assert body["stages"] == stages
+
+
+def test_malformed_stages_fail_instead_of_becoming_strings():
+    with pytest.raises(ValueError):
+        identity_from_env({"SIGNALBOX_STAGES": "s1:s2"})
+
+
 def test_the_environment_carries_every_key_the_emit_path_reads():
     from signalbox.emit import _ENV_KEYS
 

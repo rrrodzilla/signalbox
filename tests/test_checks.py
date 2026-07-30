@@ -325,6 +325,35 @@ def test_a_none_intent_does_not_round_trip_as_the_string_none():
     assert "intent" not in identity_from_env(stamped)
 
 
+def test_merge_stage_preserves_the_plan_cursor(monkeypatch, tmp_path):
+    """The merge act rebuilds stage.closed and must echo the whole cursor."""
+    stages = [
+        {"stage_id": "stage-1", "shards": []},
+        {"stage_id": "stage-2", "shards": []},
+    ]
+    payload = {
+        "run_id": "sb-59",
+        "stage_id": "stage-1",
+        "stage_index": 0,
+        "stages": stages,
+        "results": [{"declared": ["tests/test_checks.py"]}],
+        "worktree": str(tmp_path),
+    }
+    commands = iter(
+        [
+            (0, "", ""),
+            (0, "", ""),
+            (0, "deadbeef", ""),
+        ]
+    )
+    monkeypatch.setattr(acts, "_run", lambda *args, **kwargs: next(commands))
+
+    merged = acts.merge_stage(payload)
+
+    assert merged["stage_index"] == 0
+    assert merged["stages"] == stages
+
+
 def test_every_carried_key_survives_every_payload_building_seam():
     """CARRIED_KEYS is the contract across payload-building seams.
 
@@ -342,6 +371,7 @@ def test_every_carried_key_survives_every_payload_building_seam():
         {
             "attempt": 0,
             "stage_id": "stage-1",
+            "stage_index": 0,
             "stage_count": 1,
             "shard_id": "shard-1",
             "shard_count": 1,
@@ -355,23 +385,25 @@ def test_every_carried_key_survives_every_payload_building_seam():
             "note_count": 1,
         }
     )
+    stages = [
+        {
+            "stage_id": carried["stage_id"],
+            "shards": [
+                {
+                    "shard_id": carried["shard_id"],
+                    "files": carried["declared"],
+                    "intent": carried["intent"],
+                }
+            ],
+        }
+    ]
+    carried["stages"] = stages
     plan = {
         **carried,
-        "stages": [
-            {
-                "stage_id": carried["stage_id"],
-                "shards": [
-                    {
-                        "shard_id": carried["shard_id"],
-                        "files": carried["declared"],
-                        "intent": carried["intent"],
-                    }
-                ],
-            }
-        ],
+        "stages": stages,
     }
 
-    stage = _stamp_stage(plan["stages"][0], plan)
+    stage = _stamp_stage(plan["stages"][0], plan, 0, stages)
     shard = shard_events(stage, stage)[0]
     note = note_events({**shard, "notes": [carried["note"]]})[0]
     summary = summarise(
@@ -411,7 +443,7 @@ def test_a_future_carried_key_survives_every_payload_building_seam(monkeypatch):
                 }
             ],
         }
-        stage = _stamp_stage(plan["stages"][0], plan)
+        stage = _stamp_stage(plan["stages"][0], plan, 0, plan["stages"])
         shard = shard_events(stage, stage)[0]
         note = note_events({**shard, "notes": ["architecture"]})[0]
         summary = summarise(

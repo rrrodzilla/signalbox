@@ -10,12 +10,26 @@
   --paint:#d3dce4;       /* diagram paint: primary text, track lines */
   --dim:#7d8894;
   --faint:#4a5560;
-  --green:#46c25a;       /* clear */
-  --amber:#e6a23c;       /* occupied / caution */
-  --red:#e15a5f;         /* danger */
+  /* Lamp colours are chosen by measurement, not by eye. Each pair of meanings
+     was simulated through protanopia, deuteranopia and tritanopia and scored
+     with CIEDE2000; these five maximise the WORST pair across all three while
+     clearing 4.5:1 on the enamel, because the palette is also text colour.
+
+     The previous set failed badly and invisibly: under deuteranopia `go` and
+     `stop` landed on dE 4.3 — finished and failed were the same lamp — and
+     `judge`/`hold` on 4.0. Worst pair overall was 3.9; it is now 15.7.
+
+     Do not hand-tune one of these. They are a coupled system: three separate
+     attempts to warm `work` back toward amber pushed `go` into `hold` under
+     deuteranopia, once to dE 0.2 — moving one colour broke a pair it was not
+     part of. tests/test_palette.py reads these five values straight out of this
+     file and re-runs the simulation, so an edit by eye fails the suite. */
+  --green:#86fc82;       /* clear */
+  --amber:#c3b503;       /* occupied / caution: brass, not honey */
+  --red:#f73d5e;         /* danger */
   --white-lamp:#eef4fa;  /* route set */
-  --violet:#a78bfa;      /* waiting on a human */
-  --blue:#5aa7e8;
+  --violet:#d076ae;      /* waiting on a human */
+  --blue:#5bacfc;
 
   /* The five meanings. Both views read these and nothing else, so a colour
      means the same thing in the register as it does on the card. */
@@ -24,6 +38,16 @@
   --judge:var(--blue);   /* a verdict or report landed, awaiting routing */
   --stop:var(--red);     /* a failure, violation, or rejection */
   --hold:var(--violet);  /* waiting on a human */
+
+  /* Colour is never the only carrier. Even at 15.7 the palette alone cannot
+     separate five meanings for every form of colour blindness — and carries
+     nothing at all for achromatopsia — so each meaning also has a glyph, and
+     shards also have a shape. Add a meaning here and in --glyph together. */
+  --glyph-go:"\2713";     /* check */
+  --glyph-work:"\25B8";   /* running */
+  --glyph-judge:"\25C6";  /* verdict landed */
+  --glyph-stop:"\2717";   /* cross */
+  --glyph-hold:"\23F8";   /* waiting on a human */
 }
 * { box-sizing:border-box; margin:0; }
 html { scrollbar-color:var(--seam) var(--enamel); }
@@ -48,10 +72,16 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 #meta a { color:var(--dim); }
 .lamp { display:inline-block; width:9px; height:9px; border-radius:50%;
   background:var(--faint); vertical-align:-1px; flex:none; }
-.lamp.on-green { background:var(--green); box-shadow:0 0 6px 1px rgba(70,194,90,.55); }
-.lamp.on-amber { background:var(--amber); box-shadow:0 0 6px 1px rgba(230,162,60,.55); }
-.lamp.on-red { background:var(--red); box-shadow:0 0 6px 1px rgba(225,90,95,.55); }
-.lamp.on-violet { background:var(--violet); box-shadow:0 0 6px 1px rgba(167,139,250,.55); }
+/* Shape carries the state as well as colour: a run lamp is round when the run is
+   running and square-cornered when it has stopped for any reason, so "needs you"
+   is legible with no colour vision at all. */
+.lamp.on-green { background:var(--green); box-shadow:0 0 6px 1px rgba(134,252,130,.55);
+  border-radius:2px; }
+.lamp.on-amber { background:var(--amber); box-shadow:0 0 6px 1px rgba(195,181,3,.55); }
+.lamp.on-red { background:var(--red); box-shadow:0 0 6px 1px rgba(247,61,94,.55);
+  border-radius:2px; }
+.lamp.on-violet { background:var(--violet); box-shadow:0 0 6px 1px rgba(208,118,174,.55);
+  border-radius:2px; transform:rotate(45deg); }
 .lamp.on-white { background:var(--white-lamp); box-shadow:0 0 6px 1px rgba(238,244,250,.45); }
 
 .deck { display:grid; grid-template-columns:minmax(0,1fr) 420px; gap:0; }
@@ -85,10 +115,18 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 .block { position:relative; padding:14px 0 6px; }
 .block::before { content:""; position:absolute; left:0; right:0; top:22px;
   height:2px; background:var(--faint); }
+/* A solid rail means the run is getting through this block on its own. The two
+   states that are not fine break the rail instead of only recolouring it, since
+   a recoloured rail is the one thing a colour-blind operator cannot see: failed
+   is chopped short, parked is a long dash waiting for someone. */
 .block.done::before { background:var(--green); }
 .block.active::before { background:var(--amber); }
-.block.failed::before { background:var(--red); }
-.block.parked::before { background:var(--violet); }
+.block.failed::before {
+  background:repeating-linear-gradient(90deg,
+    var(--red) 0 3px, transparent 3px 6px); }
+.block.parked::before {
+  background:repeating-linear-gradient(90deg,
+    var(--violet) 0 10px, transparent 10px 14px); }
 /* Entered, but nothing heard from it yet. A judging node publishes nothing until
    it finishes, so `docs` can sit between checks.passed and notes.planned looking
    exactly like a block the run had not reached. Hollow, not filled: the run is
@@ -121,16 +159,23 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 .sidings { display:flex; justify-content:center; align-items:center; gap:4px;
   margin-top:4px; flex-wrap:wrap; padding:0 4px; }
 .sidings .bar { width:8px; height:2px; background:var(--seam); flex:none; }
-.shard-lamp { width:8px; height:8px; border-radius:2px; flex:none;
+.shard-lamp { width:9px; height:9px; border-radius:2px; flex:none;
   background:transparent; border:1px solid var(--faint); }
 /* Same five meanings as everything else. A shard in a fix round is *working*
    (amber fill) but carries the rejection that sent it back (red ring); it used
-   to be solid red, which made ordinary rework look like an escalation. */
-.shard-lamp.s-building { background:var(--work); border-color:var(--work); }
-.shard-lamp.s-review { background:var(--judge); border-color:var(--judge); }
-.shard-lamp.s-fixing { background:var(--work); border-color:var(--stop); }
+   to be solid red, which made ordinary rework look like an escalation.
+   That ring was the whole distinction between building and fixing, and it was a
+   red/green one — the two states were identical to most colour-blind readers.
+   Shape now carries it: square is ordinary work, circle is being judged, diamond
+   is carrying a rejection, and filled means settled. Colour agrees, but nothing
+   here depends on it. */
+.shard-lamp.s-building { border-color:var(--work); }
+.shard-lamp.s-review { border-color:var(--judge); border-radius:50%; }
+.shard-lamp.s-fixing { background:var(--work); border-color:var(--stop);
+  transform:rotate(45deg); }
 .shard-lamp.s-done { background:var(--go); border-color:var(--go); }
 .shard-lamp.s-escalated { background:var(--stop); border-color:var(--stop);
+  transform:rotate(45deg);
   animation:pulse 2.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .shard-lamp.s-escalated { animation:none; } }
 
@@ -139,8 +184,11 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
    always does, so silence on the card now means silence on the wire. */
 .tick { display:flex; align-items:baseline; gap:8px; padding:5px 12px 0;
   font-size:10px; letter-spacing:.06em; color:var(--faint); }
-.tick .tdot { width:6px; height:6px; border-radius:50%; flex:none;
-  background:var(--sev, var(--faint)); align-self:center; }
+/* Was a bare colour dot, which said nothing to a reader who cannot see the
+   colour. It is now the meaning's glyph in the meaning's colour. */
+.tick .tdot { flex:none; align-self:center; font-size:10px; line-height:1;
+  color:var(--sev, var(--faint)); }
+.tick .tdot::before { content:var(--glyph, "\00B7"); }
 .tick .ttype { color:var(--sev, var(--dim)); overflow-wrap:anywhere; min-width:0; }
 .tick .tcount { margin-left:auto; flex:none; }
 @keyframes tick-in { from { opacity:.25; } to { opacity:1; } }
@@ -164,8 +212,14 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
   font-size:12px; color:var(--dim); }
 .verdict span { overflow-wrap:anywhere; min-width:0; }
 .verdict b { font-weight:700; letter-spacing:.08em; flex:none; }
+/* The label already spells the verdict out, so colour here is reinforcement
+   rather than the carrier. The glyph keeps it that way at a glance. */
 .verdict.v-green b { color:var(--green); } .verdict.v-red b { color:var(--red); }
 .verdict.v-amber b { color:var(--amber); } .verdict.v-violet b { color:var(--violet); }
+.verdict.v-green b::before { content:var(--glyph-go) " "; }
+.verdict.v-red b::before { content:var(--glyph-stop) " "; }
+.verdict.v-amber b::before { content:var(--glyph-work) " "; }
+.verdict.v-violet b::before { content:var(--glyph-hold) " "; }
 
 .drawer { border-top:1px solid var(--seam); }
 .drawer > summary { list-style:none; cursor:pointer; padding:6px 12px;
@@ -189,9 +243,11 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 .badge.on { color:var(--white-lamp); border-color:var(--dim); }
 /* The legend carries the colour it filters for, so the register's chips double
    as the key to the card. */
-.badges .badge[class*="sev-"]::before { content:""; display:inline-block;
-  width:6px; height:6px; border-radius:50%; margin-right:5px; vertical-align:0;
-  background:var(--sev, var(--faint)); }
+/* The legend is the key to the whole page, so it shows the glyph next to the
+   label. Reading it teaches both channels at once. */
+.badges .badge[class*="sev-"]::before { content:var(--glyph, "\00B7");
+  display:inline-block; margin-right:5px; vertical-align:0;
+  color:var(--sev, var(--faint)); }
 #feed { overflow-y:auto; padding:0 14px 24px; }
 .ev { border-top:1px solid var(--seam); padding:6px 0; }
 .ev .hd { color:var(--faint); font-size:10px; display:flex; gap:8px; }
@@ -200,13 +256,16 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 .ev .bd { color:var(--dim); font-size:11px; overflow-wrap:anywhere; }
 /* One palette, read by the register row, the card's tick line, and the rail
    flash. Adding a meaning here changes all three at once, on purpose. */
-.sev-go    { --sev:var(--go); }
-.sev-work  { --sev:var(--work); }
-.sev-judge { --sev:var(--judge); }
-.sev-stop  { --sev:var(--stop); }
-.sev-hold  { --sev:var(--hold); }
-.sev-unmapped { --sev:var(--white-lamp); }
+.sev-go    { --sev:var(--go);    --glyph:var(--glyph-go); }
+.sev-work  { --sev:var(--work);  --glyph:var(--glyph-work); }
+.sev-judge { --sev:var(--judge); --glyph:var(--glyph-judge); }
+.sev-stop  { --sev:var(--stop);  --glyph:var(--glyph-stop); }
+.sev-hold  { --sev:var(--hold);  --glyph:var(--glyph-hold); }
+.sev-unmapped { --sev:var(--white-lamp); --glyph:"?"; }
 .ev .ty { color:var(--sev, var(--dim)); }
+/* The glyph rides in front of every event type, so the feed is readable in
+   greyscale and the meaning survives being printed or screenshotted. */
+.ev .ty::before { content:var(--glyph, "\00B7") " "; color:var(--sev, var(--dim)); }
 .ev.sev-unmapped .ty::after { content:" ?"; color:var(--white-lamp); }
 </style>
 

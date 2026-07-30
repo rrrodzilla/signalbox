@@ -147,6 +147,14 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 .block.active .bname { color:var(--amber); }
 .block.waiting .bname { color:var(--amber); opacity:.65; }
 .block .sub .await { color:var(--amber); opacity:.8; font-variant-numeric:tabular-nums; }
+.judging { display:flex; justify-content:center; gap:5px; min-height:12px;
+  margin-top:4px; }
+/* A hollow diamond on a dashed stem is a judging process in flight. It uses
+   the existing work colour, but remains legible without colour: filled lamps
+   describe events that landed; this outline describes the silence before one. */
+.judge-node { width:9px; height:9px; border:1.5px dashed var(--work);
+  transform:rotate(45deg); opacity:.75; animation:pulse 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .judge-node { animation:none; } }
 .block.failed .bname { color:var(--red); }
 .block.parked .bname { color:var(--violet); }
 @keyframes pulse { 50% { box-shadow:0 0 10px 3px rgba(230,162,60,.65); } }
@@ -317,20 +325,20 @@ const BLOCKS = ["plan", "build", "gate", "promote", "docs"];
    taught yet; `sev()` calls that out rather than quietly rendering it grey. */
 const EVENT = {
   "run.requested":["plan","work"], "workspace.ready":["plan","work"],
-  "workspace.failed":["plan","stop"], "issue.fetched":["plan","work"],
+  "workspace.failed":["plan","stop"], "issue.fetched":["plan","work","draft-plan","in"],
   "issue.fetch-failed":["plan","stop"],
-  "plan.submitted":["plan","judge"],
-  "plan.checked":["plan","judge"], "plan.verified":["plan","work"],
-  "plan.audited":["plan","judge"], "plan.audit-failed":["plan","stop"],
+  "plan.submitted":["plan","judge","draft-plan","out"],
+  "plan.checked":["plan","judge"], "plan.verified":["plan","work","audit-plan","in"],
+  "plan.audited":["plan","judge","audit-plan","out"], "plan.audit-failed":["plan","stop"],
   "plan.invalid-verdict":["plan","stop"], "plan.accepted":["plan","go"],
-  "plan.rejected":["plan","stop"], "plan.draft-failed":["plan","stop"],
+  "plan.rejected":["plan","stop","draft-plan","in"], "plan.draft-failed":["plan","stop"],
 
   "stage.opened":["build","work"], "shard.opened":["build","work"],
   "shard.file-written":["build","work"], "shard.check-ran":["build","work"],
-  "shard.submitted":["build","judge"], "shard.built":["build","judge"],
+  "shard.submitted":["build","judge"], "shard.built":["build","judge","review-shard","in"],
   "shard.abandoned":["build","stop"], "shard.invalid-verdict":["build","stop"],
   "shard.silent":["build","stop"], "scope.violated":["build","stop"],
-  "review.submitted":["build","judge"], "review.failed":["build","stop"],
+  "review.submitted":["build","judge","review-shard","out"], "review.failed":["build","stop"],
   "review.invalid-verdict":["build","stop"], "shard.approved":["build","go"],
   "shard.changes-requested":["build","stop"], "fix.opened":["build","work"],
   "shard.escalated":["build","stop"], "stage.closed":["build","work"],
@@ -338,8 +346,8 @@ const EVENT = {
   "stage.merged":["build","work"], "stage.conflicted":["build","stop"],
   "stages.exhausted":["build","go"], "run.built":["build","go"],
 
-  "suite.ran":["gate","judge"], "suite.errored":["gate","stop"],
-  "gate.assessed":["gate","judge"], "assess.failed":["gate","stop"],
+  "suite.ran":["gate","judge","assess","in"], "suite.errored":["gate","stop"],
+  "gate.assessed":["gate","judge","assess","out"], "assess.failed":["gate","stop"],
   "gate.cleared":["gate","go"], "gate.blocked":["gate","stop"],
   "gate.invalid-verdict":["gate","stop"], "approval.requested":["gate","hold"],
   "approval.granted":["gate","go"],
@@ -348,12 +356,12 @@ const EVENT = {
   "pr.opened":["promote","work"], "pr.open-failed":["promote","stop"],
   "checks.observed":["promote","judge"], "checks.reported":["promote","judge"],
   "checks.detailed":["promote","judge"], "checks.detail-failed":["promote","stop"],
-  "checks.passed":["promote","go"], "checks.failed":["promote","stop"],
+  "checks.passed":["promote","go","plan-notes","in"], "checks.failed":["promote","stop"],
   "checks.silent":["promote","stop"], "checks.unknown-pr":["promote","stop"],
   "pr.merged":["promote","go"], "pr.merge-failed":["promote","stop"],
 
-  "notes.planned":["docs","work"], "notes.plan-failed":["docs","stop"],
-  "note.drafted":["docs","work"], "note.written":["docs","go"],
+  "notes.planned":["docs","work","plan-notes","out"], "notes.plan-failed":["docs","stop"],
+  "note.drafted":["docs","work","write-note","in"], "note.written":["docs","go","write-note","out"],
   "note.write-failed":["docs","stop"], "notes.synced":["docs","go"],
 
   /* Run-level: no single block owns them. The release topics land after every
@@ -373,6 +381,7 @@ function blockOf(type) { return (EVENT[type] || [])[0] || null; }
    page does not understand. Say so in the loudest colour rather than hiding it
    among the informational rows, which is where the old default sent it. */
 function sev(type) { return (EVENT[type] || [])[1] || "unmapped"; }
+function judgingNode(type) { return (EVENT[type] || []).slice(2); }
 
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g,
   (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
@@ -423,6 +432,8 @@ function runFor(id) {
       stageCount: null, currentStage: null, merged: 0,
       // block -> when the run entered it, for blocks that have not yet spoken.
       waiting: {},
+      // scope key -> silent judging invocation, reconstructed from replay order.
+      inFlight: new Map(),
       verdict: { label: "opening", cls: "", detail: "" },
       first: Date.now(), last: Date.now(), state: "running",
       worktree: null, base: null, notes: [], suite: null, pr: null,
@@ -543,6 +554,22 @@ function apply(msg) {
     run.pulse = { block, sev: meaning, at: Date.now() };
   }
 
+  /* Inputs and outputs are annotations on EVENT, not a second topic table.
+     A later event in the same event-shaped scope clears a silent invocation:
+     review is per shard, note writing per note, and the other judgments per run.
+     Then an input starts its node, so feedback inputs clear the old pass before
+     opening the next one. Identity-less error topics never reach apply(). */
+  const [node, direction] = judgingNode(t);
+  const scopeFor = (name) => name === "review-shard" ? "shard=" + (p.shard_id || "") :
+    name === "write-note" ? "note=" + (p.note || "") : "run";
+  for (const [key, flight] of run.inFlight) {
+    if (scopeFor(flight.node) === flight.scope) run.inFlight.delete(key);
+  }
+  if (node && direction === "in") {
+    const scope = scopeFor(node);
+    run.inFlight.set(node + "|" + scope, { node, scope, at: run.last });
+  }
+
   // A block that speaks is working, whether it was idle or had been waiting.
   if (block && (run.blocks[block] === "idle" || run.blocks[block] === "waiting")) {
     run.blocks[block] = "active";
@@ -661,6 +688,7 @@ function apply(msg) {
       // A finished run waits for nothing; leaving a counter running would make a
       // completed card keep claiming it was still expecting something.
       run.waiting = {};
+      run.inFlight.clear();
       run.state = "stopped";
       run.verdict = { label: "COMPLETE", cls: "v-green", detail: run.suite || "" }; break;
     case "run.halted": run.state = "halted";
@@ -669,6 +697,7 @@ function apply(msg) {
       // The block it died in is the first one not yet finished.
       set(BLOCKS.find((b) => run.blocks[b] !== "done") || BLOCKS[0], "failed");
       run.waiting = {};
+      run.inFlight.clear();
       run.verdict = { label: "HALTED", cls: "v-red", detail: p.reason || "" }; break;
   }
 
@@ -716,6 +745,13 @@ function renderRun(run, now) {
   // The flash is time-bounded rather than latched, so the 15s idle re-render
   // that keeps the age column honest does not replay it.
   const hot = run.pulse && now - run.pulse.at < 1200 ? run.pulse : null;
+  const judging = (b) => [...run.inFlight.values()]
+    .filter((f) => blockOf(Object.keys(EVENT).find((t) => {
+      const meta = judgingNode(t);
+      return meta[0] === f.node && meta[1] === "in";
+    })) === b)
+    .map((f) => '<span class="judge-node" title="' +
+      esc(f.node + " in flight · " + elapsed(now - f.at)) + '"></span>').join("");
 
   const track = BLOCKS.map((b) => {
     const st = run.blocks[b];
@@ -732,7 +768,8 @@ function renderRun(run, now) {
     return '<div class="block ' + esc(st) + flash + '"><span class="lamp ' +
       esc(LAMP_FOR[st] || "") + '"></span>' +
       (n ? '<span class="bcount">' + n + "</span>" : "") +
-      '<span class="bname">' + esc(b) + "</span>" + sub + "</div>";
+      '<span class="bname">' + esc(b) + "</span>" + sub +
+      '<span class="judging">' + judging(b) + "</span></div>";
   }).join("");
 
   const tick = run.tick
@@ -946,7 +983,9 @@ function schedule() { dirty = true; }
 // is arriving to move it. Without this the 15s pass below would advance it in
 // jumps, which reads as a frozen page during exactly the silence it explains.
 const anyWaiting = () =>
-  [...runs.values()].some((r) => Object.keys(r.waiting).length > 0);
+  [...runs.values()].some((r) =>
+    Date.now() - r.last < HORIZON_MS &&
+    (Object.keys(r.waiting).length > 0 || r.inFlight.size > 0));
 setInterval(() => {
   if (dirty) { dirty = false; renderBoard(); renderFeed(); renderBadges(); pending = true; }
   else if (pending || anyWaiting()) { pending = false; renderBoard(); }

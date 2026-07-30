@@ -66,7 +66,9 @@ def event_table() -> dict[str, tuple[str | None, str]]:
     return {
         topic: (None if block == "null" else block.strip('"'), meaning)
         for topic, block, meaning in re.findall(
-            r'"([a-z][\w.\-]*)":\s*\[\s*(null|"[a-z]+")\s*,\s*"([a-z]+)"\s*\]', body
+            r'"([a-z][\w.\-]*)":\s*\[\s*(null|"[a-z]+")\s*,\s*"([a-z]+)"'
+            r'(?:\s*,[^\]]+)?\s*\]',
+            body,
         )
     }
 
@@ -251,6 +253,41 @@ def test_a_block_the_run_has_entered_is_distinguishable_from_one_it_has_not():
     # is still expecting something.
     assert body.count("run.waiting = {}") >= 2, (
         "both run.completed and run.halted must clear the wait counters"
+    )
+
+
+def test_a_silent_judging_node_is_in_flight_until_its_output_lands():
+    """Issue #68: audit-plan was opaque between plan.verified and plan.audited.
+
+    PAGE_TEXT proves the source contract rather than the page served by a
+    running engine; this repository deliberately has no JavaScript test runner.
+    """
+    table = event_table()
+    assert "survey-codebase" not in PAGE_TEXT, "the removed judging role must stay gone"
+    assert table["plan.verified"] == ("plan", "work")
+    assert table["plan.audited"] == ("plan", "judge")
+    assert '"plan.verified":["plan","work","audit-plan","in"]' in PAGE_TEXT
+    assert '"plan.audited":["plan","judge","audit-plan","out"]' in PAGE_TEXT
+
+    body = PAGE_TEXT[
+        PAGE_TEXT.index("function apply(msg)") : PAGE_TEXT.index("function shardSidings")
+    ]
+    assert 'if (node && direction === "in")' in body
+    assert "run.inFlight.set(" in body, (
+        "an input replayed without its output must leave the judging node in flight"
+    )
+    assert "run.inFlight.delete(key)" in body
+    assert body.index("run.inFlight.delete(key)") < body.index(
+        'if (node && direction === "in")'
+    ), "the output (or next scoped event) must clear the preceding in-flight window"
+
+    rendered = PAGE_TEXT[
+        PAGE_TEXT.index("function renderRun(run, now)") : PAGE_TEXT.index("function renderBoard")
+    ]
+    assert "run.inFlight.values()" in rendered
+    assert 'class="judge-node"' in rendered
+    assert "r.inFlight.size > 0" in PAGE_TEXT, (
+        "the 800ms silence render must keep the in-flight indicator moving"
     )
 
 

@@ -292,6 +292,7 @@ const EVENT = {
 
   /* Run-level: no single block owns them. The release topics land after every
      block has finished, so pinning them to one would move a card backwards. */
+  "completion.closed":[null,"go"], // both arms accounted for — rendezvous closed
   "run.completed":[null,"go"], "run.halted":[null,"stop"],
   "control.unknown-event":[null,"stop"],
   "workspace.release-attempted":[null,"judge"], "workspace.released":[null,"go"],

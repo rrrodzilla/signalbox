@@ -211,18 +211,28 @@ def test_notes_planning_fans_out_with_merge_only_after_checks_pass():
     assert "pr.merged" not in planner["subscribes"]
 
 
-def test_run_completion_is_only_published_by_the_two_arm_rendezvous():
+def test_run_completion_is_only_published_by_the_full_completion_router():
     producers = [handler for handler in HANDLERS
                  if "run.completed" in handler.get("publishes", [])]
-    assert [handler["name"] for handler in producers] == ["join-completion"]
+    assert [handler["name"] for handler in producers] == ["route-completion-full"]
 
-    joiner = producers[0]
+    joiner = named(HANDLERS, "join-completion")
     assert joiner["path"] == "signalbox"
     assert joiner["subscribes"] == ["pr.merged", "notes.synced"]
     args = " ".join(joiner["args"])
     assert "--key run_id" in args
     assert "--arms pr.merged,notes.synced" in args
     assert "--timeout-seconds" in args
+    assert "--publish-as completion.closed" in args
+    assert joiner["publishes"] == ["completion.closed"]
+
+    summary = {
+        "run_id": "sb-82",
+        "results": [{"topic": "pr.merged"}, {"topic": "notes.synced"}],
+        "timed_out": False,
+    }
+    assert route("route-completion-full", summary) == summary
+    assert route("route-completion-short", summary) is None
 
 
 def test_a_zero_note_plan_needs_the_merge_arm_to_reach_the_run_terminal():
@@ -233,28 +243,50 @@ def test_a_zero_note_plan_needs_the_merge_arm_to_reach_the_run_terminal():
 
     completion = named(HANDLERS, "join-completion")
     assert completion["subscribes"] == ["pr.merged", "notes.synced"]
-    assert completion["publishes"] == ["run.completed"]
+    assert completion["publishes"] == ["completion.closed"]
     assert "--arms" in completion["args"], (
         "a count join could mistake duplicate notes.synced events for both arms"
     )
-    assert not any(
-        handler["name"] != "join-completion"
-        and "run.completed" in handler.get("publishes", [])
-        for handler in HANDLERS
-    )
+    full = named(HANDLERS, "route-completion-full")
+    assert full["subscribes"] == ["completion.closed"]
+    assert full["publishes"] == ["run.completed"]
 
 
 @pytest.mark.parametrize("topic", ["pr.merged", "notes.synced"])
-def test_one_completion_arm_alone_has_no_stateless_path_to_run_completed(topic):
-    """Neither arm may be routed directly to completion, including zero notes."""
+def test_one_completion_arm_alone_times_out_to_halted(topic):
+    """Neither arm may be routed directly to success, including zero notes."""
     direct = [
         handler["name"]
         for handler in HANDLERS
         if topic in handler.get("subscribes", [])
-        and "run.completed" in handler.get("publishes", [])
+        and {"run.completed", "run.halted"}.intersection(handler.get("publishes", []))
         and handler["name"] != "join-completion"
     ]
     assert direct == []
+
+    summary = {
+        "run_id": "sb-82",
+        "timed_out": True,
+        "results": [{"topic": topic, "outcome": "arrived"}],
+    }
+    assert route("route-completion-full", summary) is None
+    halted = route("route-completion-short", summary)
+    assert halted == {
+        **summary,
+        "reason": "completion timed out — an arm never arrived",
+    }
+
+
+def test_stateful_joins_publish_neutral_topics_before_run_terminals():
+    """A join reports state; stateless routers decide whether that state is terminal."""
+    for handler in HANDLERS:
+        args = handler.get("args", [])
+        if not any(arg in {"join-terminal", "join_terminal"} for arg in args):
+            continue
+        publish_as = args[args.index("--publish-as") + 1]
+        assert publish_as not in {"run.completed", "run.halted"}, (
+            f"{handler['name']} publishes terminal {publish_as} directly"
+        )
 
 
 @pytest.mark.parametrize(

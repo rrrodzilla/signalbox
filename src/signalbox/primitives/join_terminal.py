@@ -10,15 +10,17 @@ Two properties keep it from stalling:
   * It subscribes to *every* terminal outcome, not just the happy one, so a
     shard that was abandoned, escalated, or reaped still closes its stage.
   * A partial join publishes anyway once the timeout elapses, marked
-    `timed_out`, so downstream sees a stage that failed rather than silence.
+    `timed_out`, to a neutral topic. The topology's routers decide which
+    terminal outcome follows; a timer cannot assert a run terminal by itself.
 
 Outcomes are read from an `outcome` field the routers stamp. This primitive
 never infers meaning from a topic name.
 
 Arms mode is the exception: it rendezvous explicitly named topics. It exists
 because the zero-note path emits ``notes.synced`` directly and can re-enter.
-A bare count of two would let two such events complete ``run.completed`` with
-no ``pr.merged`` event at all.
+A bare count of two would let two such events satisfy the join with no
+``pr.merged`` event at all. The neutral publication still leaves the topology's
+routers to decide the run terminal.
 """
 
 from __future__ import annotations

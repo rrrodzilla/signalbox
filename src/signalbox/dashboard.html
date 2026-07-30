@@ -866,35 +866,81 @@ setInterval(() => {
 }, 800);
 setInterval(renderBoard, 15000);   // keep the age column honest while idle
 
-for (const url of streamUrls()) {
+function replayKey(msg) {
+  return JSON.stringify([msg.type, msg.timestamp, msg.payload]);
+}
+
+function handleMessage(msg, url, replay) {
+  if (!msg || !msg.type) return;
+  // Replay and live traffic deliberately share everything below this point:
+  // heartbeat filtering, provenance diversion, attribution, and rendering.
+  if (HEARTBEAT.has(msg.type)) {
+    if (!replay) { lastByte = Date.now(); health.set(url, true); meta(); }
+    return;
+  }
+  msg.timestamp = msg.timestamp || Date.now();
+  if (!replay) lastByte = Date.now();
+  if (isProvenance(msg)) { recordProvenance(msg.payload || {}); schedule(); return; }
+  totalEvents++;
+  // The register takes every event. The board takes only the ones that name a
+  // run, because a card is a claim that a run exists.
+  if (isAttributed(msg)) apply(msg);
+  else unattributed++;
+  feed.unshift({ type: msg.type, source: msg.source, timestamp: msg.timestamp,
+                 summary: summarise(msg.payload), ...identity(msg.payload) });
+  if (feed.length > 1000) feed.length = 1000;
+  document.getElementById("feed-empty")?.remove();
+  schedule();
+}
+
+async function attachStream(url) {
   health.set(url, false);
+  const parsed = new URL(url, location.href);
+  const historyUrl = new URL("/history", location.origin);
+  historyUrl.searchParams.set("stream", parsed.port);
+  const replayIds = new Set();
+  const replayKeys = new Set();
+  let lastReplayTimestamp = null;
+
+  try {
+    const response = await fetch(historyUrl, { cache: "no-store" });
+    const history = response.ok ? await response.json() : [];
+    if (Array.isArray(history)) {
+      for (const msg of history) {
+        if (!msg || !msg.type) continue;
+        if (msg.id) replayIds.add(msg.id);
+        replayKeys.add(replayKey(msg));
+        if (lastReplayTimestamp === null || msg.timestamp > lastReplayTimestamp) {
+          lastReplayTimestamp = msg.timestamp;
+        }
+        handleMessage(msg, url, true);
+      }
+    }
+  } catch (_) {
+    // History is optional: an unavailable store degrades to the original live tail.
+  }
+
   const es = new EventSource(url);
   es.onopen = () => { health.set(url, true); meta(); };
   es.onerror = () => { health.set(url, false); meta(); };
   es.onmessage = (e) => {
     let msg;
     try { msg = JSON.parse(e.data); } catch (_) { return; }
-    if (!msg || !msg.type) return;
+    const id = msg?.id || e.lastEventId;
+    if (id && replayIds.has(id)) return;
+    // SSE currently exposes no event id. Bound the fallback to the replay/live
+    // overlap window: only events no newer than replay's high-water timestamp.
+    if (!id && lastReplayTimestamp !== null && msg?.timestamp <= lastReplayTimestamp
+        && replayKeys.has(replayKey(msg))) return;
     // The stream's headers do not flush until its first event, so an idle
     // engine is indistinguishable from a dead one in the browser. The interval
     // sources' exec.output is subscribed purely so that never happens: any byte
-    // proves the fabric is alive, so mark it and drop it.
-    if (HEARTBEAT.has(msg.type)) { lastByte = Date.now(); health.set(url, true); meta(); return; }
-    msg.timestamp = msg.timestamp || Date.now();
-    lastByte = Date.now();
-    if (isProvenance(msg)) { recordProvenance(msg.payload || {}); schedule(); return; }
-    totalEvents++;
-    // The register takes every event. The board takes only the ones that name a
-    // run, because a card is a claim that a run exists.
-    if (isAttributed(msg)) apply(msg);
-    else unattributed++;
-    feed.unshift({ type: msg.type, source: msg.source, timestamp: msg.timestamp,
-                   summary: summarise(msg.payload), ...identity(msg.payload) });
-    if (feed.length > 1000) feed.length = 1000;
-    document.getElementById("feed-empty")?.remove();
-    schedule();
+    // proves the fabric is alive. handleMessage then filters that heartbeat.
+    handleMessage(msg, url, false);
   };
 }
+
+for (const url of streamUrls()) attachStream(url);
 
 renderBadges();
 renderBoard();

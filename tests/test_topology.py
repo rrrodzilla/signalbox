@@ -144,7 +144,9 @@ def test_an_event_with_no_run_id_does_not_invent_a_run_card():
         "the count of unplaceable events has to be stated somewhere on the page"
     )
     # And they stay in the register, which is the view that can hold them.
-    stream = PAGE_TEXT[PAGE_TEXT.index("es.onmessage") :]
+    stream = PAGE_TEXT[
+        PAGE_TEXT.index("function handleMessage") : PAGE_TEXT.index("async function attachStream")
+    ]
     assert stream.index("feed.unshift(") > stream.index("isAttributed(msg)"), (
         "an unattributed event must still reach the register"
     )
@@ -976,6 +978,45 @@ def test_the_page_treats_heartbeat_traffic_as_proof_of_life_not_content():
         for topic in source.get("publishes", []):
             if topic in dashboard["subscribes"]:
                 assert f'"{topic}"' in page, f"{topic} is subscribed but not filtered from the feed"
+
+
+def test_the_page_replays_history_before_attaching_each_live_stream():
+    """Reload must rebuild the board before opening the overlap-prone live tail."""
+    attach = PAGE_TEXT[
+        PAGE_TEXT.index("async function attachStream") : PAGE_TEXT.index(
+            "for (const url of streamUrls())"
+        )
+    ]
+    assert 'new URL("/history", location.origin)' in attach
+    assert 'historyUrl.searchParams.set("stream", parsed.port)' in attach
+    assert attach.index("await fetch(historyUrl") < attach.index("new EventSource(url)")
+    assert attach.index("handleMessage(msg, url, true)") < attach.index(
+        "new EventSource(url)"
+    )
+
+
+def test_replay_and_live_events_share_filters_and_overlap_deduplication():
+    """Backfill may not bypass the live heartbeat/provenance/attribution rules."""
+    handler = PAGE_TEXT[
+        PAGE_TEXT.index("function handleMessage") : PAGE_TEXT.index(
+            "async function attachStream"
+        )
+    ]
+    assert "HEARTBEAT.has(msg.type)" in handler
+    assert handler.index("if (isProvenance(msg))") < handler.index(
+        "if (isAttributed(msg))"
+    )
+
+    attach = PAGE_TEXT[
+        PAGE_TEXT.index("async function attachStream") : PAGE_TEXT.index(
+            "for (const url of streamUrls())"
+        )
+    ]
+    assert "replayIds.has(id)" in attach, "stored event ids must deduplicate overlap"
+    assert "msg?.timestamp <= lastReplayTimestamp" in attach
+    assert "replayKeys.has(replayKey(msg))" in attach, (
+        "id-less SSE messages need a bounded replay-overlap guard"
+    )
 
 
 def test_a_completed_run_releases_the_worktree_it_was_built_in():

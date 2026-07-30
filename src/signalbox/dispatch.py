@@ -100,6 +100,10 @@ def environment(payload: dict, base: dict[str, str]) -> dict[str, str]:
             # `or ""` rather than a `get` default because a payload can carry an
             # explicit null, and `str(None)` would spell the title "None".
             "SIGNALBOX_TITLE": str(payload.get("title") or ""),
+            # The standard the reviewer judges against. `or ""` for the same
+            # reason as the title: an absent intent must not reach review as
+            # the string "None" and read as a real instruction.
+            "SIGNALBOX_INTENT": str(payload.get("intent") or ""),
             "SIGNALBOX_SESSION_ID": str(payload.get("session_id") or ""),
         }
     )

@@ -190,6 +190,37 @@ def test_the_real_page_is_what_ships():
     assert PAGE.is_file()
 
 
+def test_failed_invocation_diagnostics_survive_the_provenance_register():
+    """The viewer must not discard the failure fields published by the runner."""
+    page = PAGE.read_text()
+    recorder = page[
+        page.index("function recordProvenance") : page.index(
+            "function renderInvocationFailures"
+        )
+    ]
+
+    for field in ("ok", "stderr", "exit_code", "command"):
+        assert f"{field}: p.{field}" in recorder
+
+
+def test_failed_invocation_diagnostics_are_visible_on_the_run():
+    """A stalled run's drawer names the command, exit status, and error text."""
+    page = PAGE.read_text()
+    renderer = page[
+        page.index("function renderInvocationFailures") : page.index(
+            "let unattributed"
+        )
+    ]
+    run = page[page.index("function renderRun") : page.index("function renderBoard")]
+
+    assert "invocation.run_id === run.key" in renderer
+    assert "invocation.ok === false" in renderer
+    assert "invocation.exit_code" in renderer
+    assert "invocation.command" in renderer
+    assert "invocation.stderr" in renderer
+    assert "renderInvocationFailures(run)" in run
+
+
 def test_the_lifecycle_stops_the_viewer_it_starts():
     """`down` has to name the viewer or it survives every restart.
 

@@ -420,6 +420,26 @@ def test_judging_invocation_always_posts_resolved_model(monkeypatch, returncode)
         returncode == 0,
     )
     assert isinstance(args[5], int) and args[5] >= 0
+    if returncode == 0:
+        assert args[6] == {}
+    else:
+        assert args[6] == {
+            "stderr": "failed",
+            "exit_code": 17,
+            "command": [
+                "claude",
+                "-p",
+                "<redacted: 242 chars>",
+                "--model",
+                "opus",
+                "--allowedTools",
+                "Read",
+                "Grep",
+                "Glob",
+                "Skill",
+                "Bash",
+            ],
+        }
     assert kwargs["env"]["SIGNALBOX_RUN_ID"] == "r1"
     assert kwargs["env"]["SIGNALBOX_STAGE_ID"] == "s1"
     assert kwargs["env"]["SIGNALBOX_SHARD_ID"] == "a"
@@ -506,6 +526,11 @@ def test_acting_nonzero_invocation_still_posts_provenance(tmp_path, monkeypatch)
         "shard.submitted",
         False,
     )
+    diagnostic = posted[0][0][6]
+    assert diagnostic["stderr"] == "failed"
+    assert diagnostic["exit_code"] == 9
+    assert diagnostic["command"][:2] == ["codex", "exec"]
+    assert diagnostic["command"][-1] == "-"
 
 
 def test_dispatch_resumes_matching_stored_codex_session(monkeypatch, tmp_path):

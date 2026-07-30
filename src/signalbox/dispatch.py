@@ -28,6 +28,7 @@ import uuid
 from pathlib import Path
 
 from signalbox.acts import read_session, record_session
+from signalbox.diagnostics import invocation_diagnostic
 from signalbox.emit import post_provenance
 from signalbox.paths import SkillMissing, require_skill, state_dir, worktree_for
 
@@ -344,6 +345,7 @@ def main(argv: list[str]) -> int:
             "shard.submitted",
             completed.returncode == 0,
             duration_ms,
+            invocation_diagnostic(completed, command),
             env=invocation_env,
         )
         return completed, invocation_env

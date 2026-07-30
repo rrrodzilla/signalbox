@@ -38,6 +38,50 @@ session reports success — the note would not exist and nothing would tell you.
 If your payload's path points under `.claude/`, stop and report
 `outcome: "blocked"` with the path.
 
+## What a note is for
+
+A durable description of how one subsystem works and why it is built that way,
+read by someone who needs to change that subsystem and has not seen it before.
+
+The code is the source of truth, and the note is not a second copy of it. A note
+earns its place by holding what the code cannot state about itself: why it is
+shaped this way, what it must never do, and what has already gone wrong.
+
+Two questions to ask of any sentence you are about to write or keep:
+
+**Would it survive a rename?** If a refactor that changed no behaviour would
+falsify the sentence, you have written down the code rather than the reasoning —
+and you have committed some future run to rewriting it for no gain.
+
+**Could the reader get it faster from the file?** If a minute in the source
+answers it, the note is competing with the code as a second source of truth.
+They will disagree eventually, the code will be right, and the note will have
+spent that whole time quietly misleading someone.
+
+Write:
+
+- why it is built this way — especially the alternative that was rejected, and what made it unacceptable
+- the invariants it maintains, and what breaks when they are violated
+- failure modes someone would otherwise rediscover, with the consequence that made them matter
+- enough of the subsystem's shape to orient a newcomer toward the right file
+
+Do not write:
+
+- an enumeration the code already maintains: key lists, field tables, event
+  catalogues, function signatures, command flags. These are the sentences that
+  go stale first, so they generate most of the rewriting that
+  `signalbox-plan-notes` rightly calls expensive.
+- a changelog — "this change", "previously", "as of PR #N", a narrative of how
+  it used to work. A *durable pointer* is different and welcome: citing
+  `[[known-defects]]` #65 for a defect that still binds outlives the diff that
+  produced it, where narration of that diff does not.
+- anything you did not verify by reading the code
+
+That last point is about **how you know**, not **what you select**. Verify every
+claim against the code; record only what the code cannot say for itself. Those
+are separate questions, and a good note answers both — it is fully grounded in
+the source and almost entirely absent from it.
+
 ## Procedure
 
 1. **Read the current note in full.** You are revising a document, not
@@ -48,32 +92,19 @@ If your payload's path points under `.claude/`, stop and report
    describes a moment rather than a system.
 3. **Read `reason` in your payload.** It names the specific claim the change
    falsified. That claim is your anchor.
-4. **Change what is false. Leave the rest alone.** A three-line correction to a
-   still-accurate note is a good outcome. Rewriting a note wholesale destroys
+4. **Correct what is false; leave sound reasoning alone.** A three-line fix to
+   an otherwise accurate note is a good outcome. Rewriting wholesale destroys
    the parts that were right and makes the change impossible to review.
-5. **Check the links.** Notes reference each other with `[[note-name]]`. If your
+5. **Prefer replacing duplication over re-syncing it.** If your anchor lands you
+   on an enumeration that mirrors the code, do not update it to match — cut it
+   and say instead why it exists or what it guarantees. Nothing else in this
+   pipeline ever removes such material, so a note that is only ever corrected
+   accumulates mirror text forever. Stay near your anchor; this is not licence
+   to prune the whole note.
+6. **Check the links.** Notes reference each other with `[[note-name]]`. If your
    change renames a concept another note links to, fix the link *in your note
    only*. Never edit another note to accommodate yours — name the problem in
    `summary` and let the next run's planner see it.
-
-## What a vault note is
-
-A durable description of how one subsystem works and why it is built that way.
-It is read by someone who needs to change that subsystem and has not seen it
-before.
-
-Write:
-- what the subsystem does, and the shape of it
-- the invariants it maintains, and what breaks if they are violated
-- why it is built this way, when the reason is not obvious
-- the failure modes someone would otherwise rediscover
-
-Do not write:
-- a changelog, or any reference to "this change", a PR, or an issue number
-- a narrative of how it used to work, unless the previous design explains a
-  constraint that still binds
-- API documentation that duplicates the code
-- anything you did not verify by reading the code
 
 ## Boundaries
 

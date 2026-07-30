@@ -34,12 +34,15 @@ _ENV_KEYS = {
     "shard_id": "SIGNALBOX_SHARD_ID",
     "shard_count": "SIGNALBOX_SHARD_COUNT",
     "stage_count": "SIGNALBOX_STAGE_COUNT",
+    "stage_index": "SIGNALBOX_STAGE_INDEX",
     "round": "SIGNALBOX_ROUND",
     "intent": "SIGNALBOX_INTENT",
     "session_id": "SIGNALBOX_SESSION_ID",
 }
 
-_NUMERIC_FIELDS = frozenset({"shard_count", "stage_count", "round", "issue"})
+_NUMERIC_FIELDS = frozenset(
+    {"shard_count", "stage_count", "stage_index", "round", "issue"}
+)
 
 
 def control_url() -> str:
@@ -61,6 +64,10 @@ def identity_from_env(env: dict[str, str]) -> dict:
             identity["declared"] = json.loads(declared)
         except json.JSONDecodeError:
             identity["declared"] = [p for p in declared.split(os.pathsep) if p]
+
+    stages = env.get("SIGNALBOX_STAGES")
+    if stages:
+        identity["stages"] = json.loads(stages)
 
     # http-source stamps no correlation, so the agent carries the parent's.
     correlation = env.get("EMERGENT_CORRELATION_ID")

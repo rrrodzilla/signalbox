@@ -6,7 +6,7 @@ The name is from railway signaling. A signal box is where the interlocking lives
 
 ## The shape
 
-One engine. Three sources, fifty-six handlers, seven sinks, and no script that knows what comes next.
+One engine. Four sources, sixty-seven handlers, eight sinks, and no script that knows what comes next.
 
 ```
 run.requested ─> workspace.ready ─> issue.fetched
@@ -28,8 +28,10 @@ run.requested ─> workspace.ready ─> issue.fetched
                                        │        ┌─────────┴─────────┐
                                   plan.rejected ◄─ (attempt < 3)   plan.accepted
                                                                      │
-                    pace-stages (one stage at a time, ack on merge) ◄─┘
-                                       │
+                                                                     ▼
+                                                            open-first-stage
+                                                                     │
+                                                                     ▼
                                   stage.opened ─> split-shards ─> shard.opened
                                        ▲                              │
                                        │                       dispatch-implement
@@ -47,10 +49,17 @@ run.requested ─> workspace.ready ─> issue.fetched
                                        │              │
                                        │       stage.mergeable ─> merge.attempted
                                        │                                │
-                                       └── stage.conflicted ◄───────────┴──────> stage.merged
-                                                                                     │
-                                                   join-run (stage_count) ◄───────────┘
-                                                         │
+                                       └── stage.conflicted ◄───────────┤
+                                                                        │
+                                                                  stage.merged
+                                       ┌────────────────────────────────┼──────────────────────┐
+                                       ▼                                ▼                      ▼
+                            guard-stages-advance          guard-stages-exhaust       join-run (stage_count)
+                              (event-carried index)                │                      │
+                                       │                           ▼                      └──────────────────────┐
+                                       └─> stage.opened     stages.exhausted                                    │
+                                                 ┌──────────────────────────────────────────────────────────────┘
+                                                 ▼
                                              run.built ─> suite.ran ─> gate.assessed
                                                                             │
                                    ┌────────────────────────────────────────┤
@@ -155,7 +164,7 @@ Prerequisites: the Emergent engine and its primitives, `claude`, `codex`, `gh` (
 
 ```bash
 emergent marketplace install exec-source exec-handler exec-sink \
-    stream-runner http-source sse-sink topology-viewer
+    http-source sse-sink topology-viewer
 gh extension install cli/gh-webhook
 export SIGNALBOX_VAULT=/absolute/path/to/notes-vault
 

@@ -102,27 +102,39 @@ def check_plan(plan: dict) -> dict:
     for duplicate in duplicate_ids(shard_ids):
         violations.append(f"duplicate shard_id: {duplicate}")
 
+    stage_objects = [stage for stage in stages if isinstance(stage, dict)]
+    carried_stages = [
+        {key: value for key, value in stage.items() if key != "stages"}
+        for stage in stage_objects
+    ]
     return {
         **plan,
-        "stages": [_stamp_stage(stage, plan) for stage in stages if isinstance(stage, dict)],
+        "stages": [
+            _stamp_stage(stage, plan, stage_index, carried_stages)
+            for stage_index, stage in enumerate(stage_objects)
+        ],
         "ok": not violations,
         "violations": violations,
         "attempt": int(plan.get("attempt") or 0) + 1,
     }
 
 
-def _stamp_stage(stage: dict, plan: dict) -> dict:
+def _stamp_stage(
+    stage: dict, plan: dict, stage_index: int, carried_stages: list[dict]
+) -> dict:
     """Denormalise run identity into each stage.
 
-    stream-runner emits one *item* from the collection, not the envelope around
-    it, so a stage that does not carry run identity would arrive downstream as
-    an orphan. Stamping here keeps every streamed item self-describing.
+    The advance router emits one stage object, not the envelope around it, so a
+    stage that does not carry run identity and the plan cursor would arrive
+    downstream as an orphan. Stamping here keeps every item self-describing.
     """
     return {
         **stage,
         **project(plan),
         "stage_id": stage.get("stage_id"),
-        "stage_count": len([x for x in plan.get("stages") or [] if isinstance(x, dict)]),
+        "stage_index": stage_index,
+        "stages": carried_stages,
+        "stage_count": len(carried_stages),
     }
 
 

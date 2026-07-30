@@ -47,6 +47,17 @@ def test_carry_overrides_model_supplied_identity():
     assert result["verdict"] == "done"
 
 
+def test_carry_overrides_model_supplied_stage_cursor():
+    stages = [{"stage_id": "s1"}, {"stage_id": "s2"}]
+    inbound = {"stage_index": 1, "stages": stages}
+    produced = {"stage_index": 0, "stages": [{"stage_id": "spoofed"}]}
+
+    result = carry(inbound, produced)
+
+    assert result["stage_index"] == 1
+    assert result["stages"] == stages
+
+
 def test_carry_leaves_non_identity_fields_alone():
     result = carry({"run_id": "r1"}, {"findings": [1, 2], "verdict": "approved"})
     assert result["findings"] == [1, 2]

@@ -92,6 +92,8 @@ def environment(payload: dict, base: dict[str, str]) -> dict[str, str]:
             # Both join counts have to survive the agent's emit. Whichever one is
             # missing, the join it feeds waits forever.
             "SIGNALBOX_STAGE_COUNT": str(payload.get("stage_count", "")),
+            "SIGNALBOX_STAGE_INDEX": str(payload.get("stage_index", "")),
+            "SIGNALBOX_STAGES": json.dumps(payload.get("stages") or []),
             "SIGNALBOX_ROUND": str(payload.get("round", 1)),
             "SIGNALBOX_DECLARED": json.dumps(payload.get("declared") or []),
             # Set unconditionally like every other key: `emit._ENV_KEYS` reads

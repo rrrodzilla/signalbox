@@ -128,13 +128,11 @@ def test_every_event_moves_the_card_before_any_topic_specific_branch():
 
 
 def test_an_event_with_no_run_id_does_not_invent_a_run_card():
-    """`stages.exhausted` is `{"count": N}`, and it was minting a phantom run.
+    """An unattributed operational event must not mint a phantom run.
 
-    Three topics arrive unattributed for three different reasons: stream-runner's
-    end event carries no identity at all, the exec-handler `-e` error topics
-    publish `{command, exit_code, stderr}` instead of the inbound payload (#66),
-    and reaper telemetry never had a run. Bucketing them under a fake key drew a
-    card for a run nobody launched.
+    Error topics from exec-handler publish `{command, exit_code, stderr}`
+    instead of the inbound payload (#66), and reaper telemetry never had a run.
+    Bucketing either under a fake key drew a card for a run nobody launched.
     """
     assert '"unattributed"' not in PAGE_TEXT, "no synthetic run key may remain"
     assert "if (isAttributed(msg)) apply(msg);" in PAGE_TEXT, (
@@ -293,6 +291,7 @@ def test_stateful_joins_publish_neutral_topics_before_run_terminals():
     "continue_handler,exhaust_handler",
     [
         ("route-plan-retry", "route-plan-exhausted"),
+        ("guard-stages-advance", "guard-stages-exhaust"),
         ("guard-rounds-continue", "guard-rounds-exhaust"),
     ],
 )
@@ -305,12 +304,17 @@ def test_depth_guards_have_both_sides(continue_handler, exhaust_handler):
     assert ">=" in " ".join(stop["args"]), f"{exhaust_handler} has no lower bound"
 
 
-def test_the_stage_pacer_is_acked_by_a_real_downstream_outcome():
-    """A pacer acked by nothing that fires on the failure path stalls the batch."""
-    pacer = named(HANDLERS, "pace-stages")
-    args = " ".join(pacer["args"])
-    assert "--ack-topic stage.merged" in args
-    assert "stage.merged" in published(), "nothing would ever ack the pacer"
+def test_stage_routers_are_wired_to_event_carried_progress():
+    first = named(HANDLERS, "open-first-stage")
+    advance = named(HANDLERS, "guard-stages-advance")
+    exhaust = named(HANDLERS, "guard-stages-exhaust")
+
+    assert first["subscribes"] == ["plan.accepted"]
+    assert first["publishes"] == ["stage.opened"]
+    assert advance["subscribes"] == exhaust["subscribes"] == ["stage.merged"]
+    assert advance["publishes"] == ["stage.opened"]
+    assert exhaust["publishes"] == ["stages.exhausted"]
+    assert all("stream-runner" not in h["path"] for h in (first, advance, exhaust))
 
 
 def test_shards_are_split_rather_than_paced():
@@ -387,14 +391,13 @@ def test_every_act_is_reachable_from_the_acts_dispatch():
 
 
 def test_run_built_carries_identity_rather_than_a_bare_count():
-    """stream-runner's end event is {"count": N}. Nothing downstream can use it.
-
-    run-suite looked for a worktree named "unknown" and reported "no suite
-    detected" while a passing suite sat in the real one.
-    """
-    pacer = named(HANDLERS, "pace-stages")
-    assert "run.built" not in pacer["publishes"], "run.built must not come from the pacer"
-
+    """The stage terminal must not replace the identity-bearing run join."""
+    producers = [
+        handler["name"]
+        for handler in HANDLERS
+        if "run.built" in handler.get("publishes", [])
+    ]
+    assert producers == ["join-run"]
     joiner = named(HANDLERS, "join-run")
     assert joiner["publishes"] == ["run.built"]
     assert joiner["subscribes"] == ["stage.merged"]
@@ -747,6 +750,91 @@ def route(handler_name: str, payload: dict) -> dict | None:
     assert done.returncode == 0, f"{handler_name} jq failed: {done.stderr}"
     out = done.stdout.strip()
     return json.loads(out) if out else None
+
+
+def checked_stage_plan(run_id: str = "sb-59") -> dict:
+    """Build the exact stamped-stage/raw-cursor shape check_plan produces."""
+    from signalbox.plan import check_plan
+
+    plan = {
+        "run_id": run_id,
+        "repo": "rrrodzilla/signalbox",
+        "issue": 59,
+        "title": "Replace the global stage cursor",
+        "base_sha": "0b4a37d",
+        "base_branch": "main",
+        "stages": [
+            {
+                "stage_id": f"s{index + 1}",
+                "shards": [{
+                    "shard_id": f"shard-{index + 1}",
+                    "files": [f"stage-{index + 1}.txt"],
+                    "intent": f"implement stage {index + 1}",
+                }],
+            }
+            for index in range(3)
+        ],
+    }
+    checked = check_plan(plan)
+    assert checked["ok"] is True
+    return checked
+
+
+def test_plan_acceptance_opens_this_runs_first_stage():
+    accepted = checked_stage_plan()
+    opened = route("open-first-stage", accepted)
+    assert opened == accepted["stages"][0]
+    assert opened["stage_index"] == 0
+
+
+def test_stage_merge_advances_from_the_event_carried_index():
+    accepted = checked_stage_plan(run_id="sb-99")
+    merged = {**accepted["stages"][0], "stage_id": "stale-name-from-before-restart"}
+    opened = route("guard-stages-advance", merged)
+    assert opened == accepted["stages"][1]
+    assert opened["run_id"] == "sb-99"
+    assert opened["stage_index"] == 1
+    assert opened["stage_count"] == 3
+    assert opened["stages"] == merged["stages"]
+    assert route("guard-stages-exhaust", merged) is None
+
+
+def test_replayed_last_stage_merge_exhausts_with_identity():
+    merged = checked_stage_plan()["stages"][2]
+    assert route("guard-stages-advance", merged) is None
+    assert route("guard-stages-exhaust", merged) == merged
+
+
+def test_reopening_a_conflicted_stage_does_not_move_the_stage_cursor():
+    """A conflict retry keeps its stage_index and only re-enters the splitter."""
+    accepted = checked_stage_plan()
+    conflict = accepted["stages"][0]
+    splitter = named(HANDLERS, "split-shards")
+    assert "stage.conflicted" in splitter["subscribes"]
+    for router in ("guard-stages-advance", "guard-stages-exhaust"):
+        assert "stage.conflicted" not in named(HANDLERS, router)["subscribes"]
+
+    first_merge = {**conflict, "conflict_round": 0}
+    reopened_merge = {**conflict, "conflict_round": 1}
+    assert route("guard-stages-advance", first_merge) == accepted["stages"][1]
+    assert route("guard-stages-advance", reopened_merge) == accepted["stages"][1]
+
+
+@pytest.mark.parametrize("stage_index, advances", [(0, True), (1, True), (2, False)])
+def test_stage_depth_guard_is_exclusive_on_both_sides(stage_index, advances):
+    merged = checked_stage_plan()["stages"][stage_index]
+    outputs = [
+        route("guard-stages-advance", merged),
+        route("guard-stages-exhaust", merged),
+    ]
+    assert sum(output is not None for output in outputs) == 1
+    assert (outputs[0] is not None) is advances
+
+
+def test_missing_stage_cursor_neither_advances_nor_falsely_exhausts():
+    raw_stage = checked_stage_plan()["stages"][0]["stages"][1]
+    assert route("guard-stages-advance", raw_stage) is None
+    assert route("guard-stages-exhaust", raw_stage) is None
 
 
 def delivery(conclusion: str, branch: str = "signalbox/run-sb-56",

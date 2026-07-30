@@ -35,8 +35,8 @@ fail() { printf 'harness: %s\n' "$*" >&2; exit 1; }
 # Fail on a missing tool now rather than twenty minutes into a run, where the
 # same absence surfaces as an agent that produced no verdict.
 
-REQUIRED_PRIMITIVES=(exec-source exec-handler exec-sink stream-runner
-                     http-source sse-sink topology-viewer)
+REQUIRED_PRIMITIVES=(exec-source exec-handler exec-sink http-source sse-sink
+                     topology-viewer)
 
 preflight() {
   local missing=()

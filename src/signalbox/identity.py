@@ -29,6 +29,8 @@ CARRIED_KEYS: tuple[str, ...] = (
     "base_branch",
     "attempt",
     "stage_id",
+    "stage_index",
+    "stages",
     "shard_id",
     "shard_count",
     # The run join's expected count. Without it `join-run` never learns how many

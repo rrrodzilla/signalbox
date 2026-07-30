@@ -194,7 +194,7 @@ async def test_two_arrivals_on_one_arm_never_complete_the_join(topic, payload):
     await joiner.accept(payload, topic=topic)
 
     assert recorder.published == []
-    assert len(joiner.pending["r1"].results) == 1
+    assert len(joiner.pending[("r1",)].results) == 1
 
 
 @pytest.mark.asyncio
@@ -231,7 +231,7 @@ async def test_first_arrival_on_either_arm_arms_the_timeout(topic, payload):
     joiner = _completion_joiner(recorder, timeout=0.02)
 
     await joiner.accept(payload, topic=topic)
-    assert joiner.pending["r1"].timer is not None
+    assert joiner.pending[("r1",)].timer is not None
     await asyncio.sleep(0.06)
 
     assert len(recorder.published) == 1
@@ -517,3 +517,101 @@ def test_a_missing_outcome_is_absent_rather_than_the_word_unknown():
     from signalbox.primitives.join_terminal import summarise_item
 
     assert "outcome" not in summarise_item({"stage_id": "s1"})
+
+
+# ── concurrency: a rendezvous must be run-scoped ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_two_runs_sharing_a_stage_id_join_separately():
+    """The defect that made concurrent runs unsafe, at the primitive.
+
+    Stage ids are unique within a plan, not across plans, and the plan skill's
+    own example names them `s1`/`s2`. Keyed on stage_id alone, two runs' shards
+    landed in one bucket: the join fired on whichever shard_count armed it
+    first, published a stage.closed mixing both runs' shards, and dropped the
+    remainder as late arrivals — so one run merged foreign work and the other
+    never closed its stage at all.
+    """
+    recorder = Recorder()
+    joiner = Joiner(("run_id", "stage_id"), "shard_count", recorder, timeout=0)
+
+    # Interleaved on purpose: this is what concurrency actually looks like.
+    await joiner.accept(_shard(shard="a", run_id="sb-1"))
+    await joiner.accept(_shard(shard="a", run_id="sb-2"))
+    assert recorder.published == [], "neither run has both its shards yet"
+
+    await joiner.accept(_shard(shard="b", run_id="sb-1"))
+    assert len(recorder.published) == 1
+    await joiner.accept(_shard(shard="b", run_id="sb-2"))
+    assert len(recorder.published) == 2
+
+    for published, run in zip(recorder.published, ("sb-1", "sb-2")):
+        assert published["run_id"] == run
+        assert published["stage_id"] == "s1"
+        assert published["received"] == 2
+        assert published["timed_out"] is False
+        # The decisive assertion: no shard from the other run leaked in.
+        assert {item["shard_id"] for item in published["results"]} == {"a", "b"}
+
+
+@pytest.mark.asyncio
+async def test_one_run_closing_a_stage_does_not_close_the_other_runs():
+    """`closed` is per composite key, or the second run's shards read as late."""
+    recorder = Recorder()
+    joiner = Joiner(("run_id", "stage_id"), "shard_count", recorder, timeout=0)
+
+    await joiner.accept(_shard(shard="a", run_id="sb-1"))
+    await joiner.accept(_shard(shard="b", run_id="sb-1"))
+    assert len(recorder.published) == 1
+
+    await joiner.accept(_shard(shard="a", run_id="sb-2"))
+    await joiner.accept(_shard(shard="b", run_id="sb-2"))
+
+    assert len(recorder.published) == 2
+    assert recorder.published[1]["run_id"] == "sb-2"
+    assert recorder.published[1]["received"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_payload_missing_one_composite_key_is_ignored_not_pooled():
+    """A partial key must not become a bucket every partial payload shares."""
+    recorder = Recorder()
+    joiner = Joiner(("run_id", "stage_id"), "shard_count", recorder, timeout=0)
+
+    await joiner.accept({"stage_id": "s1", "shard_count": 2, "outcome": "approved"})
+    await joiner.accept({"run_id": "sb-1", "shard_count": 2, "outcome": "approved"})
+
+    assert recorder.published == []
+    assert joiner.pending == {}
+
+
+def test_a_composite_join_reports_every_key_it_joined_on():
+    """Downstream routers read these fields; a joined payload must carry both."""
+    from signalbox.primitives.join_terminal import Pending, summarise
+
+    summary = summarise(
+        ("run_id", "stage_id"),
+        ("sb-1", "s1"),
+        Pending(expected=1, results=[]),
+        False,
+    )
+    assert summary["run_id"] == "sb-1"
+    assert summary["stage_id"] == "s1"
+
+
+def test_a_single_key_join_still_takes_a_bare_string():
+    """The run-level joins pass one key; composite support must not break them."""
+    from signalbox.primitives.join_terminal import as_keys
+
+    assert as_keys("run_id") == ("run_id",)
+    assert as_keys(("run_id", "stage_id")) == ("run_id", "stage_id")
+
+
+def test_the_stage_subscriptions_survive_a_composite_key():
+    """Chosen by membership, not equality — on equality the stage join silently
+    fell back to the notes subscriptions and would have heard no shard at all."""
+    from signalbox.primitives.join_terminal import default_subscriptions
+
+    assert default_subscriptions(("run_id", "stage_id")) == default_subscriptions("stage_id")
+    assert "shard.approved" in default_subscriptions(("run_id", "stage_id"))

@@ -58,14 +58,22 @@ RUNNER_MODEL_VARS = {
 
 CLAUDE_TOOLS = ("Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill")
 
-PENDING_KEYS = {
-    "pr": "pr",
-    "shard": "shard_id",
+# What names a pending thing, as a tuple of payload keys. A marker is how
+# silence gets a name, so two things that are actually different must never
+# render to one filename: the second overwrites the first, and clearing it
+# clears both — leaving one of them silent with nothing left to reap it.
+#
+# `pr` is a GitHub-assigned number and is unique on its own. `shard_id` is
+# unique only within its plan, so it is run-scoped. `test_every_pending_kind_is
+# _globally_addressable` holds the line as kinds are added.
+PENDING_KEYS: dict[str, tuple[str, ...]] = {
+    "pr": ("pr",),
+    "shard": ("run_id", "shard_id"),
 }
 
 
 def pending_path(kind: str, payload: dict) -> Path:
-    key = payload.get(PENDING_KEYS[kind], "unknown")
+    key = "-".join(str(payload.get(field, "unknown")) for field in PENDING_KEYS[kind])
     return state_dir() / "pending" / f"{kind}-{key}.json"
 
 

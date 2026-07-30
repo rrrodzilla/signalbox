@@ -220,8 +220,11 @@ def test_dispatch_environment_defaults_round_for_a_first_pass():
 
 
 def test_pending_marker_is_named_for_the_shard_the_reaper_will_report():
-    assert pending_path("shard", {"shard_id": "a"}).name == "shard-a.json"
-    assert pending_path("shard", {"run_id": "r1"}).name == "shard-unknown.json"
+    assert pending_path("shard", {"run_id": "r1", "shard_id": "a"}).name == "shard-r1-a.json"
+    # A missing half renders "unknown" rather than quietly borrowing the other,
+    # so an unaddressable marker is visible instead of colliding with a real one.
+    assert pending_path("shard", {"shard_id": "a"}).name == "shard-unknown-a.json"
+    assert pending_path("shard", {"run_id": "r1"}).name == "shard-r1-unknown.json"
 
 
 def test_fixer_session_round_trips_outside_pending(tmp_path, monkeypatch):

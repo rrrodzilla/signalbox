@@ -304,8 +304,8 @@ subscribes = ["plan.checked"]
 publishes = ["run.halted"]
 
 # The adversarial pass, and the reason it is worth a second model call: the
-# drafter and the auditor must not share a failure mode. A plan drafted by fable
-# and reviewed by fable agrees with itself — the same reading of an ambiguous
+# drafter and the auditor must not share a failure mode. A plan drafted by opus
+# and reviewed by opus agrees with itself — the same reading of an ambiguous
 # issue produces the decomposition and then blesses it. Codex reads the same
 # tree and the same plan with different training and an opposing brief, so a
 # stage boundary that only looks right from one angle has somewhere to fail

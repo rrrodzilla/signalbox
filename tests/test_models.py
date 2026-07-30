@@ -95,10 +95,10 @@ def test_every_judging_role_has_a_model():
     assert set(ROLE_MODELS) == set(ROLE_SKILLS)
 
 
-def test_the_load_bearing_judgments_run_on_fable():
+def test_the_load_bearing_judgments_run_on_opus():
     """The plan binds every shard downstream; the assessment decides promotion."""
     for role in ("plan", "assess"):
-        assert model_for(role, {}) == "fable"
+        assert model_for(role, {}) == "opus"
 
 
 def test_the_narrower_scoped_judgments_run_on_opus():

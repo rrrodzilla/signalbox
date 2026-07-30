@@ -12,7 +12,7 @@ One engine. Four sources, sixty-seven handlers, eight sinks, and no script that 
 run.requested ─> workspace.ready ─> issue.fetched
                                           │
                                           ▼
-                                     draft-plan  (fable; surveys the tree and
+                                     draft-plan  (opus; surveys the tree and
                                           │       reads the vault with its own
                                           │       subagents)
                                           ▼
@@ -114,16 +114,16 @@ The promote path waits on a push, not a poll. GitHub delivers `check_suite.compl
 Eight nodes are non-deterministic. Nothing else in the system is.
 
 Two of them judge the same artefact on purpose. `draft-plan` writes the plan on
-fable; `audit-plan` tries to break it on codex. An auditor sharing the drafter's
+opus; `audit-plan` tries to break it on codex. An auditor sharing the drafter's
 model shares its blind spots, so the second opinion is only worth its call if it
 is genuinely a second opinion.
 
 | Node | Role | Runner | Default model | Override precedence | Judges or acts | Fix-round continuity |
 |---|---|---|---|---|---|---|
-| `draft-plan` | `plan` | claude | fable | `SIGNALBOX_MODEL_PLAN`, then `SIGNALBOX_MODEL` | judges | — |
+| `draft-plan` | `plan` | claude | opus | `SIGNALBOX_MODEL_PLAN`, then `SIGNALBOX_MODEL` | judges | — |
 | `audit-plan` | `audit` | codex | codex's own | `SIGNALBOX_CODEX_MODEL` | judges | — |
 | `review-shard` | `review` | claude | opus | `SIGNALBOX_MODEL_REVIEW`, then `SIGNALBOX_MODEL` | judges | — |
-| `assess` | `assess` | claude | fable | `SIGNALBOX_MODEL_ASSESS`, then `SIGNALBOX_MODEL` | judges | — |
+| `assess` | `assess` | claude | opus | `SIGNALBOX_MODEL_ASSESS`, then `SIGNALBOX_MODEL` | judges | — |
 | `plan-notes` | `plan-notes` | claude | sonnet | `SIGNALBOX_MODEL_PLAN_NOTES`, then `SIGNALBOX_MODEL` | judges | — |
 | `write-note` | `write-note` | claude | sonnet | `SIGNALBOX_MODEL_WRITE_NOTE`, then `SIGNALBOX_MODEL` | acts (writes notes) | — |
 | `dispatch-implement` | `implement` | codex | codex configured default | `SIGNALBOX_CODEX_MODEL` | acts (writes code) | records the runner session |

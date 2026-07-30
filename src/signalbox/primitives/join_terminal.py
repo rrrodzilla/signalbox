@@ -40,6 +40,7 @@ class Pending:
     expected: int | None
     results: list[dict] = field(default_factory=list)
     satisfied_arms: set[str] = field(default_factory=set)
+    arm_payloads: dict[str, dict] = field(default_factory=dict)
     timer: asyncio.Task | None = None
 
 
@@ -84,7 +85,13 @@ def summarise_item(item: dict) -> dict:
     return record
 
 
-def summarise(key_name: str, key_value: str, pending: Pending, timed_out: bool) -> dict:
+def summarise(
+    key_name: str,
+    key_value: str,
+    pending: Pending,
+    timed_out: bool,
+    carry_payloads: bool = False,
+) -> dict:
     """The joined payload. Pure, so the interesting part is testable."""
     first = pending.results[0] if pending.results else {}
     summary = {
@@ -94,6 +101,8 @@ def summarise(key_name: str, key_value: str, pending: Pending, timed_out: bool) 
         "timed_out": timed_out,
         "results": [summarise_item(item) for item in pending.results],
     }
+    if carry_payloads:
+        summary["payloads"] = dict(pending.arm_payloads)
     summary.update(identity.project(first))
     return summary
 
@@ -108,11 +117,15 @@ class Joiner:
         publish: Callable[[dict, object], Awaitable[None]],
         timeout: float = 3600.0,
         arms: tuple[str, ...] | None = None,
+        carry_payloads: bool = False,
     ):
+        if carry_payloads and arms is None:
+            raise ValueError("carry_payloads requires arms")
         self.key = key
         self.count_field = count_field
         self.arms = arms
         self.arm_set = set(arms) if arms is not None else None
+        self.carry_payloads = carry_payloads
         self.publish = publish
         self.timeout = timeout
         self.pending: dict[str, Pending] = {}
@@ -125,7 +138,16 @@ class Joiner:
         if entry.timer is not None and not entry.timer.done():
             entry.timer.cancel()
         self.closed.add(key_value)
-        await self.publish(summarise(self.key, key_value, entry, timed_out), cause)
+        await self.publish(
+            summarise(
+                self.key,
+                key_value,
+                entry,
+                timed_out,
+                carry_payloads=self.carry_payloads,
+            ),
+            cause,
+        )
 
     async def _expire(self, key_value: str) -> None:
         try:
@@ -185,6 +207,8 @@ class Joiner:
                 )
                 return
             entry.satisfied_arms.add(topic)
+            if self.carry_payloads:
+                entry.arm_payloads[topic] = payload
         elif entry.expected is None:
             entry.expected = expected_count(payload, self.count_field)
 
@@ -220,6 +244,11 @@ def main() -> None:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--count-field")
     mode.add_argument("--arms")
+    parser.add_argument(
+        "--carry-payloads",
+        action="store_true",
+        help="in arms mode, carry each full payload keyed by topic",
+    )
     parser.add_argument("--publish-as", required=True)
     parser.add_argument("--timeout-seconds", type=float, default=3600.0)
     parser.add_argument("--subscribe", action="append", default=None)
@@ -246,12 +275,15 @@ def main() -> None:
         parser.error("--arms must name at least one topic")
     if arms is not None and len(set(arms)) != len(arms):
         parser.error("--arms must name distinct topics")
+    if args.carry_payloads and arms is None:
+        parser.error("--carry-payloads requires --arms")
     joiner = Joiner(
         args.key,
         args.count_field,
         publish_joined,
         args.timeout_seconds,
         arms=arms,
+        carry_payloads=args.carry_payloads,
     )
     subscribes = args.subscribe or list(arms or default_subscriptions(args.key))
     name = os.environ.get("EMERGENT_PRIMITIVE_NAME", f"join-{args.key}")

@@ -11,9 +11,36 @@ action — you are not implementing anything, and you must not edit a single fil
 
 ## Step 1: gather inputs, in parallel
 
-You receive the issue and nothing else. The survey and the vault recall are
-yours to run, as **subagents dispatched in a single message so they run
-concurrently**:
+Your payload carries the issue's title, body, and labels. That is a starting
+point, not the record.
+
+**Read the issue thread yourself before you dispatch anything.** You have
+`gh` and it is authenticated:
+
+```
+gh issue view <number> --comments
+```
+
+The thread is the only channel a human has for handing you knowledge that is not
+in this repository — a schema from another repo, a decision already taken, an
+investigation someone ran before launching you. Follow what it references, too:
+a `see #59`, a linked PR, a commit. `gh issue view`, `gh pr view`, and
+`gh pr diff` all work, and a reference someone bothered to write down is usually
+the reference that matters.
+
+This is why the payload does not pre-digest it for you. Any fixed set of fields
+is a guess about what this issue needs, and the guess is wrong often enough to
+cost a run: sb-62 halted after three attempts objecting that no code in the repo
+defined an event store's schema, while the schema sat in a comment on the issue
+it was working.
+
+Facts from the thread are legitimate inputs. When you use one, say so in the
+shard intent that depends on it, the same way you attribute a vault note — the
+auditor checks claims against the tree, and has to know which claims came from
+somewhere it cannot look.
+
+The survey and the vault recall are yours to run, as **subagents dispatched in a
+single message so they run concurrently**:
 
 - One subagent loading the **`signalbox-survey`** skill, to find what the issue
   touches. Its JSON is your `paths`, `subsystems`, `conventions`,

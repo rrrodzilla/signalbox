@@ -69,11 +69,35 @@ What no machine can check, in rough order of what costs most when wrong:
    intent is the standard the shard's reviewer will judge against. "Update the
    dashboard" is not a standard.
 
+## Facts that are not in the tree
+
+A plan may rest on something this repository does not define: a schema from a
+dependency, an interface of a compiled binary, a decision recorded elsewhere.
+**"No code here defines this" is not an objection by itself.** Some of what a
+plan needs legitimately lives outside, and a correct plan is allowed to depend
+on it.
+
+Check the issue thread before objecting on those grounds — you have `gh`:
+
+```
+gh issue view <number> --comments
+```
+
+A shard intent citing a fact from the thread is citing a real source. Object if
+the fact is *wrong*, if the plan never says where it came from, or if the shard
+has no way to verify it at implementation time. Do not object merely because you
+would have to leave the repository to check it.
+
+sb-62 halted over exactly this. Three attempts, three rejections whose core was
+"no repository code defines these tables", while the tables were written out in
+a comment on the issue being worked. The objection was true and useless.
+
 ## How to be useful rather than merely critical
 
-Every objection needs **evidence from the tree**, not an impression. Name the
-file you read, the line, the symbol. An objection a redrafting agent cannot act
-on is worse than silence, because it burns one of only three attempts.
+Every objection needs **evidence**, not an impression: the file you read, the
+line, the symbol, or the comment you are contradicting. An objection a
+redrafting agent cannot act on is worse than silence, because it burns one of
+only three attempts.
 
 Do not propose your own decomposition. Say what is wrong and why; the drafter
 owns the shape. If you find yourself writing a plan, you have taken the wrong

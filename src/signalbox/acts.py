@@ -168,6 +168,16 @@ def release_workspace(payload: dict) -> dict:
 
 
 def fetch_issue(payload: dict) -> dict:
+    """Enough of the issue to start a run and to name the PR at the end.
+
+    Deliberately not "everything the planner needs to read". This call fetches
+    identity — the title that becomes the PR title (#80), the labels, the body
+    that seeds the first read — and stops there. Any fixed field list is a guess
+    about what a future issue will require, and the guess was wrong for sb-62:
+    the answer it needed sat in a comment nobody had asked GitHub for. The
+    planning agent has `gh` and reads the thread itself, so what it can reach is
+    bounded by the issue, not by this argv.
+    """
     # A launch may carry the issue text directly, for a repository with no
     # GitHub remote. There is then nothing to fetch, and saying so is more
     # honest than calling gh and failing.

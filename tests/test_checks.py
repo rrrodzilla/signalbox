@@ -236,6 +236,35 @@ def test_the_base_branch_survives_every_seam_that_dropped_stage_count():
     assert joined["base_branch"] == "redesign/event-first"
 
 
+def test_the_title_survives_the_agent_environment_seam():
+    """sb-78's title crosses the two hand-mapped agent environment seams."""
+    from signalbox.dispatch import environment
+    from signalbox.emit import _ENV_KEYS, identity_from_env
+
+    stamped = environment({"title": "Keep this title"}, {})
+    assert stamped["SIGNALBOX_TITLE"] == "Keep this title"
+
+    assert "title" in _ENV_KEYS
+    assert identity_from_env(stamped)["title"] == "Keep this title"
+
+
+def test_a_none_title_does_not_round_trip_as_the_string_none():
+    """sb-78 must not repeat #74's str(None) precedent at the agent env seam.
+
+    The variable is stamped unconditionally, like every other key, because
+    `emit._ENV_KEYS` reads this side back without checking whether the writer
+    thought it worthwhile. What matters is the property, not the mechanism: an
+    absent title must not reach the agent as the string "None", must not leave a
+    stale value standing, and must not come back as a title.
+    """
+    from signalbox.dispatch import environment
+    from signalbox.emit import identity_from_env
+
+    stamped = environment({"title": None}, {"SIGNALBOX_TITLE": "stale title"})
+    assert stamped["SIGNALBOX_TITLE"] == ""
+    assert "title" not in identity_from_env(stamped)
+
+
 def test_every_carried_key_survives_every_payload_building_seam():
     """CARRIED_KEYS is the contract across payload-building seams.
 

@@ -18,6 +18,9 @@ CARRIED_KEYS: tuple[str, ...] = (
     "run_id",
     "repo",
     "issue",
+    # Issue #80: every PR opened as "signalbox (#N)" because the issue title
+    # died at the plan splitter.
+    "title",
     "base_sha",
     # The base the PR opens against. Carried for the same reason base_sha is: it
     # is decided at launch and must not be re-derived later. `gh pr create` will

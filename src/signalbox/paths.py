@@ -43,6 +43,28 @@ def skills_dir() -> Path:
     return Path(__file__).resolve().parent.parent.parent / "skills"
 
 
+class VaultMissing(RuntimeError):
+    """The operator-configured notes vault is absent.
+
+    Never fall back to a path inside the disposable worktree. In incident #70,
+    notes were written under a relative ``docs/vault/`` fallback and then
+    discarded by ``release_workspace``.
+    """
+
+
+def vault_dir() -> Path:
+    """The configured absolute notes vault, or an error if it is not a directory."""
+    configured = os.environ.get("SIGNALBOX_VAULT")
+    if not configured:
+        raise VaultMissing("SIGNALBOX_VAULT is not configured")
+    path = Path(configured)
+    if not path.is_absolute():
+        raise VaultMissing(f"SIGNALBOX_VAULT is not an absolute path: {path}")
+    if not path.is_dir():
+        raise VaultMissing(f"SIGNALBOX_VAULT is not a directory: {path}")
+    return path
+
+
 # Where each runner looks for project skills, relative to the working
 # directory. Both discover by scanning; neither reads the other's directory, so
 # a skill has to be installed once per runner. Verified empirically: a skill in

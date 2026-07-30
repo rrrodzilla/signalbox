@@ -27,13 +27,23 @@ An empty list is a valid and common answer:
 {"notes": []}
 ```
 
+If the vault is unavailable, report the blocked outcome as JSON:
+
+```json
+{"notes": [], "outcome": "blocked", "reason": "SIGNALBOX_VAULT is absent"}
+```
+
 Nothing but the JSON object on stdout.
 
 ## The vault
 
-One note per subsystem, in the vault directory (`$SIGNALBOX_VAULT`, defaulting
-to `docs/vault/`). Notes are markdown, named for the subsystem they describe:
-`shards.md`, `review-loop.md`, `gates.md`.
+One note per subsystem, in the vault directory. `$SIGNALBOX_VAULT` is always
+present as an absolute path stamped into the environment by the harness. Notes
+are markdown, named for the subsystem they describe: `shards.md`,
+`review-loop.md`, `gates.md`.
+
+If `$SIGNALBOX_VAULT` is somehow absent, report `outcome: "blocked"` using the
+output contract and stop. Do not invent a fallback.
 
 Never place notes under `.claude/`. Writes there are silently dropped while the
 writing session reports success, so a note written there is a note that does not

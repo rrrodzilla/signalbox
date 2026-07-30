@@ -518,6 +518,34 @@ def test_the_join_count_a_run_terminates_on_is_an_identity_key():
     assert count_field in CARRIED_KEYS
 
 
+def test_every_fetched_issue_field_is_carried_or_deliberately_run_local(monkeypatch):
+    """New issue metadata must not silently disappear at the next payload seam."""
+    from signalbox import acts
+    from signalbox.identity import CARRIED_KEYS
+
+    monkeypatch.setattr(
+        acts,
+        "_run",
+        lambda *args, **kwargs: (
+            0,
+            '{"number":80,"title":"Carry fetched fields","body":"Details",'
+            '"labels":[{"name":"bug"}]}',
+            "",
+        ),
+    )
+    inbound = {"run_id": "sb-80", "repo": "owner/repo", "issue": 80, "ok": True}
+    fetched_fields = acts.fetch_issue(inbound).keys() - inbound.keys()
+
+    run_local = {
+        # Carrying full issue bodies on every event would add noise to the run.
+        "body",
+        # Nothing downstream consumes labels today; a future consumer must
+        # consciously promote them into CARRIED_KEYS when it needs them.
+        "labels",
+    }
+    assert fetched_fields <= set(CARRIED_KEYS) | run_local
+
+
 def test_the_dashboard_stream_has_something_to_carry_while_idle():
     """An idle sse-sink stream sends zero bytes, so a browser calls it dead.
 

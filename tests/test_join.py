@@ -137,6 +137,7 @@ async def test_keyless_arm_arrival_is_ignored():
     [("pr.merged", _pr_merged()), ("notes.synced", _notes_synced())],
 )
 async def test_first_arrival_on_either_arm_arms_the_timeout(topic, payload):
+    """A first arrival arms the timeout and publishes a timed-out partial join."""
     recorder = Recorder()
     joiner = _completion_joiner(recorder, timeout=0.02)
 

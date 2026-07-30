@@ -15,7 +15,8 @@ import sys
 # actually calls. prepare-workspace was wired into the topology and the acts
 # dispatch but missing here, and every run failed on its first step.
 ACT_COMMANDS = frozenset({
-    "prepare-workspace", "fetch-issue", "run-suite", "merge-stage", "push-branch",
+    "prepare-workspace", "release-workspace", "fetch-issue", "run-suite",
+    "merge-stage", "push-branch",
     "open-pr", "merge-pr", "check-details", "map-ci-findings", "reap",
     "mark-pending", "clear-pending", "rehydrate", "notify", "launch",
 })

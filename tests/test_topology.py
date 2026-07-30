@@ -946,6 +946,24 @@ def test_a_model_invocation_is_known_control_vocabulary():
     assert route("route-unknown-emission", envelope) is None
 
 
+def test_a_run_level_invocation_cannot_match_a_shard_scoped_entry():
+    """Issue #84: prevent the run-level sb-69 invocation mislabeling."""
+    matcher = PAGE_TEXT[
+        PAGE_TEXT.index("function invocationFor") : PAGE_TEXT.index(
+            "function isProvenance"
+        )
+    ]
+    assert 'if (entry[k] === undefined) continue;' in matcher
+    scoped = '(k === "stage_id" || k === "shard_id")'
+    reject = 'invocation[k] === undefined) { conflict = true; break; }'
+    skip = 'if (invocation[k] === undefined) continue;'
+    assert scoped in matcher, "stage and shard scope must be entry-side constraints"
+    assert reject in matcher, "a coarser invocation must conflict with a scoped entry"
+    assert matcher.index(scoped) < matcher.index(reject) < matcher.index(skip), (
+        "missing invocation scope must reject before the generic missing-key skip"
+    )
+
+
 def test_the_page_treats_heartbeat_traffic_as_proof_of_life_not_content():
     """Consumed telemetry must not weaken the interval proof-of-life contract.
 

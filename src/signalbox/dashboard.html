@@ -243,6 +243,11 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 .group[open] > summary::before { content:"\2212 "; }
 .idline { color:var(--faint); font-size:11px; overflow-wrap:anywhere; }
 .idline b { color:var(--dim); font-weight:400; }
+.invocation-failure { margin-top:8px; padding:7px 8px; border-left:2px solid var(--red);
+  background:color-mix(in srgb, var(--red) 6%, transparent); }
+.invocation-failure .idline { color:var(--dim); }
+.invocation-failure pre { margin-top:4px; color:var(--paint); font:inherit;
+  white-space:pre-wrap; overflow-wrap:anywhere; }
 
 .register { border-left:1px solid var(--seam); background:#131924; min-width:0; }
 @media (max-width:1100px){ .register { border-left:0; border-top:1px solid var(--seam); } }
@@ -506,8 +511,29 @@ function isProvenance(msg) {
 function recordProvenance(p) {
   const id = identity(p);
   provenance.set(identityKey(id), {
-    ...id, runner: p.runner, model: p.model, produces: p.produces,
+    ...id, runner: p.runner, model: p.model, produces: p.produces, ok: p.ok,
+    stderr: p.stderr, exit_code: p.exit_code, command: p.command,
   });
+}
+
+function renderInvocationFailures(run) {
+  return [...provenance.values()]
+    .filter((invocation) => invocation.run_id === run.key && invocation.ok === false)
+    .map((invocation) => {
+      const scope = [invocation.stage_id, invocation.shard_id]
+        .filter((part) => part != null).join(" · ");
+      const command = Array.isArray(invocation.command)
+        ? invocation.command.join(" ") : invocation.command;
+      return '<div class="invocation-failure">' +
+        '<div class="idline"><b>failed invocation</b> ' +
+          esc(invocation.runner || "unknown") +
+          (scope ? " · " + esc(scope) : "") +
+          (invocation.exit_code == null ? "" : " · exit " + esc(invocation.exit_code)) +
+        "</div>" +
+        (command ? '<div class="idline"><b>command</b> ' + esc(command) + "</div>" : "") +
+        (invocation.stderr ? "<pre>" + esc(invocation.stderr) + "</pre>" : "") +
+      "</div>";
+    }).join("");
 }
 
 /* Two families arrive with no run_id, and neither is a run: the exec-handler
@@ -808,6 +834,7 @@ function renderRun(run, now) {
         (run.pr ? '<div class="idline"><b>pr</b> ' + esc(run.pr) + "</div>" : "") +
         (run.notes.length ? '<div class="idline"><b>notes</b> ' + esc(run.notes.join(", ")) + "</div>" : "") +
         '<div class="idline"><b>started</b> ' + new Date(run.first).toLocaleTimeString() + "</div>" +
+        renderInvocationFailures(run) +
       "</div></details>" +
     "</article>";
 }

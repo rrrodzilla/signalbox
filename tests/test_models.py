@@ -90,6 +90,57 @@ def test_provenance_body_has_join_fields_and_control_failure_is_nonfatal(
     assert "control endpoint unreachable: down" in capsys.readouterr().err
 
 
+def test_failed_provenance_body_carries_diagnostic_beside_stamped_identity(
+    monkeypatch,
+):
+    bodies = []
+    monkeypatch.setattr(emit, "post", lambda body: bodies.append(body) or 202)
+    env = {
+        "SIGNALBOX_RUN_ID": "r1",
+        "SIGNALBOX_STAGE_ID": "s1",
+        "SIGNALBOX_SHARD_ID": "a",
+        "SIGNALBOX_ROUND": "2",
+    }
+    diagnostic = {
+        "error": "model process exited with status 17",
+        "exit_code": 17,
+        "command": ["claude", "-p", "<prompt:123 chars>"],
+        "run_id": "caller-cannot-shadow-identity",
+    }
+
+    assert (
+        emit.post_provenance(
+            "review",
+            "claude",
+            "opus",
+            "review.submitted",
+            False,
+            456,
+            diagnostic,
+            env=env,
+        )
+        == 202
+    )
+    assert bodies == [
+        {
+            "role": "review",
+            "runner": "claude",
+            "model": "opus",
+            "produces": "review.submitted",
+            "ok": False,
+            "duration_ms": 456,
+            "error": "model process exited with status 17",
+            "exit_code": 17,
+            "command": ["claude", "-p", "<prompt:123 chars>"],
+            "run_id": "r1",
+            "stage_id": "s1",
+            "shard_id": "a",
+            "round": 2,
+            "event": "model.invoked",
+        }
+    ]
+
+
 def test_every_judging_role_has_a_model():
     """A role with no entry would fall through to whatever the CLI defaults to."""
     assert set(ROLE_MODELS) == set(ROLE_SKILLS)
@@ -369,6 +420,26 @@ def test_judging_invocation_always_posts_resolved_model(monkeypatch, returncode)
         returncode == 0,
     )
     assert isinstance(args[5], int) and args[5] >= 0
+    if returncode == 0:
+        assert args[6] == {}
+    else:
+        assert args[6] == {
+            "stderr": "failed",
+            "exit_code": 17,
+            "command": [
+                "claude",
+                "-p",
+                "<redacted: 242 chars>",
+                "--model",
+                "opus",
+                "--allowedTools",
+                "Read",
+                "Grep",
+                "Glob",
+                "Skill",
+                "Bash",
+            ],
+        }
     assert kwargs["env"]["SIGNALBOX_RUN_ID"] == "r1"
     assert kwargs["env"]["SIGNALBOX_STAGE_ID"] == "s1"
     assert kwargs["env"]["SIGNALBOX_SHARD_ID"] == "a"
@@ -455,6 +526,11 @@ def test_acting_nonzero_invocation_still_posts_provenance(tmp_path, monkeypatch)
         "shard.submitted",
         False,
     )
+    diagnostic = posted[0][0][6]
+    assert diagnostic["stderr"] == "failed"
+    assert diagnostic["exit_code"] == 9
+    assert diagnostic["command"][:2] == ["codex", "exec"]
+    assert diagnostic["command"][-1] == "-"
 
 
 def test_dispatch_resumes_matching_stored_codex_session(monkeypatch, tmp_path):

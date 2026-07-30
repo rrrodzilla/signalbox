@@ -15,6 +15,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 
 ALLOWED_EVENTS = frozenset(
     {"shard.file-written", "shard.check-ran", "shard.submitted"}
@@ -113,6 +114,7 @@ def post_provenance(
     produces: str,
     ok: bool,
     duration_ms: int,
+    diagnostic: Mapping[str, object] | None = None,
     env: dict[str, str] | None = None,
 ) -> int | None:
     """Publish the model actually invoked at a mechanical process boundary.
@@ -121,16 +123,19 @@ def post_provenance(
     comes from Python arguments chosen by the invoker, while identity and
     correlation take the same path as every other control POST.
     """
+    fields = {
+        "role": role,
+        "runner": runner,
+        "model": model,
+        "produces": produces,
+        "ok": ok,
+        "duration_ms": duration_ms,
+    }
+    if diagnostic:
+        fields.update(diagnostic)
     body = build_body(
         "model.invoked",
-        {
-            "role": role,
-            "runner": runner,
-            "model": model,
-            "produces": produces,
-            "ok": ok,
-            "duration_ms": duration_ms,
-        },
+        fields,
         dict(os.environ) if env is None else env,
     )
     try:

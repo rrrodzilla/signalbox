@@ -18,6 +18,7 @@ import sys
 import time
 
 from signalbox.dispatch import environment
+from signalbox.diagnostics import invocation_diagnostic
 from signalbox.emit import post_provenance
 from signalbox.identity import carry, spoofed_keys
 from signalbox.paths import (
@@ -280,6 +281,7 @@ def run(role: str, payload: dict, model: str | None = None) -> tuple[dict, int]:
         ROLE_PRODUCED_TOPICS[role],
         completed.returncode == 0,
         duration_ms,
+        invocation_diagnostic(completed, command),
         env=environment(payload, dict(os.environ)),
     )
     if completed.returncode != 0:

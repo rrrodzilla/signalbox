@@ -291,6 +291,7 @@ def test_stateful_joins_publish_neutral_topics_before_run_terminals():
     "continue_handler,exhaust_handler",
     [
         ("route-plan-retry", "route-plan-exhausted"),
+        ("route-audit-changes", "route-audit-exhausted"),
         ("guard-stages-advance", "guard-stages-exhaust"),
         ("guard-rounds-continue", "guard-rounds-exhaust"),
     ],
@@ -340,7 +341,7 @@ def test_promotion_is_decomposed_into_retryable_acts():
 
 def test_every_model_verdict_has_an_exhaustiveness_router():
     """Model output is untrusted input; an unrecognised verdict must not vanish."""
-    for topic in ("shard.submitted", "review.submitted", "gate.assessed"):
+    for topic in ("shard.submitted", "review.submitted", "gate.assessed", "plan.audited"):
         catchers = [
             h for h in HANDLERS
             if topic in h.get("subscribes", []) and "invalid" in " ".join(h["publishes"])
@@ -596,9 +597,8 @@ def test_every_non_deterministic_node_publishes_invocation_provenance():
     from signalbox.agent import ROLE_PRODUCED_TOPICS
 
     nodes_by_role = {
-        "survey": "survey-codebase",
-        "recall": "recall-vault",
         "plan": "draft-plan",
+        "audit": "audit-plan",
         "review": "review-shard",
         "assess": "assess",
         "plan-notes": "plan-notes",
@@ -621,110 +621,95 @@ def test_every_non_deterministic_node_publishes_invocation_provenance():
             assert ROLE_PRODUCED_TOPICS[role] == "shard.submitted"
 
 
-def test_planning_rendezvous_covers_both_agent_invocation_budgets():
-    recall = named(HANDLERS, "recall-vault")
-    assert recall["subscribes"] == ["issue.fetched"]
-    assert recall["publishes"] == [
-        "vault.recalled",
-        "vault.recall-failed",
-        "model.invoked",
-    ]
+def test_planning_gathers_its_own_inputs_with_no_rendezvous_to_lose():
+    """The survey/recall join is gone, and must not come back by accident.
 
-    joiner = named(HANDLERS, "join-plan-inputs")
-    assert joiner["subscribes"] == ["codebase.surveyed", "vault.recalled"]
-    assert joiner["publishes"] == ["plan.inputs.closed"]
-    args = " ".join(joiner["args"])
-    assert "--arms codebase.surveyed,vault.recalled" in args
-    assert "--carry-payloads" in args
-
-    # Derive each arm's budget from the handler that actually produces it, so
-    # this covers an arm nobody has named yet and an arm whose -t moves.  Pinning
-    # a literal here is what let sb-90 through: the join asserted only that it
-    # outlived 300s while survey-codebase, the arm that died, went unread.
-    arms = joiner["args"][joiner["args"].index("--arms") + 1].split(",")
-    budgets = {}
-    for arm in arms:
-        producers = [h for h in HANDLERS if arm in h.get("publishes", [])]
-        assert producers, f"no handler publishes join arm {arm!r}"
-        for producer in producers:
-            budgets[producer["name"]] = float(
-                producer["args"][producer["args"].index("-t") + 1]
-            )
-
-    timeout = float(joiner["args"][joiner["args"].index("--timeout-seconds") + 1])
-    slowest = max(budgets.values()) / 1000
-    assert timeout > slowest, (
-        "the first arrival must not time out the other agent: the join waits "
-        f"{timeout}s but {max(budgets, key=budgets.get)} may take {slowest}s"
-    )
-
+    It was two roles and a barrier around work the drafting agent already does
+    with its own subagents, so the engine was never orchestrating the breadth —
+    only the two processes. What the barrier did add was a way to lose: sb-62
+    halted holding one of two arms, for want of an input the surveying agent was
+    still producing.
+    """
     planner = named(HANDLERS, "draft-plan")
-    assert planner["subscribes"] == ["plan.inputs", "plan.rejected"]
-    assert "codebase.surveyed" not in planner["subscribes"]
+    assert planner["subscribes"] == ["issue.fetched", "plan.rejected"]
+
+    for gone in ("survey-codebase", "recall-vault", "join-plan-inputs"):
+        assert not [h for h in HANDLERS if h["name"] == gone], (
+            f"{gone} is back; planning inputs must not be a rendezvous again"
+        )
+
+    # Nothing may join on the planning inputs by any name. Asserting on the
+    # handler names alone would let the same barrier return as `join-plan-start`.
+    for handler in HANDLERS:
+        args = handler.get("args", [])
+        if not any(arg in {"join-terminal", "join_terminal"} for arg in args):
+            continue
+        arms = args[args.index("--arms") + 1] if "--arms" in args else ""
+        assert "codebase.surveyed" not in arms and "vault.recalled" not in arms, (
+            f"{handler['name']} rebuilds the planning rendezvous"
+        )
 
 
-def test_plan_input_join_restores_survey_shape_and_names_recalled_context():
-    survey = {
-        "run_id": "sb-89",
-        "repo": "rrrodzilla/signalbox",
-        "paths": ["src/signalbox/agent.py"],
-        "subsystems": ["agent roles"],
-        "conventions": ["role procedures are skills"],
-    }
-    recall = {
-        "hazards": [{"note": "identity.md", "claim": "identity is load-bearing"}],
-        "warnings": [],
-        "contradictions": [],
-        "contradictions_omitted": 0,
-    }
-    joined = {
-        "run_id": "sb-89",
-        "timed_out": False,
-        "payloads": {
-            "codebase.surveyed": survey,
-            "vault.recalled": recall,
-        },
-    }
-    assert route("route-plan-inputs-ready", joined) == {
-        **survey,
-        "vault_recall": recall,
-    }
-    assert route("route-plan-inputs-missing-survey", joined) is None
+def test_the_plan_audit_is_a_second_opinion_from_a_different_runner():
+    """An auditor sharing the drafter's model shares its blind spots.
 
-    recall_only = {
-        "run_id": "sb-89",
-        "timed_out": True,
-        "payloads": {"vault.recalled": {"run_id": "sb-89"}},
-    }
-    assert route("route-plan-inputs-ready", recall_only) is None
-    halted = route("route-plan-inputs-missing-survey", recall_only)
-    assert halted == {
-        **recall_only,
-        "reason": "planning inputs closed without a codebase survey",
-    }
+    The whole value of the pass is that the thing judging the plan is not the
+    thing that wrote it, so a plan cannot be approved by the reasoning that
+    produced it.
+    """
+    from signalbox.agent import runner_for
+
+    auditor = named(HANDLERS, "audit-plan")
+    assert auditor["subscribes"] == ["plan.verified"]
+    assert "plan.audited" in auditor["publishes"]
+    assert runner_for("audit", {}) != runner_for("plan", {})
+
+    # The invariant check runs first: a malformed plan is not a thing to put to
+    # a vote, and disjointness is what licenses parallel shards at all.
+    verified = named(HANDLERS, "route-plan-verified")
+    assert verified["subscribes"] == ["plan.checked"]
+    assert verified["publishes"] == ["plan.verified"]
 
 
-def test_plan_input_join_uses_empty_recall_if_advisory_recall_never_arrives():
-    survey = {
-        "run_id": "sb-89",
-        "paths": ["src/signalbox/agent.py"],
-        "subsystems": ["agent roles"],
-        "conventions": [],
-    }
-    joined = {
-        "run_id": "sb-89",
-        "timed_out": True,
-        "payloads": {"codebase.surveyed": survey},
-    }
-    assert route("route-plan-inputs-ready", joined) == {
-        **survey,
-        "vault_recall": {
-            "hazards": [],
-            "warnings": [],
-            "contradictions": [],
-            "contradictions_omitted": 0,
-        },
-    }
+def test_only_an_approved_audit_reaches_plan_accepted():
+    """The auditor renders a verdict; it never performs the transition itself."""
+    accepting = [h for h in HANDLERS if "plan.accepted" in h.get("publishes", [])]
+    assert [h["name"] for h in accepting] == ["route-plan-approved"]
+    assert named(HANDLERS, "route-plan-approved")["subscribes"] == ["plan.audited"]
+
+    plan = {"run_id": "sb-62", "attempt": 1, "stages": [{"stage_id": "s1"}]}
+
+    approved = route("route-plan-approved", {**plan, "verdict": "approved"})
+    assert approved == {**plan, "verdict": "approved"}
+    assert route("route-plan-approved", {**plan, "verdict": "changes_requested"}) is None
+
+    # A verdict outside the vocabulary must become an event rather than leave the
+    # run holding a verified plan nobody ever accepted.
+    for stray in ("looks fine", "APPROVED", ""):
+        assert route("route-plan-approved", {**plan, "verdict": stray}) is None
+        assert route("route-audit-invalid", {**plan, "verdict": stray}) is not None
+    assert route("route-audit-invalid", {**plan, "verdict": "approved"}) is None
+
+
+def test_both_plan_loops_spend_one_shared_attempt_counter():
+    """Two feedback edges reach draft-plan, and they must not each get three.
+
+    `attempt` is carried identity and incremented by check-plan, so an audit
+    rejection and an invariant rejection draw down the same budget. Separate
+    counters would let a plan cycle six times.
+    """
+    objected = {"run_id": "sb-62", "verdict": "changes_requested", "attempt": 2}
+    assert route("route-audit-changes", objected) == objected
+    assert route("route-audit-exhausted", objected) is None
+
+    spent = {**objected, "attempt": 3}
+    assert route("route-audit-changes", spent) is None
+    halted = route("route-audit-exhausted", spent)
+    assert halted == {**spent, "reason": "the plan audit never cleared its objections"}
+
+    rejecting = {h["name"] for h in HANDLERS if "plan.rejected" in h.get("publishes", [])}
+    assert rejecting == {"route-plan-retry", "route-audit-changes"}
+    assert named(HANDLERS, "draft-plan")["subscribes"][-1] == "plan.rejected"
 
 
 # ── routing, executed rather than inspected ──────────────────────────────────

@@ -1,4 +1,8 @@
-"""Recall makes vault context available without making it a run dependency."""
+"""Vault context reaches planning without becoming a run dependency.
+
+Recall stopped being a topology role when planning absorbed it, but the property
+it protected did not move: an operator with no vault gets a run without recalled
+context, never a run that cannot start."""
 
 from __future__ import annotations
 
@@ -35,7 +39,7 @@ def test_a_missing_vault_yields_empty_recall_and_completes(monkeypatch):
         ),
     )
 
-    result, code = agent.run("recall", {"run_id": "sb-89"}, model="opus")
+    result, code = agent.run("plan", {"run_id": "sb-89"}, model="fable")
 
     assert code == 0
     assert result == {
@@ -50,10 +54,17 @@ def test_a_missing_vault_yields_empty_recall_and_completes(monkeypatch):
     assert kwargs["env"]["SIGNALBOX_VAULT"] == ""
 
 
-def test_recall_has_no_tool_that_can_write():
-    tools = agent.tools_for("recall")
-    assert "Skill" in tools
-    assert not {"Bash", "Write", "Edit"}.intersection(tools)
+def test_the_planner_can_fan_out_but_cannot_write():
+    """Planning gained subagents when it absorbed survey and recall.
+
+    `Agent` is what lets it run those two concurrently instead of the topology
+    doing it with a join. `Write` and `Edit` stay off: a planning agent that can
+    edit is one that can implement its own plan, and nothing downstream would
+    know it had.
+    """
+    tools = agent.tools_for("plan")
+    assert {"Skill", "Agent"}.issubset(tools)
+    assert not {"Write", "Edit"}.intersection(tools)
 
 
 def test_a_vault_note_contradicting_code_is_attributed_in_the_payload(
@@ -93,7 +104,7 @@ def test_a_vault_note_contradicting_code_is_attributed_in_the_payload(
         )
 
     monkeypatch.setattr(agent.subprocess, "run", invoke)
-    result, code = agent.run("recall", {"run_id": "sb-89"}, model="opus")
+    result, code = agent.run("plan", {"run_id": "sb-89"}, model="fable")
 
     assert code == 0
     assert result["contradictions"] == [

@@ -59,8 +59,27 @@ plan handles deliberately rather than accidentally.
 4. Find the tests for that subsystem, and read one to learn the conventions.
 5. Identify which of the files you found are shared entry points.
 
-Be thorough here. This is cheap, and it is the only step that sees the whole
-picture — every step after it is scoped to a shard.
+Be thorough **within this repository**, and stop at its edge. This is the only
+step that sees the whole picture, but the picture is the worktree you are
+standing in.
+
+## The budget, and the one way surveys overrun it
+
+You have ten minutes, and a normal survey of this kind takes three to six. The
+single thing that blows the budget is chasing an answer that is not in this
+tree.
+
+An issue will often name something you cannot read: a compiled binary, a
+dependency's internals, another repository, a running service's API. **Those are
+`uncertainty` entries, not search targets.** Record what you could not determine
+and why, in one line, and move on.
+
+sb-62 is the case that made this rule. Its issue asked about an event store and
+a streaming sink, both of which live outside the repo being surveyed. The survey
+dispatched subagents to find them, searched a 65-file worktree that contained
+neither, and was still searching when its budget ran out — costing the run its
+whole planning phase for an answer one line of `uncertainty` would have served
+better.
 
 ## Boundaries
 

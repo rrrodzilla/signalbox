@@ -35,9 +35,8 @@ from signalbox.paths import SKILL_ROOTS, SkillMissing, install_skills, require_s
 
 def test_every_model_role_declares_the_topic_it_produces():
     assert ROLE_PRODUCED_TOPICS == {
-        "survey": "codebase.surveyed",
-        "recall": "vault.recalled",
         "plan": "plan.submitted",
+        "audit": "plan.audited",
         "review": "review.submitted",
         "assess": "gate.assessed",
         "plan-notes": "notes.planned",
@@ -103,8 +102,40 @@ def test_the_load_bearing_judgments_run_on_fable():
 
 
 def test_the_narrower_scoped_judgments_run_on_opus():
-    for role in ("survey", "recall", "review"):
-        assert model_for(role, {}) == "opus"
+    assert model_for("review", {}) == "opus"
+
+
+def test_the_plan_audit_keeps_its_own_runners_default_model():
+    """Codex ships a default; a role running on it should not pin one here.
+
+    The separation matters more than the default: `SIGNALBOX_MODEL` is a Claude
+    alias by construction, and putting one in a codex argv fails at the least
+    convenient moment — the same rule dispatch already keeps for its two runners.
+    """
+    from signalbox.agent import runner_for
+
+    assert runner_for("audit", {}) == "codex"
+    assert model_for("audit", {}) is None
+    assert model_for("audit", {"SIGNALBOX_MODEL": "fable"}) is None
+    assert model_for("audit", {"SIGNALBOX_CODEX_MODEL": "gpt-5.6"}) == "gpt-5.6"
+    assert model_for("plan", {"SIGNALBOX_MODEL": "sonnet"}) == "sonnet"
+
+
+def test_a_codex_judge_is_read_only_and_takes_its_prompt_on_stdin():
+    """An auditor that could write could fix what it objects to.
+
+    The objection would then stop being a verdict the topology can route, which
+    is the whole containment: judgment produces one type, routers own the
+    transition.
+    """
+    from signalbox.agent import codex_command
+
+    command = codex_command("/tmp/wt-62", None)
+    assert command[:2] == ["codex", "exec"]
+    assert command[command.index("-C") + 1] == "/tmp/wt-62"
+    assert command[command.index("--sandbox") + 1] == "read-only"
+    assert command[-1] == "-", "the payload is passed on stdin, not in argv"
+    assert "--model" not in command
 
 
 def test_note_writing_runs_on_sonnet():

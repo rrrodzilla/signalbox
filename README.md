@@ -11,25 +11,28 @@ One engine. Four sources, sixty-seven handlers, eight sinks, and no script that 
 ```
 run.requested ─> workspace.ready ─> issue.fetched
                                           │
-                          ┌───────────────┴───────────────┐
-                          ▼                               ▼
-                 codebase.surveyed                 vault.recalled
-                          │                               │
-                          └─────────> join-plan-inputs <──┘
-                                          │
-                                     plan.inputs
-                                          │
                                           ▼
-                                     draft-plan
-                                          │
+                                     draft-plan  (fable; surveys the tree and
+                                          │       reads the vault with its own
+                                          │       subagents)
                                           ▼
-                                  plan.submitted ─> plan.checked
-                                       ▲                  │
-                                       │        ┌─────────┴─────────┐
-                                  plan.rejected ◄─ (attempt < 3)   plan.accepted
-                                                                     │
-                                                                     ▼
-                                                            open-first-stage
+                                  plan.submitted ─> check-plan ─> plan.checked
+                                       ▲                               │
+                                       │                     ┌─────────┴─────────┐
+                                       │                (ok == false)      plan.verified
+                                       │                     │                  │
+                                       │              (attempt < 3)             ▼
+                                  plan.rejected ◄───────────┘             audit-plan  (codex;
+                                       ▲                                        │      adversarial)
+                                       │                                        ▼
+                                       │                                  plan.audited
+                                       │                                        │
+                                       │                         ┌──────────────┼──────────────┐
+                                       └── (changes_requested,   │              │              │
+                                            attempt < 3) ────────┘        plan.accepted   plan.invalid-verdict
+                                                                                │
+                                                                                ▼
+                                                                       open-first-stage
                                                                      │
                                                                      ▼
                                   stage.opened ─> split-shards ─> shard.opened
@@ -108,13 +111,17 @@ The promote path waits on a push, not a poll. GitHub delivers `check_suite.compl
 
 ## Models per node
 
-Nine nodes are non-deterministic. Nothing else in the system is.
+Eight nodes are non-deterministic. Nothing else in the system is.
+
+Two of them judge the same artefact on purpose. `draft-plan` writes the plan on
+fable; `audit-plan` tries to break it on codex. An auditor sharing the drafter's
+model shares its blind spots, so the second opinion is only worth its call if it
+is genuinely a second opinion.
 
 | Node | Role | Runner | Default model | Override precedence | Judges or acts | Fix-round continuity |
 |---|---|---|---|---|---|---|
-| `survey-codebase` | `survey` | claude | opus | `SIGNALBOX_MODEL_SURVEY`, then `SIGNALBOX_MODEL` | judges | — |
-| `recall-vault` | `recall` | claude | opus | `SIGNALBOX_MODEL_RECALL`, then `SIGNALBOX_MODEL` | judges | — |
 | `draft-plan` | `plan` | claude | fable | `SIGNALBOX_MODEL_PLAN`, then `SIGNALBOX_MODEL` | judges | — |
+| `audit-plan` | `audit` | codex | codex's own | `SIGNALBOX_CODEX_MODEL` | judges | — |
 | `review-shard` | `review` | claude | opus | `SIGNALBOX_MODEL_REVIEW`, then `SIGNALBOX_MODEL` | judges | — |
 | `assess` | `assess` | claude | fable | `SIGNALBOX_MODEL_ASSESS`, then `SIGNALBOX_MODEL` | judges | — |
 | `plan-notes` | `plan-notes` | claude | sonnet | `SIGNALBOX_MODEL_PLAN_NOTES`, then `SIGNALBOX_MODEL` | judges | — |
@@ -153,10 +160,15 @@ as standalone feed rows. It joins each invocation to the most specific matching
 mechanical identity on ordinary feed events and renders a `runner · model`
 badge; a null codex model renders as just `codex`.
 
-At the start of each run, `recall-vault` reads the notes vault alongside the
-codebase survey, and `join-plan-inputs` waits for both results before planning.
-If the vault is missing, recall degrades to an empty result rather than failing
-the run.
+At the start of each run, `draft-plan` dispatches its own subagents to survey the
+tree and read the notes vault, then plans from what they return. If the vault is
+missing, recall degrades to an empty result rather than failing the run.
+
+This was two topology roles joined on a rendezvous until sb-62 halted on it,
+holding one of two arms, for want of an input the surveying agent was still
+producing. The barrier was never orchestrating the breadth — the surveying agent
+already fanned out on its own — so removing it cost nothing and closed the one
+way the phase could lose a run.
 
 ## Quick start
 

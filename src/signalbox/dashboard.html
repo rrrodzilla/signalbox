@@ -313,12 +313,11 @@ const BLOCKS = ["plan", "build", "gate", "promote", "docs"];
 const EVENT = {
   "run.requested":["plan","work"], "workspace.ready":["plan","work"],
   "workspace.failed":["plan","stop"], "issue.fetched":["plan","work"],
-  "issue.fetch-failed":["plan","stop"], "codebase.surveyed":["plan","work"],
-  "survey.failed":["plan","stop"], "vault.recalled":["plan","work"],
-  "vault.recall-failed":["plan","stop"], "plan.inputs.closed":["plan","judge"],
-  "plan.inputs":["plan","work"],
+  "issue.fetch-failed":["plan","stop"],
   "plan.submitted":["plan","judge"],
-  "plan.checked":["plan","judge"], "plan.accepted":["plan","go"],
+  "plan.checked":["plan","judge"], "plan.verified":["plan","work"],
+  "plan.audited":["plan","judge"], "plan.audit-failed":["plan","stop"],
+  "plan.invalid-verdict":["plan","stop"], "plan.accepted":["plan","go"],
   "plan.rejected":["plan","stop"], "plan.draft-failed":["plan","stop"],
 
   "stage.opened":["build","work"], "shard.opened":["build","work"],
@@ -545,9 +544,13 @@ function apply(msg) {
 
   switch (t) {
     case "plan.accepted": set("plan", "done"); milestone("PLAN ACCEPTED"); break;
+    // A rejection now arrives from either loop, so show whichever the payload
+    // carries: `violations` from the invariant check, `objections` from the
+    // audit. Showing only the first left an audit rejection with a blank reason.
     case "plan.rejected": run.verdict = { label: "PLAN REJECTED", cls: "v-amber",
-      detail: (p.violations || []).join("; ") }; break;
-    case "workspace.failed": case "issue.fetch-failed": case "survey.failed":
+      detail: (p.violations || []).concat(
+        (p.objections || []).map((o) => o.claim || "")).filter(Boolean).join("; ") }; break;
+    case "workspace.failed": case "issue.fetch-failed": case "plan.audit-failed":
     case "plan.draft-failed":
       set("plan", "failed");
       run.verdict = { label: "FAILED", cls: "v-red", detail: p.error || t }; break;

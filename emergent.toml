@@ -207,7 +207,8 @@ subscribes = ["exec.output"]
 publishes = ["checks.silent"]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PLAN — judgment produces one type; routers turn it into vocabulary.
+# PLAN — one judgment gathers its own inputs; a second, from a different
+# runner, tries to break the result before any shard is opened.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # One worktree per run, branched from a pinned base sha. The base branch moves
@@ -231,74 +232,43 @@ args = ["-s", "workspace.ready", "--publish-as", "issue.fetched",
 subscribes = ["workspace.ready"]
 publishes = ["issue.fetched", "issue.fetch-failed"]
 
-[[handlers]]
-name = "survey-codebase"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "issue.fetched", "--publish-as", "codebase.surveyed",
-        "-e", "survey.failed", "-t", "600000", "--",
-        "signalbox", "agent", "survey"]
-subscribes = ["issue.fetched"]
-# Provenance is load-bearing beside the verdict: success alone cannot prove
-# which model invocation incurred the judgment.
-publishes = ["codebase.surveyed", "survey.failed", "model.invoked"]
-
-[[handlers]]
-name = "recall-vault"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "issue.fetched", "--publish-as", "vault.recalled",
-        "-e", "vault.recall-failed", "-t", "600000", "--",
-        "signalbox", "agent", "recall"]
-subscribes = ["issue.fetched"]
-publishes = ["vault.recalled", "vault.recall-failed", "model.invoked"]
-
-# Recall and survey start from the same event and each has a ten-minute
-# invocation budget. The join timer starts on the first result, so it must cover
-# the other invocation's full budget (plus scheduling slack) to be a real
-# rendezvous rather than a race between the two agents.
+# Surveying the codebase and recalling the vault were two topology roles joined
+# on a 620s rendezvous. That machinery bought nothing it could not have had for
+# free: the surveying agent already fanned out into its own subagents, so the
+# engine was never orchestrating breadth — only two processes and a barrier.
 #
-# The budget was five minutes until sb-90, where survey on opus was killed at
-# exactly 300s and the run halted for want of a survey it was still producing.
-# Surveys had been climbing toward that wall for a while — sb-89 took 252s — so
-# the ceiling, not the issue, was the defect. Raising one arm alone would leave
-# the join covering the shorter budget, which is why all three move together.
-[[handlers]]
-name = "join-plan-inputs"
-path = "signalbox"
-args = ["primitive", "join-terminal", "--key", "run_id",
-        "--arms", "codebase.surveyed,vault.recalled", "--carry-payloads",
-        "--timeout-seconds", "620", "--publish-as", "plan.inputs.closed"]
-subscribes = ["codebase.surveyed", "vault.recalled"]
-publishes = ["plan.inputs.closed"]
-
-[[handlers]]
-name = "route-plan-inputs-ready"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "plan.inputs.closed", "--publish-as", "plan.inputs", "--",
-        "jq", "-c", '. as $joined | .payloads["codebase.surveyed"] | select(. != null) | . + {vault_recall: ($joined.payloads["vault.recalled"] // {hazards: [], warnings: [], contradictions: [], contradictions_omitted: 0})}']
-subscribes = ["plan.inputs.closed"]
-publishes = ["plan.inputs"]
-
-[[handlers]]
-name = "route-plan-inputs-missing-survey"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "plan.inputs.closed", "--publish-as", "run.halted", "--",
-        "jq", "-c", 'select(.payloads["codebase.surveyed"] == null) | . + {reason: "planning inputs closed without a codebase survey"}']
-subscribes = ["plan.inputs.closed"]
-publishes = ["run.halted"]
-
-# Fan-in: first drafts and redrafts are the same act, so one primitive.
-# plan.rejected re-entering here is FEEDBACK EDGE 1.
+# What the barrier did add was a way to lose. sb-62 died on it. The survey arm
+# overran its ten-minute budget; the timeout published a failure carrying no
+# run_id to attach it to (#66); the join reached its deadline holding one of two
+# arms and halted the run for want of an input the agent was still producing —
+# and went on producing for six more minutes, because a timeout here abandons
+# the wait without killing the process.
+#
+# So the drafting judgment gathers its own inputs. Fable reads the issue,
+# dispatches subagents to survey the tree and read the vault, and drafts from
+# what they return. One process, one budget, one failure, and no rendezvous to
+# lose a run in.
+#
+# plan.rejected re-entering here is FEEDBACK EDGE 1: a first draft and a redraft
+# are the same act, so one primitive serves both.
 [[handlers]]
 name = "draft-plan"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "plan.inputs", "-s", "plan.rejected",
+args = ["-s", "issue.fetched", "-s", "plan.rejected",
         "--publish-as", "plan.submitted", "-e", "plan.draft-failed",
-        "-t", "600000", "--", "signalbox", "agent", "plan"]
-subscribes = ["plan.inputs", "plan.rejected"]
-# Redrafts are non-deterministic too, so provenance must survive every feedback
-# pass rather than only the first plan.
+        "-t", "1500000", "--", "signalbox", "agent", "plan"]
+subscribes = ["issue.fetched", "plan.rejected"]
+# Provenance is load-bearing beside the verdict: success alone cannot prove
+# which model invocation incurred the judgment. Redrafts are non-deterministic
+# too, so it must survive every feedback pass rather than only the first plan.
 publishes = ["plan.submitted", "plan.draft-failed", "model.invoked"]
 
+# The deterministic gate, and it runs FIRST, before any model is asked its
+# opinion. Shard file-disjointness within a stage is what licenses splitting a
+# stage into events that all run at once, so it is not a thing to put to a vote:
+# a persuasive plan whose shards overlap is still a race. A plan that fails here
+# never reaches the auditor, because there is nothing to argue about with a plan
+# that is malformed.
 [[handlers]]
 name = "check-plan"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
@@ -308,12 +278,12 @@ subscribes = ["plan.submitted"]
 publishes = ["plan.checked"]
 
 [[handlers]]
-name = "route-plan-ok"
+name = "route-plan-verified"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "plan.checked", "--publish-as", "plan.accepted", "--",
+args = ["-s", "plan.checked", "--publish-as", "plan.verified", "--",
         "jq", "-c", "select(.ok == true)"]
 subscribes = ["plan.checked"]
-publishes = ["plan.accepted"]
+publishes = ["plan.verified"]
 
 # Both sides of the guard are exclusive. An unbounded feedback loop is the one
 # failure mode of this architecture that fills a disk.
@@ -332,6 +302,64 @@ args = ["-s", "plan.checked", "--publish-as", "run.halted", "--",
         "jq", "-c", 'select(.ok == false and .attempt >= 3) | . + {reason: "plan never satisfied its invariants"}']
 subscribes = ["plan.checked"]
 publishes = ["run.halted"]
+
+# The adversarial pass, and the reason it is worth a second model call: the
+# drafter and the auditor must not share a failure mode. A plan drafted by fable
+# and reviewed by fable agrees with itself — the same reading of an ambiguous
+# issue produces the decomposition and then blesses it. Codex reads the same
+# tree and the same plan with different training and an opposing brief, so a
+# stage boundary that only looks right from one angle has somewhere to fail
+# before it becomes twelve shards and an hour of implementation.
+#
+# It is a judging role in the Shape A sense: it reads, it prints one verdict,
+# and it stops. It cannot edit the plan, and it has no route to plan.accepted
+# that does not go through the routers below.
+[[handlers]]
+name = "audit-plan"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.verified", "--publish-as", "plan.audited",
+        "-e", "plan.audit-failed", "-t", "900000", "--",
+        "signalbox", "agent", "audit"]
+subscribes = ["plan.verified"]
+publishes = ["plan.audited", "plan.audit-failed", "model.invoked"]
+
+[[handlers]]
+name = "route-plan-approved"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.audited", "--publish-as", "plan.accepted", "--",
+        "jq", "-c", 'select(.verdict == "approved")']
+subscribes = ["plan.audited"]
+publishes = ["plan.accepted"]
+
+# The audit's own feedback edge, bounded on the same counter as the invariant
+# loop. `attempt` is carried identity, so a redraft cannot reset it by saying so
+# and the two loops cannot each spend three attempts.
+[[handlers]]
+name = "route-audit-changes"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.audited", "--publish-as", "plan.rejected", "--",
+        "jq", "-c", 'select(.verdict == "changes_requested" and .attempt < 3)']
+subscribes = ["plan.audited"]
+publishes = ["plan.rejected"]
+
+[[handlers]]
+name = "route-audit-exhausted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.audited", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(.verdict == "changes_requested" and .attempt >= 3) | . + {reason: "the plan audit never cleared its objections"}']
+subscribes = ["plan.audited"]
+publishes = ["run.halted"]
+
+# Exhaustiveness. The auditor's output is untrusted input like any other model's,
+# so a verdict outside the vocabulary becomes an event rather than a silent drop
+# that would leave the run holding a verified plan nobody ever accepted.
+[[handlers]]
+name = "route-audit-invalid"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.audited", "--publish-as", "plan.invalid-verdict", "--",
+        "jq", "-c", 'select((.verdict // "") | IN("approved", "changes_requested") | not)']
+subscribes = ["plan.audited"]
+publishes = ["plan.invalid-verdict"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STAGES paced sequentially / SHARDS split in parallel
@@ -878,20 +906,21 @@ subscribes = ["exec.output", "exec.exit",
               "branch.pushed", "checks.detail-failed", "checks.detailed",
               "checks.failed", "checks.observed", "checks.passed", "checks.reported",
               "checks.silent", "checks.unknown-pr",
-              "codebase.surveyed", "completion.closed", "control.unknown-event", "fix.opened", "gate.assessed",
+              "completion.closed", "control.unknown-event", "fix.opened", "gate.assessed",
               "gate.blocked", "gate.cleared", "gate.invalid-verdict", "issue.fetch-failed",
               "issue.fetched", "merge.attempted", "model.invoked", "note.drafted", "note.write-failed",
               "note.written", "notes.plan-failed", "notes.planned", "notes.synced",
-              "plan.accepted", "plan.checked", "plan.draft-failed", "plan.inputs", "plan.inputs.closed", "plan.rejected",
-              "plan.submitted", "pr.merge-failed", "pr.merged", "pr.open-failed", "pr.opened",
+              "plan.accepted", "plan.audit-failed", "plan.audited", "plan.checked",
+              "plan.draft-failed", "plan.invalid-verdict", "plan.rejected",
+              "plan.submitted", "plan.verified", "pr.merge-failed", "pr.merged", "pr.open-failed", "pr.opened",
               "review.failed", "review.invalid-verdict", "review.submitted", "run.built",
               "run.completed", "run.halted", "run.requested", "scope.violated",
               "shard.abandoned", "shard.approved", "shard.built", "shard.changes-requested",
               "shard.check-ran", "shard.escalated", "shard.file-written",
               "shard.invalid-verdict", "shard.opened", "shard.silent", "shard.submitted",
               "stage.closed", "stage.conflicted", "stage.mergeable", "stage.merged",
-              "stage.opened", "stages.exhausted", "suite.errored", "suite.ran", "survey.failed",
-              "vault.recall-failed", "vault.recalled", "workspace.failed", "workspace.ready", "workspace.release-attempted",
+              "stage.opened", "stages.exhausted", "suite.errored", "suite.ran",
+              "workspace.failed", "workspace.ready", "workspace.release-attempted",
               "workspace.release-failed", "workspace.released"]
 
 # Lifecycle belongs here rather than on the dashboard: topology-viewer resolves

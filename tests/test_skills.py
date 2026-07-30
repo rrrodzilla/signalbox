@@ -47,7 +47,22 @@ ALL_SKILLS = sorted(set(ROLE_SKILLS.values()) | dispatch_skills())
 
 
 def test_every_role_and_dispatch_names_a_distinct_skill():
-    assert len(ALL_SKILLS) == 9, ALL_SKILLS
+    assert len(ALL_SKILLS) == 8, ALL_SKILLS
+
+
+def test_the_planners_subagent_skills_exist_though_no_role_names_them():
+    """Survey and recall stopped being roles without stopping being procedures.
+
+    They are loaded by the planning agent's own subagents now, so nothing in
+    ROLE_SKILLS points at them and the parametrised check above cannot see them.
+    A deletion here would be invisible until a run planned against a tree it had
+    never read.
+    """
+    for skill in ("signalbox-survey", "signalbox-recall"):
+        assert (SKILLS / skill / "SKILL.md").is_file(), f"{skill} is gone"
+    body = (SKILLS / "signalbox-plan" / "SKILL.md").read_text()
+    for skill in ("signalbox-survey", "signalbox-recall"):
+        assert skill in body, f"the planner never dispatches {skill}"
 
 
 @pytest.mark.parametrize("skill", ALL_SKILLS)
@@ -64,6 +79,7 @@ def test_skill_exists_with_frontmatter(skill: str):
     [
         ("signalbox-review", ("approved", "changes_requested")),
         ("signalbox-assess", ("clear", "needs_human", "block")),
+        ("signalbox-audit-plan", ("approved", "changes_requested")),
     ],
 )
 def test_judging_skill_states_the_exact_vocabulary_its_routers_match(skill, vocabulary):

@@ -1,13 +1,40 @@
 ---
 name: signalbox-plan
-description: Decompose a GitHub issue into signalbox stages and disjoint shards. Use when asked to produce a signalbox plan from an issue and a codebase survey.
+description: Survey a codebase, recall the notes vault, and decompose a GitHub issue into signalbox stages and disjoint shards. Use when asked to produce a signalbox plan from a fetched issue.
 ---
 
 # Planning a run
 
-Produce a decomposition of the issue into **stages** (sequential) of **shards**
-(parallel). Print one JSON object. Take no other action — you are not
-implementing anything, and you must not edit a single file.
+Gather your own inputs, then produce a decomposition of the issue into **stages**
+(sequential) of **shards** (parallel). Print one JSON object. Take no other
+action — you are not implementing anything, and you must not edit a single file.
+
+## Step 1: gather inputs, in parallel
+
+You receive the issue and nothing else. The survey and the vault recall are
+yours to run, as **subagents dispatched in a single message so they run
+concurrently**:
+
+- One subagent loading the **`signalbox-survey`** skill, to find what the issue
+  touches. Its JSON is your `paths`, `subsystems`, `conventions`,
+  `shared_files`, and `uncertainty`.
+- One subagent loading the **`signalbox-recall`** skill, to read the notes
+  vault. Its JSON is your `hazards`, `warnings`, and `contradictions`.
+
+Both are read-only and neither may edit anything. Wait for both, then plan.
+
+If the vault subagent returns nothing usable, plan without it — recall is
+advisory and an operator may have no vault configured. **If the survey subagent
+returns nothing usable, say so in a one-shard plan whose intent records that the
+codebase could not be surveyed.** Do not invent paths you have not seen; a plan
+built on guessed files fails at the disjointness check or, worse, passes it and
+sends a shard to edit a file that does not exist.
+
+Keep both subagents inside this repository. A question whose answer lives in
+another repo or a compiled binary is an `uncertainty` to record, not a hunt to
+send them on — that hunt is what cost sb-62 its whole budget.
+
+## Step 2: decompose
 
 ## Output contract
 
@@ -51,13 +78,27 @@ time is most of this job.
 Stages *may* revisit a file that an earlier stage touched. That is expected: a
 wiring stage usually edits a file that a module stage created.
 
+## Redrafting
+
+A plan comes back to you for one of two reasons, and the payload tells you which:
+
+- **`violations`** — the machine check above found a structural fault. These are
+  facts, not opinions. Fix exactly what is listed.
+- **`objections`** — an independent auditor, running on a different model, read
+  your plan against the tree and found it unfit. Treat these as a reviewer's
+  findings: address each one, or restructure so it no longer applies.
+
+`attempt` is carried by the system and counts *both* loops together, so you do
+not get three tries at each. At three the run halts. If you disagree with an
+objection, the way to say so is a plan whose shape answers it — there is no
+channel for arguing back, and nothing is listening for one.
+
 ## How to decompose
 
 **Sequence by dependency, parallelise by independence.** Two pieces of work go
 in the same stage when neither needs the other's output. They go in different
 stages when one does.
 
-The planner receives both the codebase survey and the concurrent vault recall.
 Any claim derived from recall notes must name the note it came from in the
 relevant shard intent. Notes may contribute hazards and warnings, but they never
 supply paths or subsystems: use only the survey for those.

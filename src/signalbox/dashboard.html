@@ -454,6 +454,8 @@ function identityKey(id) {
 function invocationFor(entry) {
   let best = null;
   let bestScore = 0;
+  let bestProduces = false;
+  let tied = false;
   for (const invocation of provenance.values()) {
     let score = 0;
     let conflict = false;
@@ -465,12 +467,19 @@ function invocationFor(entry) {
       if (entry[k] !== invocation[k]) { conflict = true; break; }
       score++;
     }
-    if (!conflict && score > bestScore) {
+    if (conflict || score === 0) continue;
+    const produces = invocation.produces === entry.type;
+    if (best === null || (produces && !bestProduces) ||
+        (produces === bestProduces && score > bestScore)) {
       best = invocation;
       bestScore = score;
+      bestProduces = produces;
+      tied = false;
+    } else if (produces === bestProduces && score === bestScore) {
+      tied = true;
     }
   }
-  return best;
+  return tied ? null : best;
 }
 
 /* Provenance is not a domain event: it is excluded from the register, so letting
@@ -484,7 +493,9 @@ function isProvenance(msg) {
 
 function recordProvenance(p) {
   const id = identity(p);
-  provenance.set(identityKey(id), { ...id, runner: p.runner, model: p.model });
+  provenance.set(identityKey(id), {
+    ...id, runner: p.runner, model: p.model, produces: p.produces,
+  });
 }
 
 /* Two families arrive with no run_id, and neither is a run: the exec-handler

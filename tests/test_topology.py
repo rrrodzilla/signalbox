@@ -116,6 +116,62 @@ def test_every_event_moves_the_card_before_any_topic_specific_branch():
             f"{unconditional} must run before the topic switch, not inside it"
         )
 
+    # Ordering alone was not enough: `model.invoked` returned above the counter,
+    # so the rule held on paper while one topic escaped it. Provenance now leaves
+    # the stream before apply() is called, which is why apply() can be required
+    # to have no early exit at all.
+    preamble = body[: body.index("run.events++")]
+    assert "return" not in preamble, (
+        "apply() must not return before the counter; an event that exits early "
+        "moves nothing on the card, which is the gap this rule exists to close"
+    )
+
+
+def test_an_event_with_no_run_id_does_not_invent_a_run_card():
+    """`stages.exhausted` is `{"count": N}`, and it was minting a phantom run.
+
+    Three topics arrive unattributed for three different reasons: stream-runner's
+    end event carries no identity at all, the exec-handler `-e` error topics
+    publish `{command, exit_code, stderr}` instead of the inbound payload (#66),
+    and reaper telemetry never had a run. Bucketing them under a fake key drew a
+    card for a run nobody launched.
+    """
+    assert '"unattributed"' not in PAGE_TEXT, "no synthetic run key may remain"
+    assert "if (isAttributed(msg)) apply(msg);" in PAGE_TEXT, (
+        "the board must skip events that name no run"
+    )
+    # Skipped, not silently dropped: a board that omits events without saying so
+    # is the same class of lie as one that invents a run for them.
+    assert "unattributed++" in PAGE_TEXT and '" unattributed"' in PAGE_TEXT, (
+        "the count of unplaceable events has to be stated somewhere on the page"
+    )
+    # And they stay in the register, which is the view that can hold them.
+    stream = PAGE_TEXT[PAGE_TEXT.index("es.onmessage") :]
+    assert stream.index("feed.unshift(") > stream.index("isAttributed(msg)"), (
+        "an unattributed event must still reach the register"
+    )
+
+
+def test_a_block_the_run_has_entered_is_distinguishable_from_one_it_has_not():
+    """`docs` sat 2m40s between pr.merged and notes.planned looking untouched.
+
+    A judging node publishes nothing until it finishes, so the card cannot show
+    activity during the pause — but it can show that the run is *there*. Without
+    a distinct state, "waiting on a slow node" and "never reached" render alike.
+    """
+    assert 'run.blocks[next] = "waiting"' in PAGE_TEXT, "finishing a block must enter the next"
+    assert ".block.waiting::before" in PAGE_TEXT, "the waiting rail needs its own style"
+
+    body = PAGE_TEXT[PAGE_TEXT.index("function apply(msg)") : PAGE_TEXT.index("function shardSidings")]
+    assert '"waiting"' in body[: body.index("switch (t)")], (
+        "a block that speaks must leave waiting, or it never reaches active"
+    )
+    # A counter that stops at a terminal, or a completed card keeps claiming it
+    # is still expecting something.
+    assert body.count("run.waiting = {}") >= 2, (
+        "both run.completed and run.halted must clear the wait counters"
+    )
+
 
 def test_no_sse_sink_relies_on_a_wildcard():
     """sse-sink accepts the client and streams nothing for wildcard subscriptions.
@@ -606,11 +662,20 @@ def test_the_page_treats_heartbeat_traffic_as_proof_of_life_not_content():
     assert "HEARTBEAT" in page, "the page has no heartbeat filter"
     dashboard = named(SINKS, "dashboard")
     assert "model.invoked" in dashboard["subscribes"]
-    provenance_branch = page.index('if (t === "model.invoked"')
-    assert page.index("provenance.set(", provenance_branch) < page.index(
-        "return;", provenance_branch
-    ), "model.invoked must be consumed as provenance before rendering"
-    assert 'if (msg.type !== "model.invoked"' in page, (
+    # Asserted as a property rather than a shape: provenance used to be diverted
+    # by an early return inside apply(), and is now diverted at the stream. Either
+    # way the contract is that it is recorded, and that it never reaches the card
+    # or the register — which is also why apply() may have no early exit.
+    assert "provenance.set(" in page, "model.invoked must be recorded as provenance"
+    divert = page.index("if (isProvenance(msg))")
+    assert page.index("recordProvenance(", divert) < page.index("return;", divert), (
+        "model.invoked must be consumed as provenance before rendering"
+    )
+    assert divert < page.index("apply(msg);"), (
+        "provenance must be diverted before apply(), or it moves the card while "
+        "staying out of the register — the same inconsistency, inverted"
+    )
+    assert divert < page.index("feed.unshift("), (
         "model.invoked must not become standalone feed content"
     )
     for source in SOURCES:

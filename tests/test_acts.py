@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
-from signalbox.acts import map_ci_findings, pr_state_is_merged, stage_files, suite_command
+from signalbox.acts import (
+    map_ci_findings,
+    pr_state_is_merged,
+    source_repo,
+    stage_files,
+    suite_command,
+)
 from signalbox.dispatch import environment, pending_path
 
 
@@ -224,3 +231,92 @@ def test_every_marker_offers_more_than_one_runner():
 
     for marker, candidates in SUITE_COMMANDS:
         assert len(candidates) >= 2, f"{marker} has no fallback runner"
+
+
+# ── releasing the workspace ──────────────────────────────────────────────────
+
+
+def test_source_repo_is_the_parent_of_a_dot_git_common_dir():
+    assert source_repo("/home/u/code/proj/.git") == Path("/home/u/code/proj")
+
+
+def test_source_repo_of_a_bare_repository_is_the_common_dir_itself():
+    """`--git-common-dir` does not always end in `.git`, and stripping blindly
+    would hand `git worktree remove` the parent of a bare repo."""
+    assert source_repo("/srv/git/proj.git") == Path("/srv/git/proj.git")
+
+
+def _release(tmp_path, monkeypatch, responses, *, exists=True):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    if exists:
+        (tmp_path / "worktrees" / "sb-69").mkdir(parents=True)
+    calls = []
+
+    def fake_run(cmd, cwd=None, timeout=120):
+        calls.append((cmd, cwd))
+        return responses.pop(0)
+
+    monkeypatch.setattr(acts, "_run", fake_run)
+    return acts.release_workspace({"run_id": "sb-69"}), calls
+
+
+def test_release_removes_the_worktree_from_the_repository_that_owns_it(tmp_path, monkeypatch):
+    """A worktree cannot remove itself, so the act must run against the source."""
+    result, calls = _release(tmp_path, monkeypatch, [
+        (0, "/home/u/code/proj/.git", ""),
+        (0, "", ""),
+        (0, "", ""),
+    ])
+    assert result["ok"] is True
+    assert result["released"] is True
+    assert result["branch"] == "signalbox/run-sb-69"
+
+    locate, remove, prune = calls
+    assert locate[0][:2] == ["git", "rev-parse"]
+    assert locate[1] == str(tmp_path / "worktrees" / "sb-69")
+    assert remove[0] == ["git", "worktree", "remove", "--force",
+                         str(tmp_path / "worktrees" / "sb-69")]
+    assert remove[1] == "/home/u/code/proj"
+    assert prune[0] == ["git", "branch", "-D", "signalbox/run-sb-69"]
+    assert prune[1] == "/home/u/code/proj"
+
+
+def test_release_of_an_absent_worktree_is_not_a_failure(tmp_path, monkeypatch):
+    """The state being asserted already holds, and git is never called."""
+    result, calls = _release(tmp_path, monkeypatch, [], exists=False)
+    assert result["ok"] is True
+    assert result["released"] is False
+    assert calls == []
+
+
+def test_a_worktree_that_will_not_be_removed_is_a_refusal(tmp_path, monkeypatch):
+    result, _ = _release(tmp_path, monkeypatch, [
+        (0, "/home/u/code/proj/.git", ""),
+        (1, "", "fatal: working trees containing modified files"),
+    ])
+    assert result["ok"] is False
+    assert "modified files" in result["error"]
+
+
+def test_a_surviving_local_branch_does_not_unrelease_a_removed_worktree(tmp_path, monkeypatch):
+    """The worktree is already gone; calling that a failure would be a lie."""
+    result, _ = _release(tmp_path, monkeypatch, [
+        (0, "/home/u/code/proj/.git", ""),
+        (0, "", ""),
+        (1, "", "error: branch 'signalbox/run-sb-69' not found"),
+    ])
+    assert result["ok"] is True
+    assert result["released"] is True
+    assert "not found" in result["warning"]
+
+
+def test_release_carries_run_identity_through_to_the_verdict(tmp_path, monkeypatch):
+    """The routers select on .ok, but the register still needs to name the run."""
+    result, _ = _release(tmp_path, monkeypatch, [
+        (0, "/home/u/code/proj/.git", ""),
+        (0, "", ""),
+        (0, "", ""),
+    ])
+    assert result["run_id"] == "sb-69"

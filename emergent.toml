@@ -706,6 +706,48 @@ publishes = ["run.completed"]
 # the run_id register and arm this join's timeout instead of leaving pure silence.
 
 # ─────────────────────────────────────────────────────────────────────────────
+# RELEASE — a finished run gives its worktree back. Nothing did this before, so
+# every run since the rewrite left its tree on disk forever.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# `run.completed`, not `pr.merged`. Since #69 the notes arm starts at
+# checks.passed and overlaps the merge, and dispatch runs every agent with cwd
+# inside this worktree — releasing at the merge would delete the tree a
+# write-note agent is still working in. The rendezvous is the first moment
+# nothing is left inside it.
+#
+# A halted run is deliberately not subscribed. Its worktree is the evidence for
+# why it halted, and disk is cheaper than that.
+[[handlers]]
+name = "release-workspace"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "run.completed", "--publish-as", "workspace.release-attempted",
+        "-e", "workspace.release-failed", "-t", "60000", "--",
+        "signalbox", "release-workspace"]
+subscribes = ["run.completed"]
+publishes = ["workspace.release-attempted", "workspace.release-failed"]
+
+# `_out` prints the act's verdict and exits 0 regardless, so a refusal never
+# reaches the -e topic (#66). Route on the value the way merge-stage already
+# does, rather than letting a workspace that is still on disk announce itself
+# as released.
+[[handlers]]
+name = "route-release-ok"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "workspace.release-attempted", "--publish-as", "workspace.released", "--",
+        "jq", "-c", "select(.ok == true)"]
+subscribes = ["workspace.release-attempted"]
+publishes = ["workspace.released"]
+
+[[handlers]]
+name = "route-release-refused"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "workspace.release-attempted", "--publish-as", "workspace.release-failed", "--",
+        "jq", "-c", "select(.ok == false)"]
+subscribes = ["workspace.release-attempted"]
+publishes = ["workspace.release-failed"]
+
+# ─────────────────────────────────────────────────────────────────────────────
 # EGRESS — genuine egress only, where seventy-six sinks used to do work.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -748,7 +790,8 @@ subscribes = ["exec.output", "exec.exit",
               "shard.invalid-verdict", "shard.opened", "shard.silent", "shard.submitted",
               "stage.closed", "stage.conflicted", "stage.mergeable", "stage.merged",
               "stage.opened", "stages.exhausted", "suite.errored", "suite.ran", "survey.failed",
-              "workspace.failed", "workspace.ready"]
+              "workspace.failed", "workspace.ready", "workspace.release-attempted",
+              "workspace.release-failed", "workspace.released"]
 
 # Lifecycle belongs here rather than on the dashboard: topology-viewer resolves
 # its own subscriptions internally, which is why wildcards work for it and not

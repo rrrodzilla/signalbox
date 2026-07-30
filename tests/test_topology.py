@@ -724,3 +724,44 @@ def test_the_page_treats_heartbeat_traffic_as_proof_of_life_not_content():
         for topic in source.get("publishes", []):
             if topic in dashboard["subscribes"]:
                 assert f'"{topic}"' in page, f"{topic} is subscribed but not filtered from the feed"
+
+
+def test_a_completed_run_releases_the_worktree_it_was_built_in():
+    """Nothing released a worktree before; every run since the rewrite kept its tree."""
+    release = named(HANDLERS, "release-workspace")
+    assert release["subscribes"] == ["run.completed"]
+    assert "signalbox" in release["args"]
+    assert "release-workspace" in release["args"]
+
+
+def test_the_worktree_outlives_the_merge_because_notes_are_still_inside_it():
+    """#69 moved notes to checks.passed, so they overlap the merge.
+
+    Every agent runs with cwd set to the run's worktree, so a release triggered
+    by pr.merged would delete the directory out from under a write-note agent
+    that is still working in it. The rendezvous is the first moment nothing is
+    left inside.
+    """
+    release = named(HANDLERS, "release-workspace")
+    assert "pr.merged" not in release["subscribes"]
+    assert "checks.passed" not in release["subscribes"]
+    assert named(HANDLERS, "plan-notes")["subscribes"] == ["checks.passed"]
+
+
+def test_a_halted_run_keeps_its_worktree_as_evidence():
+    releasing = [handler["name"] for handler in HANDLERS
+                 if "run.halted" in handler.get("subscribes", [])
+                 and "release-workspace" in handler.get("args", [])]
+    assert releasing == []
+
+
+def test_a_refused_release_cannot_announce_itself_as_released():
+    """`_out` exits 0 whatever the act decided (#66), so ok is routed, not trusted."""
+    attempted = named(HANDLERS, "release-workspace")["publishes"]
+    assert "workspace.released" not in attempted, (
+        "the act must publish an attempt; only a router may call it released"
+    )
+    assert route("route-release-ok", {"ok": True, "run_id": "sb-69"}) is not None
+    assert route("route-release-ok", {"ok": False, "run_id": "sb-69"}) is None
+    assert route("route-release-refused", {"ok": False, "run_id": "sb-69"}) is not None
+    assert route("route-release-refused", {"ok": True, "run_id": "sb-69"}) is None

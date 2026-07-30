@@ -99,6 +99,65 @@ def prepare_workspace(payload: dict) -> dict:
             "skills": skills}
 
 
+def source_repo(git_common_dir: str) -> Path:
+    """The repository a worktree belongs to, given its common git dir.
+
+    Pure, because the path arithmetic is the only part worth testing and it
+    should not need a repository to exercise. Recovering the source this way
+    rather than reading `repo_path` is deliberate: `repo_path` is not in
+    CARRIED_KEYS, so it does not survive to a run terminal, and falling back to
+    `os.getcwd()` would silently release against whichever tree the engine
+    happens to be sitting in.
+    """
+    common = Path(git_common_dir)
+    return common.parent if common.name == ".git" else common
+
+
+def release_workspace(payload: dict) -> dict:
+    """Give back the worktree a finished run was built in.
+
+    Subscribed to `run.completed` rather than `pr.merged`, and the difference is
+    load-bearing since #69: notes drafting now starts at `checks.passed` and
+    overlaps the merge, and `dispatch` runs every agent with `cwd` set to this
+    worktree. Releasing at the merge would delete the directory out from under
+    a `write-note` agent that is still working in it. `run.completed` is the
+    two-arm rendezvous, so it is the first moment nothing is left inside.
+
+    A halted run keeps its worktree on purpose. That tree is the evidence for
+    why it halted, and reclaiming disk is not worth destroying it.
+    """
+    root = worktree_for(payload)
+    branch = branch_for(payload)
+
+    if not root.exists():
+        # Releasing twice is not a failure. The state this asserts already holds.
+        return {**payload, "ok": True, "worktree": str(root), "released": False}
+
+    code, common, err = _run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=str(root),
+    )
+    if code != 0:
+        return {**payload, "ok": False, "worktree": str(root),
+                "error": err or "cannot locate the repository this worktree belongs to"}
+    source = str(source_repo(common))
+
+    code, out, err = _run(["git", "worktree", "remove", "--force", str(root)], cwd=source)
+    if code != 0:
+        return {**payload, "ok": False, "worktree": str(root),
+                "error": err or out or f"worktree remove exited {code}"}
+
+    # merge-pr already deleted the remote ref. The local branch is the last
+    # thing still pinning the run's history here, but losing it is not a reason
+    # to call a released workspace a failure — the worktree is already gone.
+    code, out, err = _run(["git", "branch", "-D", branch], cwd=source)
+    if code != 0:
+        return {**payload, "ok": True, "worktree": str(root), "released": True,
+                "warning": err or out or f"local branch deletion exited {code}"}
+    return {**payload, "ok": True, "worktree": str(root), "branch": branch,
+            "released": True}
+
+
 # ── issue ────────────────────────────────────────────────────────────────────
 
 
@@ -541,6 +600,7 @@ def main(command: str, argv: list[str]) -> int:
 
     handlers = {
         "prepare-workspace": prepare_workspace,
+        "release-workspace": release_workspace,
         "fetch-issue": fetch_issue,
         "run-suite": run_suite,
         "merge-stage": merge_stage,

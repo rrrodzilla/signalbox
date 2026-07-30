@@ -1,12 +1,13 @@
 ---
 name: signalbox-write-note
-description: Rewrite one vault note so it describes the system as it now is. Use when asked to write a single signalbox vault note after a change landed.
+description: Rewrite one vault note for the system a CI-verified change will produce. Use when asked to write a single signalbox vault note for an open pull request awaiting merge.
 ---
 
 # Writing one vault note
 
-Bring **one** note back into agreement with the code. Print one JSON object and
-stop. Other notes are being rewritten in parallel right now; touch only yours.
+An open pull request has passed CI and is awaiting merge. Bring **one** note into
+agreement with the code on that verified branch. Print one JSON object and stop.
+Other notes are being rewritten in parallel right now; touch only yours.
 
 ## Output contract
 

@@ -121,6 +121,9 @@ def _primitive(argv: list[str]) -> int:
     if name == "join-terminal":
         from signalbox.primitives import join_terminal
 
+        # Preserve the primitive's own argument boundary: join-terminal accepts
+        # either its established --count-field mode or the topic-based --arms
+        # rendezvous mode.
         sys.argv = ["signalbox primitive join-terminal", *rest]
         join_terminal.main()
         return 0

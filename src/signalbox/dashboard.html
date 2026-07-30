@@ -90,7 +90,7 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 .block.failed::before { background:var(--red); }
 .block.parked::before { background:var(--violet); }
 /* Entered, but nothing heard from it yet. A judging node publishes nothing until
-   it finishes, so `docs` sat 2m40s between pr.merged and notes.planned looking
+   it finishes, so `docs` can sit between checks.passed and notes.planned looking
    exactly like a block the run had not reached. Hollow, not filled: the run is
    here, the block has not spoken. */
 .block.waiting::before {
@@ -454,8 +454,8 @@ function apply(msg) {
   }
 
   // Finishing a block enters the next one. Without this the run appeared to be
-  // nowhere during every judging pause, worst between pr.merged and
-  // notes.planned where nothing at all is published for minutes (#68).
+  // nowhere during every judging pause. Notes planning now overlaps the merge,
+  // so checks.passed explicitly enters docs while both arms are in flight.
   const enterNext = (b) => {
     const next = BLOCKS[BLOCKS.indexOf(b) + 1];
     if (next && run.blocks[next] === "idle") {
@@ -527,7 +527,8 @@ function apply(msg) {
       set("promote", "failed");
       run.verdict = { label: "PROMOTE FAILED", cls: "v-red", detail: p.error || "" }; break;
     case "pr.opened": run.pr = p.pr || p.url; break;
-    case "checks.passed": run.suite = "checks passed"; milestone("CHECKS PASSED"); break;
+    case "checks.passed": run.suite = "checks passed"; before("docs");
+      milestone("CHECKS PASSED"); break;
     case "checks.failed": run.suite = "checks FAILED";
       run.verdict = { label: "CHECKS FAILED", cls: "v-red",
         detail: (p.failed || []).join(", ") }; break;
@@ -535,7 +536,7 @@ function apply(msg) {
       set("promote", "failed");
       run.verdict = { label: t.split(".")[1].toUpperCase().replace(/-/g, " "),
         cls: "v-red", detail: p.reason || p.branch || "" }; break;
-    case "pr.merged": set("promote", "done"); before("docs"); milestone("MERGED"); break;
+    case "pr.merged": set("promote", "done"); milestone("MERGED"); break;
     case "note.written": run.notes.push(p.note); break;
     case "notes.plan-failed": case "note.write-failed":
       set("docs", "failed");

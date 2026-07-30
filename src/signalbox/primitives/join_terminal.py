@@ -1,4 +1,4 @@
-"""Wait for N terminal outcomes sharing a key, then publish one event.
+"""Rendezvous terminal outcomes sharing a key, then publish one event.
 
 The file-based shell join in the patterns reference is not crash-safe and never
 expires a partial join. Here a lost shard result would strand a run, so this is
@@ -14,6 +14,11 @@ Two properties keep it from stalling:
 
 Outcomes are read from an `outcome` field the routers stamp. This primitive
 never infers meaning from a topic name.
+
+Arms mode is the exception: it rendezvous explicitly named topics. It exists
+because the zero-note path emits ``notes.synced`` directly and can re-enter.
+A bare count of two would let two such events complete ``run.completed`` with
+no ``pr.merged`` event at all.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from signalbox import identity
 class Pending:
     expected: int | None
     results: list[dict] = field(default_factory=list)
+    satisfied_arms: set[str] = field(default_factory=set)
     timer: asyncio.Task | None = None
 
 
@@ -96,12 +102,15 @@ class Joiner:
     def __init__(
         self,
         key: str,
-        count_field: str,
+        count_field: str | None,
         publish: Callable[[dict, object], Awaitable[None]],
         timeout: float = 3600.0,
+        arms: tuple[str, ...] | None = None,
     ):
         self.key = key
         self.count_field = count_field
+        self.arms = arms
+        self.arm_set = set(arms) if arms is not None else None
         self.publish = publish
         self.timeout = timeout
         self.pending: dict[str, Pending] = {}
@@ -127,7 +136,18 @@ class Joiner:
         )
         await self._fire(key_value, None, timed_out=True)
 
-    async def accept(self, payload: dict, cause: object = None) -> None:
+    async def accept(
+        self,
+        payload: dict,
+        cause: object = None,
+        topic: str | None = None,
+    ) -> None:
+        """Accept one arrival.
+
+        Arms are identified by the delivering envelope, not payload content.
+        In particular, a doubled zero-note ``notes.synced`` must remain one
+        satisfied arm; it cannot stand in for the missing ``pr.merged`` arm.
+        """
         key_value = payload.get(self.key)
         if key_value is None:
             print(f"join: message without {self.key}, ignored", file=sys.stderr)
@@ -140,18 +160,40 @@ class Joiner:
             print(f"join: late arrival for {self.key}={key_value}", file=sys.stderr)
             return
 
+        if self.arm_set is not None and topic not in self.arm_set:
+            print(f"join: arrival from unknown arm {topic!r}, ignored", file=sys.stderr)
+            return
+
         entry = self.pending.get(key_value)
         if entry is None:
-            entry = Pending(expected=expected_count(payload, self.count_field))
+            expected = (
+                len(self.arms)
+                if self.arms is not None
+                else expected_count(payload, self.count_field or "")
+            )
+            entry = Pending(expected=expected)
             self.pending[key_value] = entry
             if self.timeout > 0:
                 entry.timer = asyncio.create_task(self._expire(key_value))
-        if entry.expected is None:
+        if self.arms is not None:
+            if topic in entry.satisfied_arms:
+                print(
+                    f"join: duplicate arm {topic!r} for {self.key}={key_value}, ignored",
+                    file=sys.stderr,
+                )
+                return
+            entry.satisfied_arms.add(topic)
+        elif entry.expected is None:
             entry.expected = expected_count(payload, self.count_field)
 
         entry.results.append(payload)
 
-        if entry.expected is not None and len(entry.results) >= entry.expected:
+        complete = (
+            entry.satisfied_arms == self.arm_set
+            if self.arm_set is not None
+            else entry.expected is not None and len(entry.results) >= entry.expected
+        )
+        if complete:
             await self._fire(key_value, cause, timed_out=False)
 
 
@@ -173,7 +215,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(prog="signalbox primitive join-terminal")
     parser.add_argument("--key", required=True)
-    parser.add_argument("--count-field", required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--count-field")
+    mode.add_argument("--arms")
     parser.add_argument("--publish-as", required=True)
     parser.add_argument("--timeout-seconds", type=float, default=3600.0)
     parser.add_argument("--subscribe", action="append", default=None)
@@ -189,10 +233,25 @@ def main() -> None:
 
     async def accept(msg, handler) -> None:
         publish_joined.handler = handler
-        await joiner.accept(msg.payload_as(dict) or {}, msg.id)
+        await joiner.accept(msg.payload_as(dict) or {}, msg.id, msg.message_type)
 
-    joiner = Joiner(args.key, args.count_field, publish_joined, args.timeout_seconds)
-    subscribes = args.subscribe or default_subscriptions(args.key)
+    arms = (
+        tuple(arm.strip() for arm in args.arms.split(",") if arm.strip())
+        if args.arms
+        else None
+    )
+    if args.arms is not None and not arms:
+        parser.error("--arms must name at least one topic")
+    if arms is not None and len(set(arms)) != len(arms):
+        parser.error("--arms must name distinct topics")
+    joiner = Joiner(
+        args.key,
+        args.count_field,
+        publish_joined,
+        args.timeout_seconds,
+        arms=arms,
+    )
+    subscribes = args.subscribe or list(arms or default_subscriptions(args.key))
     name = os.environ.get("EMERGENT_PRIMITIVE_NAME", f"join-{args.key}")
     asyncio.run(run_handler(name, subscribes, accept))
 

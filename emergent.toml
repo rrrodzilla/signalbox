@@ -654,12 +654,12 @@ publishes = ["pr.merged", "pr.merge-failed"]
 [[handlers]]
 name = "plan-notes"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "pr.merged", "--publish-as", "notes.planned",
+args = ["-s", "checks.passed", "--publish-as", "notes.planned",
         "-e", "notes.plan-failed", "-t", "300000", "--",
         "signalbox", "agent", "plan-notes"]
-subscribes = ["pr.merged"]
+subscribes = ["checks.passed"]
 # Notes planning is still model judgment, so provenance is load-bearing even
-# after the code path has merged.
+# while the independently started merge arm is still in flight.
 publishes = ["notes.planned", "notes.plan-failed", "model.invoked"]
 
 # An empty notes plan has nothing for the fan-out or join to count, so the
@@ -693,12 +693,17 @@ subscribes = ["note.written", "note.write-failed"]
 publishes = ["notes.synced"]
 
 [[handlers]]
-name = "complete-run"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "notes.synced", "--publish-as", "run.completed", "--",
-        "jq", "-c", '. + {at: (now | todate)}']
-subscribes = ["notes.synced"]
+name = "join-completion"
+path = "signalbox"
+args = ["primitive", "join-terminal", "--key", "run_id",
+        "--arms", "pr.merged,notes.synced", "--timeout-seconds", "1800",
+        "--publish-as", "run.completed"]
+subscribes = ["pr.merged", "notes.synced"]
 publishes = ["run.completed"]
+
+# Inherited from #66: notes.plan-failed has no run_id, so that failure cannot
+# arrive at this run register's notes arm. The promote arm does at least create
+# the run_id register and arm this join's timeout instead of leaving pure silence.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EGRESS — genuine egress only, where seventy-six sinks used to do work.

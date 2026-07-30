@@ -36,6 +36,7 @@ ROLE_SKILLS = {
     "plan": "signalbox-plan",
     "audit": "signalbox-audit-plan",
     "review": "signalbox-review",
+    "rebase": "signalbox-rebase",
     "assess": "signalbox-assess",
     "plan-notes": "signalbox-plan-notes",
     "write-note": "signalbox-write-note",
@@ -63,7 +64,8 @@ VAULT_ROLES = NOTES_ROLES | {"plan"}
 # everything downstream, and the assessment decides whether a run is fit to
 # promote or belongs in front of a human. Reviewing judges one shard against one
 # intent, so it works at a narrower scope. Note writing is transcription of
-# decisions already made.
+# decisions already made. Rebase uses Opus because resolving conflicts without
+# dropping either side's intent is a tree-changing promotion judgment.
 #
 # `audit` is None for the same reason dispatch leaves codex unpinned: a runner
 # that ships its own default model should keep owning it, and a Claude alias in
@@ -72,6 +74,7 @@ ROLE_MODELS: dict[str, str | None] = {
     "plan": "opus",
     "audit": None,
     "review": "opus",
+    "rebase": "opus",
     "assess": "opus",
     "plan-notes": "sonnet",
     "write-note": "sonnet",
@@ -85,6 +88,7 @@ ROLE_PRODUCED_TOPICS = {
     "plan": "plan.submitted",
     "audit": "plan.audited",
     "review": "review.submitted",
+    "rebase": "branch.rebase-attempted",
     "assess": "gate.assessed",
     "plan-notes": "notes.planned",
     "write-note": "note.written",
@@ -239,6 +243,8 @@ def tools_for(role: str) -> list[str]:
     # vault, which is what the topology used to do with two roles and a join.
     if role == "plan":
         return ["Read", "Grep", "Glob", "Skill", "Bash", "Agent"]
+    if role == "rebase":
+        return ["Read", "Grep", "Glob", "Skill", "Bash", "Write", "Edit"]
     if role in READ_ONLY_ROLES:
         return ["Read", "Grep", "Glob", "Skill", "Bash"]
     return ["Read", "Grep", "Glob", "Skill", "Bash", "Write", "Edit"]

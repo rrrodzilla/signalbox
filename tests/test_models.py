@@ -38,6 +38,7 @@ def test_every_model_role_declares_the_topic_it_produces():
         "plan": "plan.submitted",
         "audit": "plan.audited",
         "review": "review.submitted",
+        "rebase": "branch.rebase-attempted",
         "assess": "gate.assessed",
         "plan-notes": "notes.planned",
         "write-note": "note.written",
@@ -154,6 +155,16 @@ def test_the_load_bearing_judgments_run_on_opus():
 
 def test_the_narrower_scoped_judgments_run_on_opus():
     assert model_for("review", {}) == "opus"
+
+
+def test_rebase_is_a_tree_writing_claude_role_with_explicit_tools():
+    assert agent.runner_for("rebase", {}) == "claude"
+    assert model_for("rebase", {}) == "opus"
+    assert "rebase" not in agent.READ_ONLY_ROLES
+    assert "rebase" not in agent.NOTES_ROLES
+    assert "rebase" not in agent.VAULT_ROLES
+    tools = agent.tools_for("rebase")
+    assert {"Bash", "Write", "Edit"} <= set(tools)
 
 
 def test_the_plan_audit_keeps_its_own_runners_default_model():

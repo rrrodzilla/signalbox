@@ -692,11 +692,44 @@ publishes = ["run.built"]
 # ─────────────────────────────────────────────────────────────────────────────
 
 [[handlers]]
+name = "rebase-branch"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "run.built", "--publish-as", "branch.rebase-attempted",
+        "-e", "branch.rebase-failed", "-t", "900000", "--max-concurrent", "8", "--",
+        "signalbox", "agent", "rebase"]
+subscribes = ["run.built"]
+publishes = ["branch.rebase-attempted", "branch.rebase-failed", "model.invoked"]
+
+[[handlers]]
+name = "route-rebase-ok"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "branch.rebase-attempted", "--publish-as", "branch.rebased", "--",
+        "jq", "-c", "select(.ok == true)"]
+subscribes = ["branch.rebase-attempted"]
+publishes = ["branch.rebased"]
+
+[[handlers]]
+name = "route-rebase-conflict"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "branch.rebase-attempted", "--publish-as", "branch.rebase-conflicted", "--",
+        "jq", "-c", "select(.ok == false)"]
+subscribes = ["branch.rebase-attempted"]
+publishes = ["branch.rebase-conflicted"]
+
+[[handlers]]
+name = "route-rebase-invalid"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "branch.rebase-attempted", "--publish-as", "branch.rebase-invalid-verdict", "--",
+        "jq", "-c", 'select((.ok | type) != "boolean")']
+subscribes = ["branch.rebase-attempted"]
+publishes = ["branch.rebase-invalid-verdict"]
+
+[[handlers]]
 name = "run-suite"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "run.built", "--publish-as", "suite.ran",
+args = ["-s", "branch.rebased", "--publish-as", "suite.ran",
         "-e", "suite.errored", "-t", "1800000", "--", "signalbox", "run-suite"]
-subscribes = ["run.built"]
+subscribes = ["branch.rebased"]
 publishes = ["suite.ran", "suite.errored"]
 
 [[handlers]]
@@ -966,7 +999,9 @@ path = "~/.local/share/emergent/primitives/bin/sse-sink"
 args = ["--port", "8101"]
 subscribes = ["exec.output", "exec.exit",
               "approval.granted", "approval.requested", "assess.failed", "branch.push-failed",
-              "branch.pushed", "checks.detail-failed", "checks.detailed",
+              "branch.pushed", "branch.rebase-attempted", "branch.rebase-conflicted",
+              "branch.rebase-failed", "branch.rebase-invalid-verdict", "branch.rebased",
+              "checks.detail-failed", "checks.detailed",
               "checks.failed", "checks.observed", "checks.passed", "checks.reported",
               "checks.silent", "checks.unknown-pr",
               "completion.closed", "control.unknown-event", "fix.opened", "gate.assessed",
@@ -1002,18 +1037,21 @@ subscribes = ["system.started.*", "system.stopped.*", "system.error.*"]
 name = "notify"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "approval.requested", "-s", "shard.escalated", "-s", "run.halted",
-        "-s", "scope.violated", "-s", "gate.blocked", "-s", "checks.silent",
+        "-s", "scope.violated", "-s", "gate.blocked", "-s", "branch.rebase-conflicted",
+        "-s", "checks.silent",
         "-t", "30000", "--", "signalbox", "notify"]
 subscribes = ["approval.requested", "shard.escalated", "run.halted",
-              "scope.violated", "gate.blocked", "checks.silent"]
+              "scope.violated", "gate.blocked", "branch.rebase-conflicted", "checks.silent"]
 
 [[sinks]]
 name = "trace"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "run.completed", "-s", "run.halted", "-s", "control.unknown-event",
         "-s", "review.invalid-verdict", "-s", "shard.invalid-verdict",
-        "-s", "gate.invalid-verdict", "-s", "checks.unknown-pr",
+        "-s", "gate.invalid-verdict", "-s", "branch.rebase-invalid-verdict",
+        "-s", "checks.unknown-pr",
         "-s", "checks.silent", "--", "jq", "-c", "."]
 subscribes = ["run.completed", "run.halted", "control.unknown-event",
               "review.invalid-verdict", "shard.invalid-verdict",
-              "gate.invalid-verdict", "checks.unknown-pr", "checks.silent"]
+              "gate.invalid-verdict", "branch.rebase-invalid-verdict",
+              "checks.unknown-pr", "checks.silent"]

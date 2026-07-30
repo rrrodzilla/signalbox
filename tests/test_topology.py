@@ -459,9 +459,54 @@ def test_promotion_is_decomposed_into_retryable_acts():
         assert any("failed" in topic for topic in handler["publishes"])
 
 
+def test_rebase_precedes_the_suite_without_changing_the_gate_push_edges():
+    rebase = named(HANDLERS, "rebase-branch")
+    suite = named(HANDLERS, "run-suite")
+    push = named(HANDLERS, "push-branch")
+
+    assert rebase["subscribes"] == ["run.built"]
+    assert rebase["args"][rebase["args"].index("-e") + 1] == "branch.rebase-failed"
+    assert "branch.rebase-failed" in rebase["publishes"]
+    assert suite["subscribes"] == ["branch.rebased"]
+    assert "run.built" not in suite["subscribes"]
+    assert push["subscribes"] == ["gate.cleared", "approval.granted"]
+
+
+def test_rebase_invocation_failure_is_observable_and_closes_its_window():
+    dashboard = named(SINKS, "dashboard")
+    assert "branch.rebase-failed" in dashboard["subscribes"]
+    assert '"branch.rebase-failed":["gate","stop"]' in PAGE_TEXT
+    recorder = PAGE_TEXT[
+        PAGE_TEXT.index("function recordProvenance") :
+        PAGE_TEXT.index("function renderInvocationFailures")
+    ]
+    assert 'p.role === "rebase" && p.ok === false' in recorder
+    assert 'flight.node === "rebase-branch"' in recorder
+    assert 'run.blocks.gate = "failed"' in recorder
+
+
+def test_no_path_from_run_built_reaches_suite_ran_without_the_rebase_node():
+    """A new seam must not let the suite exercise an unre-based tree."""
+    reachable = {"run.built"}
+    while True:
+        expanded = set(reachable)
+        for handler in HANDLERS:
+            if handler["name"] == "rebase-branch":
+                continue
+            if reachable & set(handler.get("subscribes", [])):
+                expanded.update(handler.get("publishes", []))
+        if expanded == reachable:
+            break
+        reachable = expanded
+    assert "suite.ran" not in reachable
+
+
 def test_every_model_verdict_has_an_exhaustiveness_router():
     """Model output is untrusted input; an unrecognised verdict must not vanish."""
-    for topic in ("shard.submitted", "review.submitted", "gate.assessed", "plan.audited"):
+    for topic in (
+        "shard.submitted", "review.submitted", "branch.rebase-attempted",
+        "gate.assessed", "plan.audited",
+    ):
         catchers = [
             h for h in HANDLERS
             if topic in h.get("subscribes", []) and "invalid" in " ".join(h["publishes"])
@@ -747,6 +792,7 @@ def test_every_non_deterministic_node_publishes_invocation_provenance():
         "plan": "draft-plan",
         "audit": "audit-plan",
         "review": "review-shard",
+        "rebase": "rebase-branch",
         "assess": "assess",
         "plan-notes": "plan-notes",
         "write-note": "write-note",
@@ -772,7 +818,7 @@ def test_every_non_deterministic_node_publishes_invocation_provenance():
 # is the slow, IO-bound thing in this topology, and every one of them is an exec
 # primitive whose `--max-concurrent` defaults to 1.
 MODEL_NODES = (
-    "draft-plan", "audit-plan", "review-shard", "assess",
+    "draft-plan", "audit-plan", "review-shard", "rebase-branch", "assess",
     "plan-notes", "write-note", "dispatch-implement", "dispatch-fix",
 )
 
@@ -933,6 +979,25 @@ def route(handler_name: str, payload: dict) -> dict | None:
     assert done.returncode == 0, f"{handler_name} jq failed: {done.stderr}"
     out = done.stdout.strip()
     return json.loads(out) if out else None
+
+
+@pytest.mark.parametrize(
+    "payload,matched",
+    [
+        ({"ok": True, "rebased_onto_sha": "a" * 40, "conflicts": []}, "ok"),
+        ({"ok": False, "rebased_onto_sha": "b" * 40, "conflicts": ["src/x.py"]}, "conflict"),
+        ({"ok": "yes", "conflicts": []}, "invalid"),
+        ({"conflicts": []}, "invalid"),
+    ],
+)
+def test_rebase_verdict_routers_are_exclusive_when_executed(payload, matched):
+    outputs = {
+        "ok": route("route-rebase-ok", payload),
+        "conflict": route("route-rebase-conflict", payload),
+        "invalid": route("route-rebase-invalid", payload),
+    }
+    assert [name for name, output in outputs.items() if output is not None] == [matched]
+    assert outputs[matched] == payload
 
 
 def checked_stage_plan(run_id: str = "sb-59") -> dict:

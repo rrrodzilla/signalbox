@@ -35,6 +35,7 @@ _ENV_KEYS = {
     "shard_count": "SIGNALBOX_SHARD_COUNT",
     "stage_count": "SIGNALBOX_STAGE_COUNT",
     "round": "SIGNALBOX_ROUND",
+    "intent": "SIGNALBOX_INTENT",
     "session_id": "SIGNALBOX_SESSION_ID",
 }
 

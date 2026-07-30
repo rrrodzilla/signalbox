@@ -36,6 +36,13 @@ CARRIED_KEYS: tuple[str, ...] = (
     # what happened to demo-3 on 2026-07-29.
     "stage_count",
     "declared",
+    # What the shard was asked to accomplish. The reviewer judges the diff
+    # against it and `signalbox-review` names an unmet intent as a rejection
+    # reason, so a review that never received it was silently judging scope
+    # alone. Carried rather than re-read from a plan on disk, and carried
+    # rather than supplied by the model, because a shard that could restate
+    # its own intent could rewrite the standard it is about to be judged by.
+    "intent",
     "round",
     # Runner sessions are assigned at the process boundary. Carrying this key
     # mechanically prevents a model from replacing the session to be resumed.

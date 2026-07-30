@@ -265,6 +265,66 @@ def test_a_none_title_does_not_round_trip_as_the_string_none():
     assert "title" not in identity_from_env(stamped)
 
 
+def test_the_shard_intent_reaches_the_reviewer():
+    """The reviewer judges the diff against the intent, so the intent must arrive.
+
+    `plan.py` stamps it onto `shard.opened` and it died at the agent environment
+    seam: absent from CARRIED_KEYS, from the dispatcher's environment, and from
+    `_ENV_KEYS`. So `shard.submitted` carried no intent, `shard.built` carried
+    none, and `signalbox-review` was told to judge against an intent that was
+    never in its payload. It degraded to reviewing scope alone, which is why the
+    loss was silent: the verdict still looked reasonable.
+    """
+    from signalbox.dispatch import environment
+    from signalbox.emit import _ENV_KEYS, build_body, identity_from_env
+    from signalbox.identity import CARRIED_KEYS
+
+    intent = "make the cursor an event, not a variable"
+    assert "intent" in CARRIED_KEYS
+    assert "intent" in _ENV_KEYS
+
+    stamped = environment({"intent": intent}, {})
+    assert stamped["SIGNALBOX_INTENT"] == intent
+    assert identity_from_env(stamped)["intent"] == intent
+
+    # `shard.submitted` is built from the agent's fields plus this identity, and
+    # `route-shard-done` is a bare `select`, so whatever lands here is exactly
+    # what review receives.
+    assert build_body("shard.submitted", {"verdict": "done"}, stamped)["intent"] == intent
+
+
+def test_a_shard_cannot_restate_the_intent_it_is_judged_against():
+    """Identity wins over model output, or a shard could move its own goalposts.
+
+    An agent that found the intent inconvenient could otherwise emit a narrower
+    one and be reviewed against that instead.
+    """
+    from signalbox.dispatch import environment
+    from signalbox.emit import build_body
+    from signalbox.identity import carry, spoofed_keys
+
+    real = "carry the intent to the reviewer"
+    stamped = environment({"intent": real}, {})
+    body = build_body("shard.submitted", {"intent": "something easier"}, stamped)
+    assert body["intent"] == real
+
+    # And the same on the judging side: a verdict cannot rewrite it either.
+    inbound = {"run_id": "sb-1", "intent": real}
+    verdict = {"verdict": "approved", "intent": "something easier"}
+    assert carry(inbound, verdict)["intent"] == real
+    assert spoofed_keys(inbound, verdict) == ["intent"]
+
+
+def test_a_none_intent_does_not_round_trip_as_the_string_none():
+    """#74's str(None) precedent: "None" would read as a real instruction."""
+    from signalbox.dispatch import environment
+    from signalbox.emit import identity_from_env
+
+    stamped = environment({"intent": None}, {"SIGNALBOX_INTENT": "stale intent"})
+    assert stamped["SIGNALBOX_INTENT"] == ""
+    assert "intent" not in identity_from_env(stamped)
+
+
 def test_every_carried_key_survives_every_payload_building_seam():
     """CARRIED_KEYS is the contract across payload-building seams.
 
@@ -286,6 +346,10 @@ def test_every_carried_key_survives_every_payload_building_seam():
             "shard_id": "shard-1",
             "shard_count": 1,
             "declared": ["tests/test_checks.py"],
+            # Shard-scoped, like shard_id and declared: `shard_events` re-stamps
+            # it from the shard after projecting the envelope, so it has to be
+            # the shard's own value rather than a run-scoped placeholder.
+            "intent": "exercise the identity seams",
             "round": 1,
             "note": "architecture",
             "note_count": 1,
@@ -300,7 +364,7 @@ def test_every_carried_key_survives_every_payload_building_seam():
                     {
                         "shard_id": carried["shard_id"],
                         "files": carried["declared"],
-                        "intent": "exercise the identity seams",
+                        "intent": carried["intent"],
                     }
                 ],
             }

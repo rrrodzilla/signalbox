@@ -152,6 +152,9 @@ def test_stages_carry_a_stage_count_so_the_run_join_terminates():
 def test_every_carried_plan_key_survives_the_stage_and_shard_seams():
     """Regression for sb-60: issue #65 found base_branch silently dropped here on 2026-07-29."""
     carried = {key: f"value-{key}" for key in CARRIED_KEYS}
+    # The shard-scoped carried keys are pinned to shard "a"'s own values, because
+    # `shard_events` re-stamps each of them per shard after projecting the
+    # envelope. A run-scoped placeholder would compare against the wrong thing.
     carried.update({
         "attempt": 0,
         "stage_id": "s1",
@@ -159,6 +162,7 @@ def test_every_carried_plan_key_survives_the_stage_and_shard_seams():
         "shard_count": 2,
         "stage_count": 1,
         "declared": ["src/a.py"],
+        "intent": "do a thing",
         "round": 1,
     })
     result = check_plan(_plan(**carried))

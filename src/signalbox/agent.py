@@ -20,7 +20,7 @@ import time
 from signalbox.dispatch import environment
 from signalbox.diagnostics import invocation_diagnostic
 from signalbox.emit import post_provenance
-from signalbox.identity import carry, spoofed_keys
+from signalbox.identity import merge, project
 from signalbox.paths import (
     VaultMissing,
     WorktreeMissing,
@@ -291,12 +291,17 @@ def run(role: str, payload: dict, model: str | None = None) -> tuple[dict, int]:
     verdict = extract_verdict(completed.stdout)
     if verdict is None:
         # Not an error: an unparseable verdict is data the routers can see.
-        return carry(payload, {"verdict": "unparseable", "output": completed.stdout[-2000:]}), 0
+        verdict = {"verdict": "unparseable", "output": completed.stdout[-2000:]}
 
-    spoofed = spoofed_keys(payload, verdict)
-    result = carry(payload, verdict)
-    if spoofed:
-        result["identity_overridden"] = spoofed
+    merged = merge(payload, verdict, role)
+    # The model's product remains the payload base. Only carried fields cross
+    # the envelope seam; feedback and prior verdict fields must not leak into
+    # the next event merely because the role-aware merge inspected them.
+    result = {**verdict, **project(merged.payload)}
+    if merged.envelope_overridden:
+        result["identity_overridden"] = merged.envelope_overridden
+    if merged.product_overridden:
+        result["product_overridden"] = merged.product_overridden
     return result, 0
 
 

@@ -458,7 +458,10 @@ function invocationFor(entry) {
     let score = 0;
     let conflict = false;
     for (const k of IDENTITY) {
-      if (entry[k] === undefined || invocation[k] === undefined) continue;
+      if (entry[k] === undefined) continue;
+      if ((k === "stage_id" || k === "shard_id") &&
+          invocation[k] === undefined) { conflict = true; break; }
+      if (invocation[k] === undefined) continue;
       if (entry[k] !== invocation[k]) { conflict = true; break; }
       score++;
     }

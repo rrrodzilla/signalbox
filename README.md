@@ -93,9 +93,9 @@ Eight nodes are non-deterministic. Nothing else in the system is.
 
 | Node | Role | Runner | Default model | Override precedence | Judges or acts |
 |---|---|---|---|---|---|
-| `survey-codebase` | `survey` | claude | fable | `SIGNALBOX_MODEL_SURVEY`, then `SIGNALBOX_MODEL` | judges |
+| `survey-codebase` | `survey` | claude | opus | `SIGNALBOX_MODEL_SURVEY`, then `SIGNALBOX_MODEL` | judges |
 | `draft-plan` | `plan` | claude | fable | `SIGNALBOX_MODEL_PLAN`, then `SIGNALBOX_MODEL` | judges |
-| `review-shard` | `review` | claude | fable | `SIGNALBOX_MODEL_REVIEW`, then `SIGNALBOX_MODEL` | judges |
+| `review-shard` | `review` | claude | opus | `SIGNALBOX_MODEL_REVIEW`, then `SIGNALBOX_MODEL` | judges |
 | `assess` | `assess` | claude | fable | `SIGNALBOX_MODEL_ASSESS`, then `SIGNALBOX_MODEL` | judges |
 | `plan-notes` | `plan-notes` | claude | sonnet | `SIGNALBOX_MODEL_PLAN_NOTES`, then `SIGNALBOX_MODEL` | judges |
 | `write-note` | `write-note` | claude | sonnet | `SIGNALBOX_MODEL_WRITE_NOTE`, then `SIGNALBOX_MODEL` | acts (writes notes) |

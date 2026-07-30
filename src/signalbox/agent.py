@@ -36,13 +36,16 @@ ROLE_SKILLS = {
 READ_ONLY_ROLES = frozenset({"survey", "plan", "review", "assess", "plan-notes"})
 
 # Which model renders each judgment. This is a property of the role, not of the
-# run, because the judgments differ in kind: planning, reviewing, and assessing
-# are the load-bearing calls and get the strongest reasoning; surveying is
-# breadth-first reading; note writing is transcription of decisions already made.
+# run, because the judgments differ in kind. Planning and assessing get the
+# strongest reasoning: the plan fixes stage boundaries and file-disjointness for
+# everything downstream, and the assessment decides whether a run is fit to
+# promote or belongs in front of a human. Surveying is breadth-first reading and
+# reviewing judges one shard against one intent, so both work at a narrower
+# scope. Note writing is transcription of decisions already made.
 ROLE_MODELS = {
-    "survey": "fable",
+    "survey": "opus",
     "plan": "fable",
-    "review": "fable",
+    "review": "opus",
     "assess": "fable",
     "plan-notes": "sonnet",
     "write-note": "sonnet",

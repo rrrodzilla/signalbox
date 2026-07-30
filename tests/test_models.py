@@ -93,8 +93,14 @@ def test_every_judging_role_has_a_model():
 
 
 def test_the_load_bearing_judgments_run_on_fable():
-    for role in ("plan", "review", "assess", "survey"):
+    """The plan binds every shard downstream; the assessment decides promotion."""
+    for role in ("plan", "assess"):
         assert model_for(role, {}) == "fable"
+
+
+def test_the_narrower_scoped_judgments_run_on_opus():
+    for role in ("survey", "review"):
+        assert model_for(role, {}) == "opus"
 
 
 def test_note_writing_runs_on_sonnet():

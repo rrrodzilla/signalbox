@@ -8,9 +8,14 @@ from pathlib import Path
 import pytest
 
 from signalbox.acts import (
+    clear_pending,
+    clear_session,
     map_ci_findings,
     prepare_workspace,
     pr_state_is_merged,
+    read_session,
+    reap,
+    record_session,
     source_repo,
     stage_files,
     suite_command,
@@ -217,6 +222,100 @@ def test_dispatch_environment_defaults_round_for_a_first_pass():
 def test_pending_marker_is_named_for_the_shard_the_reaper_will_report():
     assert pending_path("shard", {"shard_id": "a"}).name == "shard-a.json"
     assert pending_path("shard", {"run_id": "r1"}).name == "shard-unknown.json"
+
+
+def test_fixer_session_round_trips_outside_pending(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+
+    path = record_session("r1", "s1-fix", "codex", "session-123")
+
+    assert path == tmp_path / "sessions" / "r1" / "session-s1-fix.json"
+    assert read_session("r1", "s1-fix") == {
+        "runner": "codex",
+        "session_id": "session-123",
+    }
+
+
+def test_fixer_sessions_are_isolated_by_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+
+    record_session("r1", "s1-store", "codex", "session-r1")
+    record_session("r2", "s1-store", "claude", "session-r2")
+
+    assert read_session("r1", "s1-store") == {
+        "runner": "codex",
+        "session_id": "session-r1",
+    }
+    assert read_session("r2", "s1-store") == {
+        "runner": "claude",
+        "session_id": "session-r2",
+    }
+
+
+def test_missing_or_unparsable_fixer_session_is_a_cold_start(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    assert read_session("r1", "missing") is None
+
+    path = tmp_path / "sessions" / "r1" / "session-broken.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json")
+    assert read_session("r1", "broken") is None
+
+    path.write_text(json.dumps({"runner": "codex"}))
+    assert read_session("r1", "broken") is None
+
+
+def test_clear_session_is_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    record_session("r1", "s1-fix", "claude", "session-456")
+
+    assert clear_session("r1", "s1-fix") is True
+    assert clear_session("r1", "s1-fix") is False
+    assert read_session("r1", "s1-fix") is None
+
+
+def test_submission_clears_pending_but_preserves_session_for_review(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    payload = {
+        "event": "shard.submitted",
+        "run_id": "r1",
+        "shard_id": "s1-fix",
+    }
+    marker = pending_path("shard", payload)
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps(payload))
+    record_session("r1", "s1-fix", "codex", "session-123")
+
+    assert clear_pending("shard", payload) is True
+    assert read_session("r1", "s1-fix") == {
+        "runner": "codex",
+        "session_id": "session-123",
+    }
+
+
+@pytest.mark.parametrize("event", ["shard.approved", "scope.violated", "pr.merged"])
+def test_terminal_event_retires_fixer_session(tmp_path, monkeypatch, event):
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    payload = {"event": event, "run_id": "r1", "shard_id": "s1-fix"}
+    record_session("r1", "s1-fix", "codex", "session-123")
+
+    clear_pending("shard", payload)
+
+    assert read_session("r1", "s1-fix") is None
+
+
+def test_reaping_a_silent_shard_also_retires_its_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    payload = {"run_id": "r1", "shard_id": "s1-fix"}
+    marker = pending_path("shard", payload)
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps(payload))
+    record_session("r1", "s1-fix", "codex", "session-123")
+
+    assert json.loads(reap("shard", stale_minutes=0))["outcome"] == "silent"
+    assert read_session("r1", "s1-fix") is None
 
 
 def test_a_missing_worktree_raises_rather_than_defaulting(tmp_path, monkeypatch):

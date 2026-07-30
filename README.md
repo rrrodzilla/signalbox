@@ -190,6 +190,11 @@ export SIGNALBOX_VAULT=/absolute/path/to/notes-vault
 
 Watch it at **http://127.0.0.1:8103** (the run board) and **http://127.0.0.1:8102** (the live topology). A run's whole trail is in the event store; the viewer exposes it read-only at `GET /history?stream=8101`, with no caching, and then follows the live SSE stream. The default maps stream 8101 to `~/.local/share/emergent/signalbox/events.db`; additional engines can be mapped with repeated `signalbox dashboard --store PORT=DB-PATH` arguments. Missing stores simply produce an empty history. `bin/harness.sh down` sends SIGTERM so that trail flushes.
 
+When a run parks at the human gate, `notify` prints the paste-ready command
+`signalbox approve <run-id>`. Run that exact invocation to approve it; there is
+no port to supply and no event envelope to construct. Approval enters through
+the control ingress and resumes only the named run.
+
 The forwarder is the operator's job rather than the topology's, for two reasons: a primitive that opened a tunnel would be a primitive reaching outside the topology, and the engine cannot detect its own missing deliveries. The harness supervises the `gh webhook forward` websocket with capped backoff, timestamps every restart in `.harness/forward.log`, and stops the supervisor before its child during `down` and `restart`. `status` prints a loud failure with the runnable recovery command when the loop is absent; if the loop exists but its tunnel has not connected, both `forward` and `status` say that it is retrying and point to the log instead of calling it up. `launch` refuses a promote-capable run in that state and names the recovery command. With no `--repo-path`, it checks the current checkout; an explicit local path must itself be a Git root with an origin, so a nested demo directory does not accidentally inherit its enclosing checkout's remote. The target repo also needs a CI workflow at all — with none configured, GitHub creates no check suite and there is nothing to forward.
 
 The install is editable on purpose. A built wheel is the one reliable way to end up running a stale copy of the code and skills while the source in front of you reads correct, and that failure is invisible — a stale skill reports a verdict, just the wrong one. `signalbox paths` prints where the running CLI actually resolves its package, skills, state, and vault.

@@ -516,10 +516,12 @@ def mark_pending(kind: str, payload: dict) -> Path:
     are the same observation.
     """
     from signalbox.dispatch import pending_path
+    from signalbox.identity import project
 
     marker = pending_path(kind, payload)
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps(payload))
+    stored = project(payload) if kind == "approval" else payload
+    marker.write_text(json.dumps(stored))
     return marker
 
 
@@ -591,9 +593,38 @@ def clear_pending(kind: str, payload: dict) -> bool:
     return existed
 
 
+def approve(run_id: str) -> dict:
+    """Replay a parked run's stored identity through the control ingress."""
+    from signalbox import emit
+    from signalbox.dispatch import pending_path
+    from signalbox.identity import project
+
+    marker = pending_path("approval", {"run_id": run_id})
+    try:
+        stored = json.loads(marker.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "run_id": run_id,
+            "ok": False,
+            "error": f"no approval marker at {marker}: {exc}",
+        }
+
+    identity = project(stored)
+    body = {"event": "approval.granted", **identity}
+    status = emit.post(body, url=emit.control_url())
+    return {**identity, "ok": True, "status": status}
+
+
 def notify(payload: dict) -> None:
     label = payload.get("reason") or payload.get("decision") or "attention"
     print(f"[signalbox] {label}: run={payload.get('run_id')} shard={payload.get('shard_id')}")
+    # Only the human gate asks for approval; other notification topics remain
+    # labels so operator commands are never suggested outside their live context.
+    if (
+        payload.get("event") == "approval.requested"
+        or payload.get("decision") == "needs_human"
+    ):
+        print(f"signalbox approve {payload.get('run_id')}")
     hook = os.environ.get("SIGNALBOX_NOTIFY_COMMAND")
     if hook:
         subprocess.run(["bash", "-c", hook], input=json.dumps(payload), text=True, check=False)
@@ -645,6 +676,14 @@ def main(command: str, argv: list[str]) -> int:
         post(request)
         print(run_id)
         return 0
+
+    if command == "approve":
+        import argparse
+
+        parser = argparse.ArgumentParser(prog="signalbox approve")
+        parser.add_argument("run_id")
+        args = parser.parse_args(argv)
+        return _out(approve(args.run_id))
 
     if command in {"mark-pending", "clear-pending", "rehydrate"}:
         import argparse

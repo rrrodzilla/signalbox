@@ -8,9 +8,12 @@ from pathlib import Path
 import pytest
 
 from signalbox.acts import (
+    approve,
     clear_pending,
     clear_session,
     map_ci_findings,
+    mark_pending,
+    notify,
     prepare_workspace,
     pr_state_is_merged,
     read_session,
@@ -22,6 +25,86 @@ from signalbox.acts import (
 )
 from signalbox.dispatch import environment, pending_path
 from signalbox.paths import VaultMissing
+
+
+def test_approve_replays_projected_identity_to_the_control_url(tmp_path, monkeypatch):
+    from signalbox import emit
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    payload = {
+        "event": "approval.requested",
+        "run_id": "71-1234",
+        "repo": "acme/widget",
+        "issue": 71,
+        "title": "Approval",
+        "base_sha": "abc123",
+        "base_branch": "main",
+        "stage_id": "s1-core",
+        "stage_count": 2,
+        "extra": "not identity",
+    }
+    mark_pending("approval", payload)
+    posted = []
+    monkeypatch.setattr(emit, "control_url", lambda: "http://control.test/emit")
+    monkeypatch.setattr(
+        emit,
+        "post",
+        lambda body, url=None: posted.append((body, url)) or 202,
+    )
+
+    result = approve("71-1234")
+
+    assert result["ok"] is True
+    assert posted == [
+        (
+            {
+                "event": "approval.granted",
+                "run_id": "71-1234",
+                "repo": "acme/widget",
+                "issue": 71,
+                "title": "Approval",
+                "base_sha": "abc123",
+                "base_branch": "main",
+                "stage_id": "s1-core",
+                "stage_count": 2,
+            },
+            "http://control.test/emit",
+        )
+    ]
+
+
+def test_approve_without_a_marker_is_routed_false_data(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+
+    result = approve("71-missing")
+
+    assert result["ok"] is False
+    assert result["run_id"] == "71-missing"
+    assert "no approval marker" in result["error"]
+
+
+def test_notify_prints_live_approval_invocation_only_for_approval_requested(capsys):
+    notify(
+        {
+            "decision": "needs_human",
+            "run_id": "71-1234",
+        }
+    )
+    assert capsys.readouterr().out.splitlines() == [
+        "[signalbox] needs_human: run=71-1234 shard=None",
+        "signalbox approve 71-1234",
+    ]
+
+    notify({"event": "run.halted", "reason": "blocked", "run_id": "71-1234"})
+    assert "signalbox approve" not in capsys.readouterr().out
+
+
+def test_operator_approval_does_not_widen_agent_events():
+    from signalbox.emit import ALLOWED_EVENTS
+
+    assert ALLOWED_EVENTS == frozenset(
+        {"shard.file-written", "shard.check-ran", "shard.submitted"}
+    )
 
 
 def _prepare_workspace(tmp_path, monkeypatch, *, existing=False):

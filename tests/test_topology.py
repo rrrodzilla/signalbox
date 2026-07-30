@@ -768,6 +768,57 @@ def test_every_non_deterministic_node_publishes_invocation_provenance():
             assert ROLE_PRODUCED_TOPICS[role] == "shard.submitted"
 
 
+# The same eight nodes as the provenance test, for the same reason: a model call
+# is the slow, IO-bound thing in this topology, and every one of them is an exec
+# primitive whose `--max-concurrent` defaults to 1.
+MODEL_NODES = (
+    "draft-plan", "audit-plan", "review-shard", "assess",
+    "plan-notes", "write-note", "dispatch-implement", "dispatch-fix",
+)
+
+
+def max_concurrent(primitive: dict) -> int:
+    """What a primitive declares, or the exec default it inherits by saying nothing."""
+    args = primitive["args"]
+    boundary = args.index("--") if "--" in args else len(args)
+    flags = args[:boundary]
+    return int(flags[flags.index("--max-concurrent") + 1]) if "--max-concurrent" in flags else 1
+
+
+@pytest.mark.parametrize("node_name", MODEL_NODES)
+def test_no_model_node_consumes_its_subscription_serially(node_name):
+    """A serial model node is a global lock wearing an event subscription.
+
+    exec-handler and exec-sink default to `--max-concurrent 1`, which is one
+    process consuming its whole subscription in arrival order. On a node that
+    waits minutes for a model, that default silently paced work the rest of the
+    design had already licensed to run at once — split-shards fanned a stage
+    out, the join armed for the full count, the dashboard drew every card, and
+    then the shards ran one at a time with nothing downstream able to tell.
+
+    The flag has to be read before the `--` boundary. After it, `--max-concurrent`
+    is an argument to the agent's own command and means nothing to the primitive.
+    """
+    node = named(HANDLERS + SINKS, node_name)
+    assert max_concurrent(node) > 1, f"{node_name} serialises every model call"
+
+
+def test_a_stage_is_never_paced_by_the_node_that_implements_it():
+    """Disjointness licenses the fan-out; the dispatcher must not take it back.
+
+    The width here is what makes `test_shards_are_split_rather_than_paced` mean
+    something. A splitter that publishes N events into a sink that runs one at a
+    time is the ack-paced design that test forbids, reintroduced one node later
+    and invisible to every event the topology carries.
+    """
+    widest_stage_ever_planned = 5
+    for node_name in ("dispatch-implement", "review-shard", "dispatch-fix"):
+        node = named(HANDLERS + SINKS, node_name)
+        assert max_concurrent(node) >= widest_stage_ever_planned, (
+            f"{node_name} would queue shards of a single stage behind each other"
+        )
+
+
 def test_planning_gathers_its_own_inputs_with_no_rendezvous_to_lose():
     """The survey/recall join is gone, and must not come back by accident.
 

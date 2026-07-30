@@ -251,12 +251,35 @@ publishes = ["issue.fetched", "issue.fetch-failed"]
 #
 # plan.rejected re-entering here is FEEDBACK EDGE 1: a first draft and a redraft
 # are the same act, so one primitive serves both.
+#
+# `--max-concurrent` is what makes the first line of this file true. An exec
+# primitive defaults to 1, meaning one process consumed its subscription
+# strictly serially — so every model node was a global lock, and "one engine,
+# many concurrent runs" was a claim the topology could not honour. Two dials,
+# for two different reasons:
+#
+#   DEPTH (8) on the nodes a run visits once — plan, audit, assess, plan-notes.
+#     The number is how many RUNS may be mid-flight, not how wide any of them
+#     is. At 1, a second run's plan waited out the first run's 25-minute draft
+#     before it was even read.
+#   WIDTH (40) on the nodes a single run fans out into — implement, fix, review,
+#     write-note. Eight runs times the widest stage the event log has ever
+#     produced (shard_count tops out at 5, and so does note_count), so a stage
+#     opening while seven other runs are wide still goes out in one wave.
+#
+# These are ceilings, not targets. The cap is per primitive PROCESS and shared
+# across every run, so the only thing it must not do is become the pacer — a
+# number that throttles is indistinguishable from the serial default, just
+# slower to notice. What actually bounds a wave is model quota and this box (24
+# cores, and these processes are network-idle, not CPU-bound), and both of those
+# push back for themselves. The semaphore's job here is only to keep a burst
+# from spawning without limit; deciding how wide the work goes is not its call.
 [[handlers]]
 name = "draft-plan"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "issue.fetched", "-s", "plan.rejected",
         "--publish-as", "plan.submitted", "-e", "plan.draft-failed",
-        "-t", "1500000", "--", "signalbox", "agent", "plan"]
+        "-t", "1500000", "--max-concurrent", "8", "--", "signalbox", "agent", "plan"]
 subscribes = ["issue.fetched", "plan.rejected"]
 # Provenance is load-bearing beside the verdict: success alone cannot prove
 # which model invocation incurred the judgment. Redrafts are non-deterministic
@@ -318,7 +341,7 @@ publishes = ["run.halted"]
 name = "audit-plan"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "plan.verified", "--publish-as", "plan.audited",
-        "-e", "plan.audit-failed", "-t", "900000", "--",
+        "-e", "plan.audit-failed", "-t", "900000", "--max-concurrent", "8", "--",
         "signalbox", "agent", "audit"]
 subscribes = ["plan.verified"]
 publishes = ["plan.audited", "plan.audit-failed", "model.invoked"]
@@ -419,10 +442,21 @@ publishes = ["shard.opened"]
 # it works. It writes code; it never decides what happens next.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# WIDTH. This is where the serial default hurt most, and it was invisible:
+# split-shards published N shard.opened at once, the join was armed for N, the
+# dashboard drew N cards — and then one sink process ran them one at a time,
+# forty minutes apiece. The whole disjointness invariant exists to license this
+# fan-out, and nothing downstream could tell the difference between a stage
+# running wide and a stage running single-file.
+#
+# Concurrent shards share one worktree, which is safe for exactly the reason
+# acts.py states: check_plan proved no two shards of a stage name the same
+# path. No git command runs per shard — the commit happens once, in merge-stage,
+# after the join — so there is no index to race on either.
 [[sinks]]
 name = "dispatch-implement"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "shard.opened", "-t", "2400000", "--",
+args = ["-s", "shard.opened", "-t", "2400000", "--max-concurrent", "40", "--",
         "signalbox", "dispatch", "--skill", "signalbox-implement"]
 subscribes = ["shard.opened"]
 # Dispatch provenance is load-bearing because acting agents publish their own
@@ -432,13 +466,18 @@ publishes = ["model.invoked"]
 [[sinks]]
 name = "dispatch-fix"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
-args = ["-s", "fix.opened", "-t", "2400000", "--",
+args = ["-s", "fix.opened", "-t", "2400000", "--max-concurrent", "40", "--",
         "signalbox", "dispatch", "--skill", "signalbox-fix"]
 subscribes = ["fix.opened"]
 # A shard's fix rounds resume its recorded runner session; the review router
 # increments and guards the round counter described in review-loop.md. CI
 # findings deliberately arrive without shard_id and therefore cold-start a
 # fixer session. See #90.
+#
+# WIDTH, because a whole stage can come back changes_requested at once. A fix
+# inherits its shard's declared file list, so concurrent fixers are disjoint by
+# the same invariant as their implement pass, and the session store is keyed on
+# (run_id, shard_id) so two of them cannot resume each other's thread.
 publishes = ["model.invoked"]
 
 # The other half of the reaper's contract. A shard that announced is not silent,
@@ -517,11 +556,15 @@ publishes = ["shard.invalid-verdict"]
 # REVIEW — Shape A: one verdict type, then exclusive routers.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Reviews arrive as shards finish, so a wide stage that now implements in
+# parallel would otherwise re-serialise here — moving the queue one node
+# downstream rather than removing it. A review is read-only against the
+# worktree, so nothing about running them all at once needs an invariant.
 [[handlers]]
 name = "review-shard"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "shard.built", "--publish-as", "review.submitted",
-        "-e", "review.failed", "-t", "900000", "--",
+        "-e", "review.failed", "-t", "900000", "--max-concurrent", "40", "--",
         "signalbox", "agent", "review"]
 subscribes = ["shard.built"]
 # Review provenance is load-bearing audit evidence independent of its verdict.
@@ -660,7 +703,7 @@ publishes = ["suite.ran", "suite.errored"]
 name = "assess"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "suite.ran", "--publish-as", "gate.assessed",
-        "-e", "assess.failed", "-t", "600000", "--",
+        "-e", "assess.failed", "-t", "600000", "--max-concurrent", "8", "--",
         "signalbox", "agent", "assess"]
 subscribes = ["suite.ran"]
 # Promotion rests on this judgment, making its invocation provenance part of
@@ -781,7 +824,7 @@ publishes = ["pr.merged", "pr.merge-failed"]
 name = "plan-notes"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "checks.passed", "--publish-as", "notes.planned",
-        "-e", "notes.plan-failed", "-t", "300000", "--",
+        "-e", "notes.plan-failed", "-t", "300000", "--max-concurrent", "8", "--",
         "signalbox", "agent", "plan-notes"]
 subscribes = ["checks.passed"]
 # Notes planning is still model judgment, so provenance is load-bearing even
@@ -798,11 +841,14 @@ args = ["primitive", "split-notes"]
 subscribes = ["notes.planned"]
 publishes = ["note.drafted", "notes.synced"]
 
+# The section header above says nothing serialises — one event per note, no
+# shared document, no lock. That was true of the topology and false of the
+# process consuming it, which wrote the notes one after another.
 [[handlers]]
 name = "write-note"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "note.drafted", "--publish-as", "note.written",
-        "-e", "note.write-failed", "-t", "300000", "--",
+        "-e", "note.write-failed", "-t", "300000", "--max-concurrent", "40", "--",
         "signalbox", "agent", "write-note"]
 subscribes = ["note.drafted"]
 # A rewritten note is durable output, making the invocation that authored it

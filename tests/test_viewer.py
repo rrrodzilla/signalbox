@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import subprocess
 import sqlite3
 import threading
+import time
 from http.server import HTTPServer
 from pathlib import Path
 
@@ -231,3 +234,100 @@ def test_status_names_the_shell_vault_and_engine_environment_split():
     assert 'say "vault:     ${SIGNALBOX_VAULT:-unset}"' in body
     assert "engine environment was captured at 'up' and may differ" in body
     assert "prepare-workspace verifies each run" in body
+
+
+def test_forwarder_pidfile_names_a_supervisor_that_respawns_and_stops(tmp_path: Path):
+    """#63: a dropped websocket child respawns, while teardown kills the loop."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    invocations = tmp_path / "invocations"
+    gh = fake_bin / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1 $2\" == \"extension list\" ]]; then\n"
+        "  echo 'cli/gh-webhook'; exit 0\n"
+        "fi\n"
+        f"echo started >> {invocations}\n"
+        "trap 'exit 0' TERM INT\n"
+        "while true; do sleep 1; done\n"
+    )
+    gh.chmod(0o755)
+    log_dir = tmp_path / "logs"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "SIGNALBOX_LOG_DIR": str(log_dir),
+    }
+
+    subprocess.run(
+        [ROOT / "bin/harness.sh", "forward", "owner/repo"],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    supervisor = int((log_dir / "forward.pid").read_text())
+    child = int((log_dir / "forward.child.pid").read_text())
+    assert supervisor != child
+    assert (log_dir / "forward.ready").exists()
+
+    os.kill(child, 15)
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline:
+        if invocations.read_text().count("started") >= 2:
+            break
+        time.sleep(0.1)
+    assert invocations.read_text().count("started") >= 2
+    assert "restarting in" in (log_dir / "forward.log").read_text()
+
+    subprocess.run(
+        [ROOT / "bin/harness.sh", "unforward"],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    with pytest.raises(ProcessLookupError):
+        os.kill(supervisor, 0)
+    assert not (log_dir / "forward.child.pid").exists()
+
+
+def test_forwarder_lifecycle_and_launch_guard_are_explicit():
+    """#63: lifecycle ordering and recovery stay visible as shell invariants."""
+    lines = (ROOT / "bin" / "harness.sh").read_text().splitlines()
+    code = "\n".join(line for line in lines if not line.lstrip().startswith("#"))
+    forward_up = code.split("\nforward_up() {", 1)[1].split("\n}", 1)[0]
+    forward_down = code.split("\nforward_down() {", 1)[1].split("\n}", 1)[0]
+    launch = code.split("\nlaunch() {", 1)[1].split("\n}", 1)[0]
+
+    assert "_forward-supervise" in forward_up
+    assert 'printf \'%s\' "$!" >"$FORWARD_PIDFILE"' in forward_up
+    assert forward_down.index('kill -TERM "$pid"') < forward_down.index(
+        'kill -TERM "$child"'
+    )
+    assert "forward_pid" in launch
+    assert "promote_capable" in launch
+    assert "$0 forward <owner/name>" in launch
+
+
+def test_launch_checks_only_the_exact_target_repository():
+    """#63: nested demo paths do not inherit an enclosing checkout's origin."""
+    harness = (ROOT / "bin" / "harness.sh").read_text()
+    launch = harness.split("\nlaunch() {", 1)[1].split("\n}", 1)[0]
+
+    assert 'local repo_path="$PWD"' in launch
+    assert "rev-parse --show-toplevel" in launch
+    assert '"$repo_root" == "$exact_repo_path"' in launch
+    assert 'git -C "$repo_root" remote get-url origin' in launch
+
+
+def test_forwarder_reports_a_supervisor_without_a_connected_tunnel():
+    """#63: a restart loop is not itself proof that ingress is available."""
+    harness = (ROOT / "bin" / "harness.sh").read_text()
+    status = harness.split("\nstatus() {", 1)[1].split("\n}", 1)[0]
+    forward_up = harness.split("\nforward_up() {", 1)[1].split("\n}", 1)[0]
+
+    assert "FORWARD_READYFILE" in status
+    assert "supervisor up but tunnel is not connected" in status
+    assert "the tunnel has not connected" in forward_up
+    assert "retrying with capped backoff" in forward_up

@@ -5,14 +5,69 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from signalbox.acts import (
     map_ci_findings,
+    prepare_workspace,
     pr_state_is_merged,
     source_repo,
     stage_files,
     suite_command,
 )
 from signalbox.dispatch import environment, pending_path
+from signalbox.paths import VaultMissing
+
+
+def _prepare_workspace(tmp_path, monkeypatch, *, existing=False):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    monkeypatch.setattr(
+        acts,
+        "_run",
+        lambda cmd, cwd=None, timeout=120: (0, "991a9d06e9d099d897556db56d30632743f536c9", ""),
+    )
+    monkeypatch.setattr(acts, "install_skills", lambda root: [])
+    if existing:
+        (tmp_path / "worktrees" / "sb-70").mkdir(parents=True)
+    return prepare_workspace(
+        {"run_id": "sb-70", "base_branch": "main", "repo_path": str(tmp_path)}
+    )
+
+
+def test_prepare_workspace_preserves_direct_callers_without_a_vault(tmp_path, monkeypatch):
+    """Startup owns requiring the vault; direct act callers remain compatible."""
+    monkeypatch.delenv("SIGNALBOX_VAULT", raising=False)
+    result = _prepare_workspace(tmp_path, monkeypatch)
+    assert result["ok"] is True
+
+
+def test_prepare_workspace_refuses_a_missing_vault_directory(tmp_path, monkeypatch):
+    """#70: engine launch must recheck the vault that operator preflight saw."""
+    missing = tmp_path / "missing-vault"
+    monkeypatch.setenv("SIGNALBOX_VAULT", str(missing))
+    with pytest.raises(
+        VaultMissing,
+        match=f"SIGNALBOX_VAULT is not a directory: {missing}",
+    ):
+        _prepare_workspace(tmp_path, monkeypatch)
+
+
+def test_prepare_workspace_accepts_the_engine_environment_vault(tmp_path, monkeypatch):
+    """#70: a resolved engine vault closes the preflight-environment gap."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("SIGNALBOX_VAULT", str(vault))
+    result = _prepare_workspace(tmp_path, monkeypatch)
+    assert result["ok"] is True
+
+
+def test_prepare_workspace_resumes_an_existing_run_without_a_vault(tmp_path, monkeypatch):
+    """An existing workspace predates this launch-time environment recheck."""
+    monkeypatch.delenv("SIGNALBOX_VAULT", raising=False)
+    result = _prepare_workspace(tmp_path, monkeypatch, existing=True)
+    assert result["ok"] is True
 
 
 def test_stage_files_is_the_union_of_declared_scopes():
@@ -171,8 +226,6 @@ def test_a_missing_worktree_raises_rather_than_defaulting(tmp_path, monkeypatch)
     .../worktrees/unknown, the path did not exist, and the assessor silently
     fell back to the engine's working directory and reviewed that instead.
     """
-    import pytest
-
     from signalbox.paths import WorktreeMissing, require_worktree
 
     monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))

@@ -135,12 +135,13 @@ badge; a null codex model renders as just `codex`.
 
 ## Quick start
 
-Prerequisites: the Emergent engine and its primitives, `claude`, `codex`, `gh` (authenticated, with the `cli/gh-webhook` extension), `git` with a signing key, `jq`, `python3`, and `uv`. `bin/harness.sh preflight` checks all of it and names what is missing.
+Prerequisites: the Emergent engine and its primitives, `claude`, `codex`, `gh` (authenticated, with the `cli/gh-webhook` extension), `git` with a signing key, `jq`, `python3`, and `uv`. The operator must also export `SIGNALBOX_VAULT` as the absolute path of an existing notes-vault directory. It has no default: notes must live outside disposable run worktrees. `bin/harness.sh preflight` checks all of it and names what is missing.
 
 ```bash
 emergent marketplace install exec-source exec-handler exec-sink \
     stream-runner http-source sse-sink topology-viewer
 gh extension install cli/gh-webhook
+export SIGNALBOX_VAULT=/absolute/path/to/notes-vault
 
 ./bin/harness.sh install      # editable CLI install, then the invariant suite
 ./bin/harness.sh up           # engine + dashboard
@@ -154,7 +155,7 @@ Watch it at **http://127.0.0.1:8103** (the run board) and **http://127.0.0.1:810
 
 The forwarder is the operator's job rather than the topology's, for two reasons: a primitive that opened a tunnel would be a primitive reaching outside the topology, and the engine cannot detect its own missing deliveries. Without it a run reaches `pr.opened` and waits for the reaper. `status` says plainly whether it is up, and the target repo needs a CI workflow at all — with none configured, GitHub creates no check suite and there is nothing to forward.
 
-The install is editable on purpose. A built wheel is the one reliable way to end up running a stale copy of the code and skills while the source in front of you reads correct, and that failure is invisible — a stale skill reports a verdict, just the wrong one. `signalbox paths` prints where the running CLI actually resolves its package, skills, and state.
+The install is editable on purpose. A built wheel is the one reliable way to end up running a stale copy of the code and skills while the source in front of you reads correct, and that failure is invisible — a stale skill reports a verdict, just the wrong one. `signalbox paths` prints where the running CLI actually resolves its package, skills, state, and vault.
 
 ## Dogfooding signalbox on signalbox
 

@@ -121,3 +121,22 @@ def test_the_viewer_is_not_found_by_matching_its_command_line():
     code = "\n".join(line for line in lines if not line.lstrip().startswith("#"))
     assert "pgrep -f 'signalbox dashboard'" not in code
     assert "DASHBOARD_PIDFILE" in code
+
+
+def test_preflight_requires_the_operator_vault():
+    """#70: fail in the operator shell before starting an unusable engine."""
+    harness = (ROOT / "bin" / "harness.sh").read_text()
+    body = harness.split("\npreflight() {", 1)[1].split("\n}", 1)[0]
+    assert '[[ -n "${SIGNALBOX_VAULT:-}" && -d "$SIGNALBOX_VAULT" ]]' in body
+    assert 'missing+=("SIGNALBOX_VAULT ' in body
+    assert "export SIGNALBOX_VAULT=" in body
+    assert "before '$0 up'" in body
+
+
+def test_status_names_the_shell_vault_and_engine_environment_split():
+    """#70: status sees this shell; prepare-workspace checks the live engine."""
+    harness = (ROOT / "bin" / "harness.sh").read_text()
+    body = harness.split("\nstatus() {", 1)[1].split("\n}", 1)[0]
+    assert 'say "vault:     ${SIGNALBOX_VAULT:-unset}"' in body
+    assert "engine environment was captured at 'up' and may differ" in body
+    assert "prepare-workspace verifies each run" in body

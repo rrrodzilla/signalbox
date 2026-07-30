@@ -14,7 +14,7 @@ Other notes are being rewritten in parallel right now; touch only yours.
 ```json
 {
   "note": "shards",
-  "path": "docs/vault/shards.md",
+  "path": "/srv/signalbox-vault/shards.md",
   "outcome": "written",
   "summary": "scope enforcement moved from the review gate to write-time announcements"
 }
@@ -23,15 +23,18 @@ Other notes are being rewritten in parallel right now; touch only yours.
 If you conclude the note did not actually need changing:
 
 ```json
-{"note": "shards", "path": "docs/vault/shards.md", "outcome": "written", "summary": "no change needed; the note was already accurate"}
+{"note": "shards", "path": "/srv/signalbox-vault/shards.md", "outcome": "written", "summary": "no change needed; the note was already accurate"}
 ```
 
 Nothing but the JSON object on stdout.
 
 ## Where notes live
 
-`$SIGNALBOX_VAULT`, defaulting to `docs/vault/`. One file per subsystem,
-`<note>.md`.
+`$SIGNALBOX_VAULT` is always present as an absolute path stamped into the
+environment by the harness. One file per subsystem, `<note>.md`.
+
+If `$SIGNALBOX_VAULT` is somehow absent, report that and stop. Do not invent a
+fallback.
 
 Never write under `.claude/`. Writes there are silently discarded while the
 session reports success — the note would not exist and nothing would tell you.
@@ -110,4 +113,4 @@ the source and almost entirely absent from it.
 
 - One note. Yours. Not a second one, however obviously wrong it looks.
 - Do not create new notes unless your payload names one that does not exist yet.
-- Do not commit. A later step handles that.
+- Do not commit.

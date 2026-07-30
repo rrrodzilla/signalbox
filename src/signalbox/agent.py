@@ -20,7 +20,7 @@ import time
 from signalbox.dispatch import environment
 from signalbox.emit import post_provenance
 from signalbox.identity import carry, spoofed_keys
-from signalbox.paths import WorktreeMissing, require_worktree
+from signalbox.paths import VaultMissing, WorktreeMissing, require_worktree, vault_dir
 
 # Each role is a skill, so the procedure is versioned and reviewable on its own
 # rather than living in an argv string.
@@ -34,6 +34,7 @@ ROLE_SKILLS = {
 }
 
 READ_ONLY_ROLES = frozenset({"survey", "plan", "review", "assess", "plan-notes"})
+NOTES_ROLES = frozenset({"plan-notes", "write-note"})
 
 # Which model renders each judgment. This is a property of the role, not of the
 # run, because the judgments differ in kind. Planning and assessing get the
@@ -152,23 +153,35 @@ def _workdir(payload: dict) -> str:
 
 
 def run(role: str, payload: dict, model: str | None = None) -> tuple[dict, int]:
-    """Invoke the model and return (verdict, exit_code)."""
+    """Invoke the model and return (verdict, exit_code).
+
+    Notes roles receive the resolved vault explicitly so incident #70 cannot
+    recur through an inherited environment or a path relative to the worktree.
+    """
     invoked_model = model or model_for(role)
+    command = [
+        "claude",
+        "-p",
+        prompt_for(role, payload),
+        "--model",
+        invoked_model,
+        "--allowedTools",
+        *tools_for(role),
+    ]
+    subprocess_kwargs = {}
+    if role in NOTES_ROLES:
+        vault = vault_dir()
+        command.extend(["--add-dir", str(vault)])
+        subprocess_kwargs["env"] = {**os.environ, "SIGNALBOX_VAULT": str(vault)}
+
     started = time.monotonic()
     completed = subprocess.run(
-        [
-            "claude",
-            "-p",
-            prompt_for(role, payload),
-            "--model",
-            invoked_model,
-            "--allowedTools",
-            *tools_for(role),
-        ],
+        command,
         cwd=_workdir(payload),
         capture_output=True,
         text=True,
         check=False,
+        **subprocess_kwargs,
     )
     duration_ms = round((time.monotonic() - started) * 1000)
     post_provenance(
@@ -214,7 +227,7 @@ def main(argv: list[str]) -> int:
 
     try:
         verdict, code = run(role, payload)
-    except WorktreeMissing as exc:
+    except (VaultMissing, WorktreeMissing) as exc:
         print(f"signalbox agent: {exc}", file=sys.stderr)
         return 1
     if code != 0:

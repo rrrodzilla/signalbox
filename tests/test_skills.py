@@ -14,6 +14,7 @@ import pytest
 
 from signalbox.agent import ROLE_SKILLS
 from signalbox.emit import ALLOWED_EVENTS
+from signalbox.paths import VaultMissing, vault_dir
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILLS = ROOT / "skills"
@@ -91,12 +92,54 @@ def test_acting_skills_forbid_advancing_the_run():
     assert "cannot" in body and "merge" in body
 
 
-def test_vault_skills_carry_the_dot_claude_warning():
-    """Writes under .claude/ are silently dropped; a skill that forgets loses notes."""
+def test_vault_dir_returns_configured_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("SIGNALBOX_VAULT", str(tmp_path))
+
+    assert vault_dir() == tmp_path
+
+
+def test_vault_dir_refuses_unset_configuration(monkeypatch):
+    """Incident #70 requires refusing to invent a worktree-relative fallback."""
+    monkeypatch.delenv("SIGNALBOX_VAULT", raising=False)
+
+    with pytest.raises(VaultMissing):
+        vault_dir()
+    assert "#70" in (VaultMissing.__doc__ or "")
+
+
+def test_vault_dir_refuses_relative_configuration(monkeypatch, tmp_path):
+    """Even an existing relative directory would put notes under the agent cwd."""
+    relative_vault = tmp_path / "docs" / "vault"
+    relative_vault.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SIGNALBOX_VAULT", "docs/vault")
+
+    with pytest.raises(VaultMissing, match="not an absolute path"):
+        vault_dir()
+
+
+def test_vault_dir_refuses_a_non_directory(monkeypatch, tmp_path):
+    """Incident #70 requires resolving a real external vault directory."""
+    not_a_directory = tmp_path / "file"
+    not_a_directory.write_text("not a vault")
+    monkeypatch.setenv("SIGNALBOX_VAULT", str(not_a_directory))
+
+    with pytest.raises(VaultMissing):
+        vault_dir()
+
+
+def test_vault_skills_require_the_stamped_vault_and_carry_warnings():
+    """Vault instructions retain the .claude/ guard without a relative fallback."""
     for skill in ("signalbox-plan-notes", "signalbox-write-note"):
         path = SKILLS / skill / "SKILL.md"
         body = path.read_text()
+        assert "docs/vault" not in body, f"{skill} retains the discarded fallback"
+        assert "$SIGNALBOX_VAULT" in body, f"{skill} does not name the stamped vault"
         assert ".claude/" in body, f"{skill} does not warn about .claude/"
         description = _frontmatter(path).get("description", "").lower()
         assert "merged" not in description, f"{skill} claims the pull request merged"
         assert "landed" not in description, f"{skill} claims the change landed"
+
+    write_note = (SKILLS / "signalbox-write-note" / "SKILL.md").read_text()
+    assert "Do not commit." in write_note
+    assert "A later step handles that" not in write_note

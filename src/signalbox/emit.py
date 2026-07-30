@@ -29,6 +29,7 @@ _ENV_KEYS = {
     "issue": "SIGNALBOX_ISSUE",
     "base_sha": "SIGNALBOX_BASE_SHA",
     "base_branch": "SIGNALBOX_BASE_BRANCH",
+    "title": "SIGNALBOX_TITLE",
     "stage_id": "SIGNALBOX_STAGE_ID",
     "shard_id": "SIGNALBOX_SHARD_ID",
     "shard_count": "SIGNALBOX_SHARD_COUNT",

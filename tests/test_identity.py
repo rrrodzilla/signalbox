@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from signalbox.agent import extract_verdict
 from signalbox.emit import ALLOWED_EVENTS, build_body, identity_from_env, parse_fields
 from signalbox import identity
@@ -44,6 +46,14 @@ def test_carry_leaves_non_identity_fields_alone():
 
 def test_carry_does_not_invent_absent_keys():
     assert "shard_id" not in carry({"run_id": "r1"}, {"verdict": "done"})
+
+
+@pytest.mark.parametrize("produced", [{"verdict": "ok"}, {"title": "model rewrite"}])
+def test_carry_preserves_the_inbound_issue_title(produced):
+    """In sb-78, agent.run() first dropped title while carrying the plan verdict."""
+    result = carry({"run_id": "sb-78", "title": "The real issue title"}, produced)
+
+    assert result["title"] == "The real issue title"
 
 
 def test_spoofed_keys_reports_the_attempt():

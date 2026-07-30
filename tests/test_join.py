@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from signalbox import identity
-from signalbox.identity import CARRIED_KEYS
+from signalbox.identity import CARRIED_KEYS, project
 from signalbox.primitives.join_terminal import (
     Joiner,
     Pending,
@@ -267,6 +267,13 @@ def test_join_subscribes_to_every_terminal_shard_outcome():
 
 
 # ── splitters ────────────────────────────────────────────────────────────────
+
+
+def test_plan_splitter_projection_keeps_the_issue_title():
+    """The sb-78 trace exposed the plan splitter as the next title-carrying seam."""
+    payload = {"run_id": "sb-78", "title": "Preserve identity through every seam"}
+
+    assert project(payload)["title"] == "Preserve identity through every seam"
 
 
 def test_split_reopens_only_the_shards_a_conflict_implicated():

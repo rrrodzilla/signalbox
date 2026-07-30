@@ -94,6 +94,11 @@ def environment(payload: dict, base: dict[str, str]) -> dict[str, str]:
             "SIGNALBOX_DECLARED": json.dumps(payload.get("declared") or []),
         }
     )
+    title = payload.get("title")
+    if title is None:
+        env.pop("SIGNALBOX_TITLE", None)
+    else:
+        env["SIGNALBOX_TITLE"] = str(title)
     return env
 
 

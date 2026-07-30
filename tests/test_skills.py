@@ -47,7 +47,7 @@ ALL_SKILLS = sorted(set(ROLE_SKILLS.values()) | dispatch_skills())
 
 
 def test_every_role_and_dispatch_names_a_distinct_skill():
-    assert len(ALL_SKILLS) == 8, ALL_SKILLS
+    assert len(ALL_SKILLS) == 9, ALL_SKILLS
 
 
 @pytest.mark.parametrize("skill", ALL_SKILLS)
@@ -130,7 +130,7 @@ def test_vault_dir_refuses_a_non_directory(monkeypatch, tmp_path):
 
 def test_vault_skills_require_the_stamped_vault_and_carry_warnings():
     """Vault instructions retain the .claude/ guard without a relative fallback."""
-    for skill in ("signalbox-plan-notes", "signalbox-write-note"):
+    for skill in ("signalbox-plan-notes", "signalbox-write-note", "signalbox-recall"):
         path = SKILLS / skill / "SKILL.md"
         body = path.read_text()
         assert "docs/vault" not in body, f"{skill} retains the discarded fallback"

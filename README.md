@@ -6,13 +6,23 @@ The name is from railway signaling. A signal box is where the interlocking lives
 
 ## The shape
 
-One engine. Three sources, fifty-four handlers, seven sinks, and no script that knows what comes next.
+One engine. Three sources, fifty-six handlers, seven sinks, and no script that knows what comes next.
 
 ```
-run.requested ─> workspace.ready ─> issue.fetched ─> codebase.surveyed
-                                                          │
-                                       ┌──────────────────┘
-                                       ▼
+run.requested ─> workspace.ready ─> issue.fetched
+                                          │
+                          ┌───────────────┴───────────────┐
+                          ▼                               ▼
+                 codebase.surveyed                 vault.recalled
+                          │                               │
+                          └─────────> join-plan-inputs <──┘
+                                          │
+                                     plan.inputs
+                                          │
+                                          ▼
+                                     draft-plan
+                                          │
+                                          ▼
                                   plan.submitted ─> plan.checked
                                        ▲                  │
                                        │        ┌─────────┴─────────┐
@@ -89,11 +99,12 @@ The promote path waits on a push, not a poll. GitHub delivers `check_suite.compl
 
 ## Models per node
 
-Eight nodes are non-deterministic. Nothing else in the system is.
+Nine nodes are non-deterministic. Nothing else in the system is.
 
 | Node | Role | Runner | Default model | Override precedence | Judges or acts |
 |---|---|---|---|---|---|
 | `survey-codebase` | `survey` | claude | opus | `SIGNALBOX_MODEL_SURVEY`, then `SIGNALBOX_MODEL` | judges |
+| `recall-vault` | `recall` | claude | opus | `SIGNALBOX_MODEL_RECALL`, then `SIGNALBOX_MODEL` | judges |
 | `draft-plan` | `plan` | claude | fable | `SIGNALBOX_MODEL_PLAN`, then `SIGNALBOX_MODEL` | judges |
 | `review-shard` | `review` | claude | opus | `SIGNALBOX_MODEL_REVIEW`, then `SIGNALBOX_MODEL` | judges |
 | `assess` | `assess` | claude | fable | `SIGNALBOX_MODEL_ASSESS`, then `SIGNALBOX_MODEL` | judges |
@@ -108,7 +119,7 @@ The judging nodes are Shape A — one execution, one verdict event, and the rout
 
 Both runners resolve the same `SKILL.md` by name. Claude reads `.claude/skills/`, codex reads `.codex/skills/`, and `prepare-workspace` installs into both, so the procedure is one reviewable file rather than two copies that drift.
 
-Every one of these eight nodes publishes `model.invoked` at the mechanical
+Every one of these nine nodes publishes `model.invoked` at the mechanical
 invocation boundary, whether the invocation succeeds or fails. Its core payload
 is `{event: "model.invoked", role, runner, model}`, followed by the same
 mechanically carried identity as the event it explains (`run_id`, stage/shard
@@ -132,6 +143,11 @@ The dashboard consumes these events as provenance rather than displaying them
 as standalone feed rows. It joins each invocation to the most specific matching
 mechanical identity on ordinary feed events and renders a `runner · model`
 badge; a null codex model renders as just `codex`.
+
+At the start of each run, `recall-vault` reads the notes vault alongside the
+codebase survey, and `join-plan-inputs` waits for both results before planning.
+If the vault is missing, recall degrades to an empty result rather than failing
+the run.
 
 ## Quick start
 

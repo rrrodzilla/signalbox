@@ -65,6 +65,30 @@ def vault_dir() -> Path:
     return path
 
 
+def recall_vault_dir() -> Path | None:
+    """A readable, non-empty vault for recall, or no material to recall.
+
+    Recall is advisory input to planning, so an operator who has not configured
+    a vault must not prevent a run from starting. Note-writing remains strict
+    through :func:`vault_dir`, because silently writing nowhere loses work.
+    """
+    configured = os.environ.get("SIGNALBOX_VAULT")
+    if not configured:
+        return None
+    path = Path(configured)
+    if (
+        not path.is_absolute()
+        or not path.is_dir()
+        or not os.access(path, os.R_OK | os.X_OK)
+    ):
+        return None
+    try:
+        next(path.iterdir())
+    except (StopIteration, OSError):
+        return None
+    return path
+
+
 # Where each runner looks for project skills, relative to the working
 # directory. Both discover by scanning; neither reads the other's directory, so
 # a skill has to be installed once per runner. Verified empirically: a skill in

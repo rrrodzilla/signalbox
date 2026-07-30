@@ -242,15 +242,53 @@ subscribes = ["issue.fetched"]
 # which model invocation incurred the judgment.
 publishes = ["codebase.surveyed", "survey.failed", "model.invoked"]
 
+[[handlers]]
+name = "recall-vault"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "issue.fetched", "--publish-as", "vault.recalled",
+        "-e", "vault.recall-failed", "-t", "300000", "--",
+        "signalbox", "agent", "recall"]
+subscribes = ["issue.fetched"]
+publishes = ["vault.recalled", "vault.recall-failed", "model.invoked"]
+
+# Recall and survey start from the same event and each has a five-minute
+# invocation budget. The join timer starts on the first result, so it must cover
+# the other invocation's full budget (plus scheduling slack) to be a real
+# rendezvous rather than a race between the two agents.
+[[handlers]]
+name = "join-plan-inputs"
+path = "signalbox"
+args = ["primitive", "join-terminal", "--key", "run_id",
+        "--arms", "codebase.surveyed,vault.recalled", "--carry-payloads",
+        "--timeout-seconds", "310", "--publish-as", "plan.inputs.closed"]
+subscribes = ["codebase.surveyed", "vault.recalled"]
+publishes = ["plan.inputs.closed"]
+
+[[handlers]]
+name = "route-plan-inputs-ready"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.inputs.closed", "--publish-as", "plan.inputs", "--",
+        "jq", "-c", '. as $joined | .payloads["codebase.surveyed"] | select(. != null) | . + {vault_recall: ($joined.payloads["vault.recalled"] // {hazards: [], warnings: [], contradictions: [], contradictions_omitted: 0})}']
+subscribes = ["plan.inputs.closed"]
+publishes = ["plan.inputs"]
+
+[[handlers]]
+name = "route-plan-inputs-missing-survey"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.inputs.closed", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(.payloads["codebase.surveyed"] == null) | . + {reason: "planning inputs closed without a codebase survey"}']
+subscribes = ["plan.inputs.closed"]
+publishes = ["run.halted"]
+
 # Fan-in: first drafts and redrafts are the same act, so one primitive.
 # plan.rejected re-entering here is FEEDBACK EDGE 1.
 [[handlers]]
 name = "draft-plan"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "codebase.surveyed", "-s", "plan.rejected",
+args = ["-s", "plan.inputs", "-s", "plan.rejected",
         "--publish-as", "plan.submitted", "-e", "plan.draft-failed",
         "-t", "600000", "--", "signalbox", "agent", "plan"]
-subscribes = ["codebase.surveyed", "plan.rejected"]
+subscribes = ["plan.inputs", "plan.rejected"]
 # Redrafts are non-deterministic too, so provenance must survive every feedback
 # pass rather than only the first plan.
 publishes = ["plan.submitted", "plan.draft-failed", "model.invoked"]
@@ -801,7 +839,7 @@ subscribes = ["exec.output", "exec.exit",
               "gate.blocked", "gate.cleared", "gate.invalid-verdict", "issue.fetch-failed",
               "issue.fetched", "merge.attempted", "model.invoked", "note.drafted", "note.write-failed",
               "note.written", "notes.plan-failed", "notes.planned", "notes.synced",
-              "plan.accepted", "plan.checked", "plan.draft-failed", "plan.rejected",
+              "plan.accepted", "plan.checked", "plan.draft-failed", "plan.inputs", "plan.inputs.closed", "plan.rejected",
               "plan.submitted", "pr.merge-failed", "pr.merged", "pr.open-failed", "pr.opened",
               "review.failed", "review.invalid-verdict", "review.submitted", "run.built",
               "run.completed", "run.halted", "run.requested", "scope.violated",
@@ -810,7 +848,7 @@ subscribes = ["exec.output", "exec.exit",
               "shard.invalid-verdict", "shard.opened", "shard.silent", "shard.submitted",
               "stage.closed", "stage.conflicted", "stage.mergeable", "stage.merged",
               "stage.opened", "stages.exhausted", "suite.errored", "suite.ran", "survey.failed",
-              "workspace.failed", "workspace.ready", "workspace.release-attempted",
+              "vault.recall-failed", "vault.recalled", "workspace.failed", "workspace.ready", "workspace.release-attempted",
               "workspace.release-failed", "workspace.released"]
 
 # Lifecycle belongs here rather than on the dashboard: topology-viewer resolves

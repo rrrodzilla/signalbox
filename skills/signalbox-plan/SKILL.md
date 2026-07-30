@@ -57,6 +57,11 @@ wiring stage usually edits a file that a module stage created.
 in the same stage when neither needs the other's output. They go in different
 stages when one does.
 
+The planner receives both the codebase survey and the concurrent vault recall.
+Any claim derived from recall notes must name the note it came from in the
+relevant shard intent. Notes may contribute hazards and warnings, but they never
+supply paths or subsystems: use only the survey for those.
+
 The usual shape is:
 
 - **Stage 1** — new modules, types, or files. Naturally disjoint, so this stage

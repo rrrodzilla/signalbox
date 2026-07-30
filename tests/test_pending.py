@@ -8,7 +8,9 @@ minutes later.
 
 from __future__ import annotations
 
-from signalbox.acts import clear_pending, reap
+import pytest
+
+from signalbox.acts import clear_pending, mark_pending, reap, rehydrate
 from signalbox.dispatch import environment, pending_path
 from signalbox.emit import build_body, identity_from_env
 from signalbox.identity import CARRIED_KEYS
@@ -43,6 +45,39 @@ def test_announcing_clears_the_marker(tmp_path, monkeypatch):
 def test_clearing_a_marker_that_is_already_gone_is_not_an_error(tmp_path, monkeypatch):
     monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
     assert clear_pending("shard", {"shard_id": "ghost"}) is False
+
+
+def test_a_pr_webhook_round_trip_uses_the_pr_marker(tmp_path, monkeypatch):
+    """The sb-76 stall came from naming a PR marker with the run identity."""
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    payload = {
+        "run_id": "sb-56",
+        "repo": "rrrodzilla/signalbox",
+        "sha": "e0a1742",
+        "conclusion": "success",
+        "check_runs_url": "https://api.github.com/x/check-runs",
+        "pr": 57,
+    }
+
+    marker = mark_pending("pr", payload)
+    assert marker.name == "pr-57.json"
+    assert rehydrate("pr", payload) == payload
+    assert not marker.exists()
+
+
+def test_a_shard_marker_uses_shard_id_instead_of_run_id(tmp_path, monkeypatch):
+    """The sb-76 stall requires shard scope to ignore the enclosing run id."""
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    assert pending_path(
+        "shard", {"run_id": "sb-76", "shard_id": "s1-kind-keyed-marker-naming"}
+    ).name == "shard-s1-kind-keyed-marker-naming.json"
+
+
+def test_an_unknown_pending_kind_raises(tmp_path, monkeypatch):
+    """The sb-76 stall must not recur through a silently invented marker kind."""
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    with pytest.raises(KeyError):
+        pending_path("stage", {"stage_id": "s1"})
 
 
 def test_a_cleared_marker_is_never_reaped(tmp_path, monkeypatch):

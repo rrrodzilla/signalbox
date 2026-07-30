@@ -154,7 +154,7 @@ def test_dispatch_environment_defaults_round_for_a_first_pass():
 
 def test_pending_marker_is_named_for_the_shard_the_reaper_will_report():
     assert pending_path("shard", {"shard_id": "a"}).name == "shard-a.json"
-    assert pending_path("shard", {"run_id": "r1"}).name == "shard-r1.json"
+    assert pending_path("shard", {"run_id": "r1"}).name == "shard-unknown.json"
 
 
 def test_a_missing_worktree_raises_rather_than_defaulting(tmp_path, monkeypatch):

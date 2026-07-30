@@ -107,8 +107,16 @@ def test_rehydrate_restores_run_identity_and_clears_the_marker(tmp_path, monkeyp
     }
     marker = acts.mark_pending("pr", opened)
     assert marker.exists()
+    assert marker.name == "pr-57.json"
 
-    observed = {"run_id": "sb-56", "pr": 57, "sha": "e0a1742", "conclusion": "success"}
+    observed = {
+        "run_id": "sb-56",
+        "repo": "rrrodzilla/signalbox",
+        "pr": 57,
+        "sha": "e0a1742",
+        "conclusion": "success",
+        "check_runs_url": "https://api.github.com/x/check-runs",
+    }
     out = acts.rehydrate("pr", observed)
 
     # Everything the notes stage past pr.merged needs, none of which GitHub knows.

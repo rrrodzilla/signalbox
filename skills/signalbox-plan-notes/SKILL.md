@@ -1,13 +1,14 @@
 ---
 name: signalbox-plan-notes
-description: Decide which vault notes a merged signalbox change makes stale. Use when asked to plan documentation notes after a pull request has merged.
+description: Decide which vault notes a CI-verified signalbox change will make stale. Use when asked to plan documentation notes for an open pull request awaiting merge.
 ---
 
 # Planning note updates
 
-A change just landed. Decide which vault notes it made **wrong**, and name them.
-Print one JSON object and stop. You are not writing the notes — each one becomes
-its own event and its own session.
+An open pull request has passed CI and is awaiting merge. Decide which vault
+notes its verified branch will make **wrong**, and name them. Print one JSON
+object and stop. You are not writing the notes — each one becomes its own event
+and its own session.
 
 ## Output contract
 
@@ -62,8 +63,9 @@ made nothing false should produce `{"notes": []}`, and that is a good outcome.
 
 ## How to decide
 
-1. Read the diff that landed. Work from the diff, not from the issue text — the
-   issue describes intent, the diff is what actually happened.
+1. Read the verified pull request branch's diff. Work from the diff, not from
+   the issue text — the issue describes intent, while the CI-passing branch is
+   the change awaiting merge.
 2. List the vault notes. Read the ones covering subsystems the diff touched.
 3. For each, find a specific sentence the change falsified. If you cannot point
    at one, the note is not stale.

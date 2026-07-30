@@ -94,5 +94,9 @@ def test_acting_skills_forbid_advancing_the_run():
 def test_vault_skills_carry_the_dot_claude_warning():
     """Writes under .claude/ are silently dropped; a skill that forgets loses notes."""
     for skill in ("signalbox-plan-notes", "signalbox-write-note"):
-        body = (SKILLS / skill / "SKILL.md").read_text()
+        path = SKILLS / skill / "SKILL.md"
+        body = path.read_text()
         assert ".claude/" in body, f"{skill} does not warn about .claude/"
+        description = _frontmatter(path).get("description", "").lower()
+        assert "merged" not in description, f"{skill} claims the pull request merged"
+        assert "landed" not in description, f"{skill} claims the change landed"

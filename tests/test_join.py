@@ -38,6 +38,117 @@ def _shard(stage="s1", shard="a", outcome="approved", count=2, **extra):
     }
 
 
+def _pr_merged(run="r1"):
+    return {
+        "run_id": run,
+        "number": 69,
+        "merge_sha": "abc123",
+        "merged": True,
+    }
+
+
+def _notes_synced(run="r1"):
+    return {
+        "run_id": run,
+        "expected": 0,
+        "received": 0,
+        "timed_out": False,
+        "results": [],
+        "note_count": 0,
+    }
+
+
+def _completion_joiner(recorder, timeout=0):
+    return Joiner(
+        "run_id",
+        None,
+        recorder,
+        timeout=timeout,
+        arms=("pr.merged", "notes.synced"),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_topic", "first_payload", "second_topic", "second_payload"),
+    [
+        ("pr.merged", _pr_merged(), "notes.synced", _notes_synced()),
+        ("notes.synced", _notes_synced(), "pr.merged", _pr_merged()),
+    ],
+)
+async def test_arms_fire_once_when_both_arrive_in_either_order(
+    first_topic, first_payload, second_topic, second_payload
+):
+    recorder = Recorder()
+    joiner = _completion_joiner(recorder)
+
+    await joiner.accept(first_payload, topic=first_topic)
+    assert recorder.published == []
+    await joiner.accept(second_payload, topic=second_topic)
+
+    assert len(recorder.published) == 1
+    assert recorder.published[0]["expected"] == 2
+    assert recorder.published[0]["received"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("topic", "payload"),
+    [("pr.merged", _pr_merged()), ("notes.synced", _notes_synced())],
+)
+async def test_two_arrivals_on_one_arm_never_complete_the_join(topic, payload):
+    """A doubled zero-note terminal must not substitute for a merge."""
+    recorder = Recorder()
+    joiner = _completion_joiner(recorder)
+
+    await joiner.accept(payload, topic=topic)
+    await joiner.accept(payload, topic=topic)
+
+    assert recorder.published == []
+    assert len(joiner.pending["r1"].results) == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_after_arms_join_closed_is_dropped():
+    recorder = Recorder()
+    joiner = _completion_joiner(recorder)
+    await joiner.accept(_pr_merged(), topic="pr.merged")
+    await joiner.accept(_notes_synced(), topic="notes.synced")
+
+    await joiner.accept(_notes_synced(), topic="notes.synced")
+
+    assert len(recorder.published) == 1
+
+
+@pytest.mark.asyncio
+async def test_keyless_arm_arrival_is_ignored():
+    recorder = Recorder()
+    joiner = _completion_joiner(recorder)
+
+    await joiner.accept({"merged": True}, topic="pr.merged")
+
+    assert recorder.published == []
+    assert joiner.pending == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("topic", "payload"),
+    [("pr.merged", _pr_merged()), ("notes.synced", _notes_synced())],
+)
+async def test_first_arrival_on_either_arm_arms_the_timeout(topic, payload):
+    recorder = Recorder()
+    joiner = _completion_joiner(recorder, timeout=0.02)
+
+    await joiner.accept(payload, topic=topic)
+    assert joiner.pending["r1"].timer is not None
+    await asyncio.sleep(0.06)
+
+    assert len(recorder.published) == 1
+    assert recorder.published[0]["timed_out"] is True
+    assert recorder.published[0]["received"] == 1
+
+
 @pytest.mark.asyncio
 async def test_join_fires_once_the_expected_count_arrives():
     recorder = Recorder()

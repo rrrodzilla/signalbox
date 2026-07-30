@@ -6,7 +6,7 @@ The name is from railway signaling. A signal box is where the interlocking lives
 
 ## The shape
 
-One engine. Three sources, fifty-two handlers, seven sinks, and no script that knows what comes next.
+One engine. Three sources, fifty-four handlers, seven sinks, and no script that knows what comes next.
 
 ```
 run.requested ─> workspace.ready ─> issue.fetched ─> codebase.surveyed
@@ -59,10 +59,22 @@ run.requested ─> workspace.ready ─> issue.fetched ─> codebase.surveyed
                                           │                │   shard.changes-requested
                                           │          notes.synced        │
                                           │                │      (fix.opened)
-                                          └────────> run.completed
+                                          └──────> completion.closed
+                                                        │
+                                             ┌──────────┴──────────┐
+                                      run.completed           run.halted
+                                        (both arms)            (timed out)
 ```
 
 Four feedback edges close loops nobody sequenced: a rejected plan re-enters the planner, a review that requests changes re-enters implementation, a merge conflict reopens only the shards whose declared files collide, and a red CI run becomes review findings in the vocabulary the fix loop already speaks.
+
+`completion.closed` is the completion rendezvous's neutral result, not a claim
+that the run succeeded. Two exclusive jq routers interpret it: a payload with
+both arms and `timed_out: false` becomes `run.completed`; a
+`timed_out: true` payload keeps its one-arm results summary, gains the reason
+`completion timed out — an arm never arrived`, and becomes `run.halted`.
+Completed runs release their worktrees, while halted runs retain them as
+evidence of the missing arm.
 
 The promote path waits on a push, not a poll. GitHub delivers `check_suite.completed` to a loopback `http-source` and routers turn it into the vocabulary; `gh webhook forward` opens the tunnel, since GitHub cannot reach `127.0.0.1`. What that buys is a conclusion in about a second instead of up to a poll interval, and no `gh` call per tick — but it does not remove the reaper. A push source makes arrivals observable and silence invisible, so a missing workflow, a revoked hook, and a dropped delivery are indistinguishable from "still building": all three produce zero events. `reap-prs` is what turns that into `checks.silent`.
 

@@ -697,13 +697,33 @@ name = "join-completion"
 path = "signalbox"
 args = ["primitive", "join-terminal", "--key", "run_id",
         "--arms", "pr.merged,notes.synced", "--timeout-seconds", "1800",
-        "--publish-as", "run.completed"]
+        "--publish-as", "completion.closed"]
 subscribes = ["pr.merged", "notes.synced"]
-publishes = ["run.completed"]
+publishes = ["completion.closed"]
 
 # Inherited from #66: notes.plan-failed has no run_id, so that failure cannot
 # arrive at this run register's notes arm. The promote arm does at least create
 # the run_id register and arm this join's timeout instead of leaving pure silence.
+#
+# Inherited from #66: a full rendezvous needs this edge so the neutral join
+# result becomes success only after both arms have actually arrived.
+[[handlers]]
+name = "route-completion-full"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "completion.closed", "--publish-as", "run.completed", "--",
+        "jq", "-c", 'select(.timed_out == true | not)']
+subscribes = ["completion.closed"]
+publishes = ["run.completed"]
+
+# Inherited from #66: a timed-out rendezvous needs this edge so one missing arm
+# becomes an explicit halt while preserving the arrival summary as evidence.
+[[handlers]]
+name = "route-completion-short"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "completion.closed", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(.timed_out == true) | . + {reason: "completion timed out — an arm never arrived"}']
+subscribes = ["completion.closed"]
+publishes = ["run.halted"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RELEASE — a finished run gives its worktree back. Nothing did this before, so
@@ -777,7 +797,7 @@ subscribes = ["exec.output", "exec.exit",
               "branch.pushed", "checks.detail-failed", "checks.detailed",
               "checks.failed", "checks.observed", "checks.passed", "checks.reported",
               "checks.silent", "checks.unknown-pr",
-              "codebase.surveyed", "control.unknown-event", "fix.opened", "gate.assessed",
+              "codebase.surveyed", "completion.closed", "control.unknown-event", "fix.opened", "gate.assessed",
               "gate.blocked", "gate.cleared", "gate.invalid-verdict", "issue.fetch-failed",
               "issue.fetched", "merge.attempted", "model.invoked", "note.drafted", "note.write-failed",
               "note.written", "notes.plan-failed", "notes.planned", "notes.synced",

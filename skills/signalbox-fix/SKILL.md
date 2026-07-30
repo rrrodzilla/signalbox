@@ -25,10 +25,14 @@ signalbox emit shard.submitted   --field verdict=done
    and usually a location. Treat the list as exhaustive: findings not in it are
    not your business this round.
 
-2. **Read the current state of your declared files before changing them.** If
-   this is round 3+, earlier rounds already rewrote them. Do not reapply a fix
-   that is already there, and do not reintroduce something a previous round
-   deliberately removed.
+2. **Continue from your resumed session.** For shard review rounds, dispatch
+   resumes the shard's recorded runner session. On round 2 that is the
+   implementer's session; later rounds continue the same session after its fix
+   patches. Replace earlier patches where the findings require it; do not layer
+   duplicate or competing changes on top. A CI-originated round is different:
+   `map-ci-to-findings` rehydrates a PR-level payload with no `shard_id`, so
+   there is no shard session to resume and the cold start is deliberate. In
+   either case, read the current state of every declared file before editing.
 
 3. **Address every finding.** For each one, either fix it, or be ready to say
    why it should not be fixed (see disagreement below). Partial fixes cost a

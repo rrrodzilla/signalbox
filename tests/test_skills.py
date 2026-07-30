@@ -92,6 +92,33 @@ def test_acting_skills_forbid_advancing_the_run():
     assert "cannot" in body and "merge" in body
 
 
+def test_fix_session_vocabulary_matches_the_dispatch_contract():
+    """Skill prose must describe the resume edge that dispatch actually wires."""
+    config = tomllib.load((ROOT / "emergent.toml").open("rb"))
+    fix_sink = next(sink for sink in config["sinks"] if sink["name"] == "dispatch-fix")
+    assert fix_sink["subscribes"] == ["fix.opened"]
+    assert fix_sink["args"][-3:] == [
+        "dispatch",
+        "--skill",
+        "signalbox-fix",
+    ]
+
+    fixer = " ".join((SKILLS / "signalbox-fix" / "SKILL.md").read_text().split())
+    implementer = " ".join(
+        (SKILLS / "signalbox-implement" / "SKILL.md").read_text().split()
+    )
+    reviewer = " ".join(
+        (SKILLS / "signalbox-review" / "SKILL.md").read_text().split()
+    )
+    assert "resumes the shard's recorded runner session" in fixer
+    assert "On round 2 that is the implementer's session" in fixer
+    assert "no `shard_id`" in fixer and "cold start is deliberate" in fixer
+    assert "Round 1 is the cold-start implementation session" in implementer
+    assert "dispatch resumed the shard's recorded runner session" in implementer
+    assert "Dispatch resumes the shard's recorded runner session" in reviewer
+    assert "rather than assume shared model memory" in reviewer
+
+
 def test_vault_dir_returns_configured_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("SIGNALBOX_VAULT", str(tmp_path))
 

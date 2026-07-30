@@ -101,8 +101,10 @@ If every finding is `low`, the verdict is `approved`. Reserve
 `round > 1` means you are re-reviewing after a fix. Read `findings` from the
 previous round in the payload and check each was addressed.
 
-If the submission includes a `disputed` list, the fixer is pushing back on one
-of your findings. Read the argument on its merits. If they are right, drop the
+If the submission includes a `disputed` list, it is the fixer's explicit
+response to a finding from the previous review. Dispatch resumes the shard's
+recorded runner session, but you must still read the recorded argument on its
+merits rather than assume shared model memory. If they are right, drop the
 finding. If they are wrong, keep it and say why their reasoning does not hold —
 do not simply restate the original finding.
 

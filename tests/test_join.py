@@ -68,6 +68,17 @@ def _completion_joiner(recorder, timeout=0):
     )
 
 
+def _content_joiner(recorder):
+    return Joiner(
+        "run_id",
+        None,
+        recorder,
+        timeout=0,
+        arms=("survey.completed", "notes.recalled"),
+        carry_payloads=True,
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("first_topic", "first_payload", "second_topic", "second_payload"),
@@ -89,6 +100,84 @@ async def test_arms_fire_once_when_both_arrive_in_either_order(
     assert len(recorder.published) == 1
     assert recorder.published[0]["expected"] == 2
     assert recorder.published[0]["received"] == 2
+
+
+@pytest.mark.asyncio
+async def test_arms_can_carry_each_full_payload_keyed_by_topic():
+    recorder = Recorder()
+    joiner = _content_joiner(recorder)
+    survey = {
+        "run_id": "r1",
+        "issue": 89,
+        "paths": ["src/signalbox/primitives/join_terminal.py"],
+        "subsystems": ["topology", "vault"],
+        "conventions": ["events carry identity"],
+        "uncertainty": ["note precedence is not yet specified"],
+    }
+    recalled = {
+        "run_id": "r1",
+        "notes": [
+            {
+                "note": "architecture",
+                "content": "Survey and recall rendezvous before planning.",
+            }
+        ],
+    }
+
+    await joiner.accept(survey, topic="survey.completed")
+    await joiner.accept(recalled, topic="notes.recalled")
+
+    joined = recorder.published[0]
+    assert joined["payloads"] == {
+        "survey.completed": survey,
+        "notes.recalled": recalled,
+    }
+    assert joined["payloads"]["survey.completed"]["paths"] == [
+        "src/signalbox/primitives/join_terminal.py"
+    ]
+    assert joined["payloads"]["survey.completed"]["subsystems"] == ["topology", "vault"]
+    assert joined["payloads"]["survey.completed"]["conventions"] == ["events carry identity"]
+    assert joined["payloads"]["survey.completed"]["uncertainty"] == [
+        "note precedence is not yet specified"
+    ]
+    assert joined["payloads"]["notes.recalled"]["notes"][0]["content"] == (
+        "Survey and recall rendezvous before planning."
+    )
+
+
+@pytest.mark.asyncio
+async def test_carrying_arm_payloads_still_merges_identity_from_first_arrival():
+    recorder = Recorder()
+    joiner = _content_joiner(recorder)
+    survey = {"run_id": "r1", "issue": 89, "title": "Read the vault"}
+
+    await joiner.accept(survey, topic="survey.completed")
+    await joiner.accept({"run_id": "r1", "notes": []}, topic="notes.recalled")
+
+    joined = recorder.published[0]
+    assert joined["run_id"] == "r1"
+    assert joined["issue"] == 89
+    assert joined["title"] == "Read the vault"
+
+
+@pytest.mark.asyncio
+async def test_default_arms_output_is_unchanged_when_payload_carrying_is_off():
+    recorder = Recorder()
+    joiner = _completion_joiner(recorder)
+
+    await joiner.accept(_pr_merged(), topic="pr.merged")
+    await joiner.accept(_notes_synced(), topic="notes.synced")
+
+    assert recorder.published[0] == {
+        "run_id": "r1",
+        "expected": 2,
+        "received": 2,
+        "timed_out": False,
+        "results": [
+            {},
+            {},
+        ],
+    }
 
 
 @pytest.mark.asyncio

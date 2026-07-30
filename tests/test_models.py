@@ -33,6 +33,7 @@ from signalbox.paths import SKILL_ROOTS, SkillMissing, install_skills, require_s
 def test_every_model_role_declares_the_topic_it_produces():
     assert ROLE_PRODUCED_TOPICS == {
         "survey": "codebase.surveyed",
+        "recall": "vault.recalled",
         "plan": "plan.submitted",
         "review": "review.submitted",
         "assess": "gate.assessed",
@@ -99,7 +100,7 @@ def test_the_load_bearing_judgments_run_on_fable():
 
 
 def test_the_narrower_scoped_judgments_run_on_opus():
-    for role in ("survey", "review"):
+    for role in ("survey", "recall", "review"):
         assert model_for(role, {}) == "opus"
 
 

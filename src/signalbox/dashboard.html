@@ -255,7 +255,10 @@ const EVENT = {
   "run.requested":["plan","work"], "workspace.ready":["plan","work"],
   "workspace.failed":["plan","stop"], "issue.fetched":["plan","work"],
   "issue.fetch-failed":["plan","stop"], "codebase.surveyed":["plan","work"],
-  "survey.failed":["plan","stop"], "plan.submitted":["plan","judge"],
+  "survey.failed":["plan","stop"], "vault.recalled":["plan","work"],
+  "vault.recall-failed":["plan","stop"], "plan.inputs.closed":["plan","judge"],
+  "plan.inputs":["plan","work"],
+  "plan.submitted":["plan","judge"],
   "plan.checked":["plan","judge"], "plan.accepted":["plan","go"],
   "plan.rejected":["plan","stop"], "plan.draft-failed":["plan","stop"],
 

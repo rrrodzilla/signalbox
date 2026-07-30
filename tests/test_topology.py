@@ -582,6 +582,7 @@ def test_every_non_deterministic_node_publishes_invocation_provenance():
 
     nodes_by_role = {
         "survey": "survey-codebase",
+        "recall": "recall-vault",
         "plan": "draft-plan",
         "review": "review-shard",
         "assess": "assess",
@@ -603,6 +604,94 @@ def test_every_non_deterministic_node_publishes_invocation_provenance():
             )
         else:
             assert ROLE_PRODUCED_TOPICS[role] == "shard.submitted"
+
+
+def test_planning_rendezvous_covers_both_agent_invocation_budgets():
+    recall = named(HANDLERS, "recall-vault")
+    assert recall["subscribes"] == ["issue.fetched"]
+    assert recall["publishes"] == [
+        "vault.recalled",
+        "vault.recall-failed",
+        "model.invoked",
+    ]
+    assert recall["args"][recall["args"].index("-t") + 1] == "300000"
+
+    joiner = named(HANDLERS, "join-plan-inputs")
+    assert joiner["subscribes"] == ["codebase.surveyed", "vault.recalled"]
+    assert joiner["publishes"] == ["plan.inputs.closed"]
+    args = " ".join(joiner["args"])
+    assert "--arms codebase.surveyed,vault.recalled" in args
+    assert "--carry-payloads" in args
+    timeout = float(joiner["args"][joiner["args"].index("--timeout-seconds") + 1])
+    assert timeout > 300, "the first arrival must not time out the other agent"
+
+    planner = named(HANDLERS, "draft-plan")
+    assert planner["subscribes"] == ["plan.inputs", "plan.rejected"]
+    assert "codebase.surveyed" not in planner["subscribes"]
+
+
+def test_plan_input_join_restores_survey_shape_and_names_recalled_context():
+    survey = {
+        "run_id": "sb-89",
+        "repo": "rrrodzilla/signalbox",
+        "paths": ["src/signalbox/agent.py"],
+        "subsystems": ["agent roles"],
+        "conventions": ["role procedures are skills"],
+    }
+    recall = {
+        "hazards": [{"note": "identity.md", "claim": "identity is load-bearing"}],
+        "warnings": [],
+        "contradictions": [],
+        "contradictions_omitted": 0,
+    }
+    joined = {
+        "run_id": "sb-89",
+        "timed_out": False,
+        "payloads": {
+            "codebase.surveyed": survey,
+            "vault.recalled": recall,
+        },
+    }
+    assert route("route-plan-inputs-ready", joined) == {
+        **survey,
+        "vault_recall": recall,
+    }
+    assert route("route-plan-inputs-missing-survey", joined) is None
+
+    recall_only = {
+        "run_id": "sb-89",
+        "timed_out": True,
+        "payloads": {"vault.recalled": {"run_id": "sb-89"}},
+    }
+    assert route("route-plan-inputs-ready", recall_only) is None
+    halted = route("route-plan-inputs-missing-survey", recall_only)
+    assert halted == {
+        **recall_only,
+        "reason": "planning inputs closed without a codebase survey",
+    }
+
+
+def test_plan_input_join_uses_empty_recall_if_advisory_recall_never_arrives():
+    survey = {
+        "run_id": "sb-89",
+        "paths": ["src/signalbox/agent.py"],
+        "subsystems": ["agent roles"],
+        "conventions": [],
+    }
+    joined = {
+        "run_id": "sb-89",
+        "timed_out": True,
+        "payloads": {"codebase.surveyed": survey},
+    }
+    assert route("route-plan-inputs-ready", joined) == {
+        **survey,
+        "vault_recall": {
+            "hazards": [],
+            "warnings": [],
+            "contradictions": [],
+            "contradictions_omitted": 0,
+        },
+    }
 
 
 # ── routing, executed rather than inspected ──────────────────────────────────

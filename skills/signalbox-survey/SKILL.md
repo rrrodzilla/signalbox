@@ -9,6 +9,8 @@ Find what this issue actually touches, so the planner decomposes against reality
 rather than a guess. Print one JSON object and stop. Read anything; change
 nothing.
 
+Survey runs concurrently with vault recall, and the planner consumes both.
+
 ## Output contract
 
 ```json

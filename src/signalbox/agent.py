@@ -20,12 +20,19 @@ import time
 from signalbox.dispatch import environment
 from signalbox.emit import post_provenance
 from signalbox.identity import carry, spoofed_keys
-from signalbox.paths import VaultMissing, WorktreeMissing, require_worktree, vault_dir
+from signalbox.paths import (
+    VaultMissing,
+    WorktreeMissing,
+    recall_vault_dir,
+    require_worktree,
+    vault_dir,
+)
 
 # Each role is a skill, so the procedure is versioned and reviewable on its own
 # rather than living in an argv string.
 ROLE_SKILLS = {
     "survey": "signalbox-survey",
+    "recall": "signalbox-recall",
     "plan": "signalbox-plan",
     "review": "signalbox-review",
     "assess": "signalbox-assess",
@@ -35,6 +42,7 @@ ROLE_SKILLS = {
 
 READ_ONLY_ROLES = frozenset({"survey", "plan", "review", "assess", "plan-notes"})
 NOTES_ROLES = frozenset({"plan-notes", "write-note"})
+VAULT_ROLES = NOTES_ROLES | {"recall"}
 
 # Which model renders each judgment. This is a property of the role, not of the
 # run, because the judgments differ in kind. Planning and assessing get the
@@ -45,6 +53,7 @@ NOTES_ROLES = frozenset({"plan-notes", "write-note"})
 # scope. Note writing is transcription of decisions already made.
 ROLE_MODELS = {
     "survey": "opus",
+    "recall": "opus",
     "plan": "fable",
     "review": "opus",
     "assess": "fable",
@@ -58,6 +67,7 @@ ROLE_MODELS = {
 # topology assert that every produced event has an invocation provenance edge.
 ROLE_PRODUCED_TOPICS = {
     "survey": "codebase.surveyed",
+    "recall": "vault.recalled",
     "plan": "plan.submitted",
     "review": "review.submitted",
     "assess": "gate.assessed",
@@ -137,6 +147,8 @@ def prompt_for(role: str, payload: dict) -> str:
 
 
 def tools_for(role: str) -> list[str]:
+    if role == "recall":
+        return ["Read", "Grep", "Glob", "Skill"]
     if role in READ_ONLY_ROLES:
         return ["Read", "Grep", "Glob", "Skill", "Bash"]
     return ["Read", "Grep", "Glob", "Skill", "Bash", "Write", "Edit"]
@@ -169,10 +181,14 @@ def run(role: str, payload: dict, model: str | None = None) -> tuple[dict, int]:
         *tools_for(role),
     ]
     subprocess_kwargs = {}
-    if role in NOTES_ROLES:
-        vault = vault_dir()
-        command.extend(["--add-dir", str(vault)])
-        subprocess_kwargs["env"] = {**os.environ, "SIGNALBOX_VAULT": str(vault)}
+    if role in VAULT_ROLES:
+        vault = vault_dir() if role in NOTES_ROLES else recall_vault_dir()
+        if vault is not None:
+            command.extend(["--add-dir", str(vault)])
+        subprocess_kwargs["env"] = {
+            **os.environ,
+            "SIGNALBOX_VAULT": "" if vault is None else str(vault),
+        }
 
     started = time.monotonic()
     completed = subprocess.run(

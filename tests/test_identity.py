@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from signalbox.agent import extract_verdict
+from signalbox.agent import close_unclosed_root, extract_verdict, scan_objects
 from signalbox.emit import ALLOWED_EVENTS, build_body, identity_from_env, parse_fields
 from signalbox import identity
 from signalbox.identity import CARRIED_KEYS, carry, merge, project, spoofed_keys
@@ -172,3 +172,58 @@ def test_extract_verdict_handles_nesting_and_braces_in_strings():
 def test_extract_verdict_returns_none_when_there_is_no_object():
     assert extract_verdict("I could not complete this task.") is None
     assert extract_verdict("") is None
+
+
+# ── repairing a root object the model forgot to close ────────────────────────
+
+
+def test_a_plan_missing_only_its_root_brace_is_recovered():
+    """The sb-113 shape: every stage, shard and array closed, root left open.
+
+    Both drafts on 2026-07-30 ended exactly here, at `stop_reason: end_turn` and
+    ~2.5k output tokens, and cost the run an attempt each for one character.
+    """
+    out = '{"stages":[{"stage_id":"s1","shards":[{"shard_id":"s1-a","files":["a.py"],"intent":"do it."}]}]'
+    assert extract_verdict(out) is None
+    recovered = extract_verdict(close_unclosed_root(out))
+    assert recovered["stages"][0]["shards"][0]["shard_id"] == "s1-a"
+
+
+def test_a_complete_object_is_never_repaired():
+    """Nothing is owed, so nothing is appended — the normal path must not move."""
+    assert close_unclosed_root('{"verdict": "approved"}') is None
+    assert close_unclosed_root('narration {"verdict": "approved"} more') is None
+
+
+def test_an_unterminated_string_is_left_unparseable():
+    """Stopping mid-value is real truncation; a brace there invents the rest."""
+    assert close_unclosed_root('{"stages": [], "note": "the run was') is None
+
+
+def test_an_unclosed_inner_object_is_left_unparseable():
+    """Completing an inner object guesses at content, not at punctuation."""
+    assert close_unclosed_root('{"stages":[{"stage_id":"s1"') is None
+
+
+def test_an_unclosed_array_is_left_unparseable():
+    """A half-emitted stages array must not become a plan that lost its tail.
+
+    Only braces are ever appended, so output that stopped inside an array either
+    fails the depth guard or fails `json.loads`. Losing stage 2 silently is worse
+    than an invalid verdict, because the run would build the wrong thing.
+    """
+    out = '{"stages":[{"stage_id":"s1","shards":[]},'
+    repaired = close_unclosed_root(out)
+    assert repaired is None or extract_verdict(repaired) is None
+
+
+def test_a_root_left_open_where_a_brace_cannot_follow_is_rejected_by_the_parser():
+    """The depth guard permits it; JSON is what actually refuses it."""
+    assert extract_verdict(close_unclosed_root('{"verdict": "approved",')) is None
+
+
+def test_scan_reports_how_the_output_ended():
+    assert scan_objects('{"a": 1}').open_depth == 0
+    assert scan_objects('{"a": 1').open_depth == 1
+    assert scan_objects('{"a": "x').unterminated_string is True
+    assert scan_objects('{"a": "}"').unterminated_string is False

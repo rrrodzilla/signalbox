@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import time
+from typing import NamedTuple
 
 from signalbox.dispatch import environment
 from signalbox.diagnostics import invocation_diagnostic
@@ -115,13 +116,21 @@ def model_for(role: str, env: dict[str, str] | None = None) -> str | None:
     return env.get(model_env_var(role)) or env.get("SIGNALBOX_MODEL") or ROLE_MODELS[role]
 
 
-def extract_verdict(stdout: str) -> dict | None:
-    """The last complete JSON object in the output, or None.
+class Scan(NamedTuple):
+    """What one pass over a model's stdout saw.
 
-    Models narrate. Rather than trusting them not to, take the last balanced
-    object; if there is none, the caller publishes an invalid-verdict event and
-    the topology deals with it as data.
+    `open_depth` and `unterminated_string` describe the state the scan ended in,
+    which is the difference between "the model stopped mid-sentence" and "the
+    model finished and forgot to close something".
     """
+
+    candidates: list[str]
+    open_depth: int
+    unterminated_string: bool
+
+
+def scan_objects(stdout: str) -> Scan:
+    """Every balanced top-level `{...}` span, plus how the output ended."""
     depth = 0
     start = None
     candidates: list[str] = []
@@ -149,7 +158,47 @@ def extract_verdict(stdout: str) -> dict | None:
                 if depth == 0 and start is not None:
                     candidates.append(stdout[start : index + 1])
 
-    for blob in reversed(candidates):
+    return Scan(candidates, depth, in_string)
+
+
+def close_unclosed_root(stdout: str) -> str | None:
+    """The output with the root object's missing `}` restored, or None.
+
+    Observed twice on sb-113, 2026-07-30: the drafter emitted the whole plan on
+    one line, closed every shard, stage and array, and stopped one character
+    short of closing `{"stages":`. Both transcripts recorded `stop_reason:
+    end_turn` at ~2.5k output tokens, and the second draft was half the length of
+    the first, so this is the model finishing while believing it was done — not
+    truncation, which shortening the plan would have fixed and did not.
+
+    The repair is deliberately the narrowest one that addresses that: a single
+    brace, and only when the root object is the *only* thing left open. An
+    unterminated string means the model really did stop mid-value, and appending
+    a brace there would invent the rest of a sentence. A depth above one means an
+    inner object is open too, and completing that is guessing at content rather
+    than restoring punctuation. Arrays are never closed here, so any output that
+    stopped inside one fails to parse and stays an invalid verdict — which is the
+    honest outcome, since a half-emitted `stages` array would otherwise become a
+    plan that silently lost its later stages.
+
+    Whatever this returns still has to survive `json.loads`, so a root left open
+    at a place a brace cannot legally follow (`{"a": 1,`) is rejected by the
+    parser rather than by a rule here.
+    """
+    scan = scan_objects(stdout)
+    if scan.unterminated_string or scan.open_depth != 1:
+        return None
+    return stdout + "}"
+
+
+def extract_verdict(stdout: str) -> dict | None:
+    """The last complete JSON object in the output, or None.
+
+    Models narrate. Rather than trusting them not to, take the last balanced
+    object; if there is none, the caller publishes an invalid-verdict event and
+    the topology deals with it as data.
+    """
+    for blob in reversed(scan_objects(stdout).candidates):
         try:
             parsed = json.loads(blob)
         except json.JSONDecodeError:
@@ -289,6 +338,15 @@ def run(role: str, payload: dict, model: str | None = None) -> tuple[dict, int]:
         return {}, completed.returncode
 
     verdict = extract_verdict(completed.stdout)
+    if verdict is None:
+        # A verdict recovered by punctuation is still a recovered verdict, so it
+        # says so in the payload and on stderr. #118 is what silence costs here:
+        # a repair nobody can see is a repair nobody can audit.
+        repaired = close_unclosed_root(completed.stdout)
+        recovered = None if repaired is None else extract_verdict(repaired)
+        if recovered is not None:
+            print(f"signalbox agent: closed an unclosed root object from {role}", file=sys.stderr)
+            verdict = {**recovered, "verdict_repaired": "unclosed-root"}
     if verdict is None:
         # Not an error: an unparseable verdict is data the routers can see.
         verdict = {"verdict": "unparseable", "output": completed.stdout[-2000:]}

@@ -528,12 +528,19 @@ publishes = ["shard.escalated"]
 # JOIN + MERGE — the join is stateful with a real timeout, because a lost shard
 # result would matter here. It subscribes to every terminal shard outcome, so a
 # stage cannot hang waiting on a shard that died.
+#
+# Keyed on run_id AND stage_id. A stage id is unique within its plan, not across
+# them, and the plan skill's own example names stages `s1`/`s2` — so on stage_id
+# alone two concurrent runs share one bucket, the join fires on whichever
+# shard_count armed it first, and the resulting stage.closed mixes both runs'
+# shards while the rest are dropped as late arrivals. Every rendezvous in this
+# topology is run-scoped for that reason, and a test enforces it.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [[handlers]]
 name = "join-stage"
 path = "signalbox"
-args = ["primitive", "join-terminal", "--key", "stage_id",
+args = ["primitive", "join-terminal", "--key", "run_id", "--key", "stage_id",
         "--count-field", "shard_count", "--timeout-seconds", "5400",
         "--publish-as", "stage.closed"]
 subscribes = ["shard.approved", "shard.escalated", "shard.abandoned",

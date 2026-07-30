@@ -66,12 +66,26 @@ def test_a_pr_webhook_round_trip_uses_the_pr_marker(tmp_path, monkeypatch):
     assert not marker.exists()
 
 
-def test_a_shard_marker_uses_shard_id_instead_of_run_id(tmp_path, monkeypatch):
-    """The sb-76 stall requires shard scope to ignore the enclosing run id."""
+def test_a_shard_marker_separates_shards_within_a_run_and_across_runs(tmp_path, monkeypatch):
+    """Both halves of the marker's identity, each of which has broken a run.
+
+    sb-76 stalled because a shard marker collapsed onto the enclosing run id, so
+    a run's shards shared one marker. The mirror image breaks concurrency: shard
+    ids are unique only within a plan, so on shard_id alone two runs that both
+    name a shard `s1-tests` share one marker — the second overwrites the first,
+    and whichever clears it first leaves the other silent with nothing to reap
+    it. The marker has to separate on both.
+    """
     monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
-    assert pending_path(
-        "shard", {"run_id": "sb-76", "shard_id": "s1-kind-keyed-marker-naming"}
-    ).name == "shard-s1-kind-keyed-marker-naming.json"
+
+    def name(run_id, shard_id):
+        return pending_path("shard", {"run_id": run_id, "shard_id": shard_id}).name
+
+    # Within one run: two shards, two markers (sb-76).
+    assert name("sb-76", "s1-alpha") != name("sb-76", "s1-beta")
+    # Across runs: the same shard id, two markers (concurrency).
+    assert name("sb-76", "s1-tests") != name("sb-77", "s1-tests")
+    assert name("sb-76", "s1-tests") == "shard-sb-76-s1-tests.json"
 
 
 def test_an_unknown_pending_kind_raises(tmp_path, monkeypatch):
@@ -152,3 +166,45 @@ def test_the_environment_carries_every_key_the_emit_path_reads():
     env = environment(_shard(), {})
     missing = [var for var in _ENV_KEYS.values() if var not in env]
     assert missing == [], f"emit reads variables the dispatcher never sets: {missing}"
+
+
+# ── concurrency: a marker must name exactly one thing ────────────────────────
+
+# Kinds whose key is assigned by something outside signalbox and is already
+# unique across every run. A GitHub PR number is the only one today. Everything
+# else is plan-local and must be run-scoped.
+GLOBALLY_UNIQUE_KINDS = {"pr"}
+
+
+def test_every_pending_kind_is_globally_addressable():
+    """A marker is how silence gets a name, so it must name one thing.
+
+    Two different waits that render to one filename destroy each other: the
+    second overwrites the first, and whichever clears it first leaves the other
+    silent with no marker left for the reaper to find. `shard_id` is unique only
+    within a plan, so a shard marker is run-scoped; `pr` is GitHub's and is not.
+    A new kind fails here unless it makes that choice deliberately.
+    """
+    from signalbox.dispatch import PENDING_KEYS
+
+    for kind, keys in PENDING_KEYS.items():
+        assert isinstance(keys, tuple) and keys, f"{kind} names no key"
+        if kind in GLOBALLY_UNIQUE_KINDS:
+            continue
+        assert "run_id" in keys, (
+            f"pending kind {kind!r} keys on {keys}, which is unique only within a "
+            "plan; two concurrent runs would share one marker"
+        )
+
+
+def test_the_pr_marker_stays_unscoped_because_github_assigns_it(tmp_path, monkeypatch):
+    """Run-scoping the PR marker would break the path that clears it.
+
+    The check-suite webhook recovers run_id by string-trimming the head branch,
+    while `pr` arrives as a guaranteed field. Keying on the derived value risks
+    a marker that is written under one name and looked for under another, which
+    is a false `checks.silent` on a run whose CI actually reported.
+    """
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    assert pending_path("pr", {"pr": 94, "run_id": "sb-59"}).name == "pr-94.json"
+    assert pending_path("pr", {"pr": 94}).name == "pr-94.json"

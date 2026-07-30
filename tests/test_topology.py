@@ -1032,3 +1032,55 @@ def test_a_refused_release_cannot_announce_itself_as_released():
     assert route("route-release-ok", {"ok": False, "run_id": "sb-69"}) is None
     assert route("route-release-refused", {"ok": False, "run_id": "sb-69"}) is not None
     assert route("route-release-refused", {"ok": True, "run_id": "sb-69"}) is None
+
+
+def _join_keys(handler: dict) -> list[str]:
+    """The fields a join-terminal handler rendezvouses on."""
+    args = handler["args"]
+    return [args[i + 1] for i, arg in enumerate(args) if arg == "--key"]
+
+
+def joins() -> list[dict]:
+    return [h for h in HANDLERS if "join-terminal" in h.get("args", [])]
+
+
+def test_every_rendezvous_is_run_scoped():
+    """The invariant that licenses concurrent runs.
+
+    A join buckets by the values of its keys. Any key that is unique only within
+    a plan — `stage_id`, `shard_id` — puts two concurrent runs in one bucket:
+    the join fires on whichever count armed it first, publishes a summary mixing
+    both runs' items, and drops the rest as late arrivals. That is silent
+    cross-run corruption, not a stall, so it is worth an invariant rather than a
+    convention.
+
+    `run_id` is the only globally unique identity signalbox mints, so every join
+    must include it. Adding a join without it fails here rather than in
+    production the first time two runs overlap.
+    """
+    assert joins(), "no joins found — the extractor is looking in the wrong place"
+    for handler in joins():
+        keys = _join_keys(handler)
+        assert keys, f"{handler['name']} joins on nothing"
+        assert "run_id" in keys, (
+            f"{handler['name']} rendezvouses on {keys}, which is not run-scoped; "
+            "two concurrent runs would share a bucket"
+        )
+
+
+def test_the_stage_join_is_keyed_on_the_stage_within_the_run():
+    """Run-scoping must not flatten the stage join into a run join.
+
+    `run_id` alone would rendezvous every stage of a run in one bucket, so the
+    first stage to reach its shard_count would close using another stage's
+    shards. Both halves of the key are load-bearing.
+    """
+    keys = _join_keys(named(HANDLERS, "join-stage"))
+    assert keys == ["run_id", "stage_id"]
+
+
+def test_no_join_repeats_a_key():
+    """A repeated key is a typo that silently widens nothing and reads as intent."""
+    for handler in joins():
+        keys = _join_keys(handler)
+        assert len(keys) == len(set(keys)), f"{handler['name']} repeats a join key"

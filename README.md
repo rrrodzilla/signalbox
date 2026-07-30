@@ -188,7 +188,7 @@ export SIGNALBOX_VAULT=/absolute/path/to/notes-vault
 ./bin/harness.sh launch 42 --repo owner/name --repo-path ~/code/my-repo
 ```
 
-Watch it at **http://127.0.0.1:8103** (the run board) and **http://127.0.0.1:8102** (the live topology). A run's whole trail is in the event store; `bin/harness.sh down` sends SIGTERM so that trail flushes.
+Watch it at **http://127.0.0.1:8103** (the run board) and **http://127.0.0.1:8102** (the live topology). A run's whole trail is in the event store; the viewer exposes it read-only at `GET /history?stream=8101`, with no caching, and then follows the live SSE stream. The default maps stream 8101 to `~/.local/share/emergent/signalbox/events.db`; additional engines can be mapped with repeated `signalbox dashboard --store PORT=DB-PATH` arguments. Missing stores simply produce an empty history. `bin/harness.sh down` sends SIGTERM so that trail flushes.
 
 The forwarder is the operator's job rather than the topology's, for two reasons: a primitive that opened a tunnel would be a primitive reaching outside the topology, and the engine cannot detect its own missing deliveries. Without it a run reaches `pr.opened` and waits for the reaper. `status` says plainly whether it is up, and the target repo needs a CI workflow at all — with none configured, GitHub creates no check suite and there is nothing to forward.
 
@@ -226,7 +226,7 @@ A local-only run needs no `gh`: `fetch-issue` passes through when the body is al
 | `src/signalbox/emit.py` | An acting agent's entire action space: three events. |
 | `src/signalbox/plan.py` | The pure invariants that license parallel shards. |
 | `src/signalbox/primitives/` | Three SDK primitives: two splitters and a joiner with a real timeout. |
-| `src/signalbox/dashboard.html` | The run board, a static viewer over the SSE stream. |
+| `src/signalbox/dashboard.html` | The run board, a static viewer over read-only event history and the SSE stream. |
 | `tests/test_topology.py` | The architectural review questions as assertions. |
 | `state_dir()/pending/` | Reaped silence markers for dispatched shards and open PR checks. |
 | `state_dir()/sessions/` | Per-run fixer session identities, kept beside and outside `pending/`. |

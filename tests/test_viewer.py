@@ -12,6 +12,8 @@ These tests exercise the served bytes instead.
 from __future__ import annotations
 
 import http.client
+import json
+import sqlite3
 import threading
 from http.server import HTTPServer
 from pathlib import Path
@@ -28,7 +30,30 @@ def serving(tmp_path: Path):
     """A live viewer over a throwaway page, on an ephemeral port."""
     page = tmp_path / "dashboard.html"
     page.write_text("<h1>first</h1>")
-    server = HTTPServer(("127.0.0.1", 0), handler_class(page))
+    first_store = tmp_path / "first.db"
+    second_store = tmp_path / "second.db"
+    _store(
+        first_store,
+        [
+            ("later", "shard.submitted", "dispatch-implement", 20, {"run_id": "sb-2"}),
+            ("earlier", "run.started", "launch", 10, {"run_id": "sb-1"}),
+        ],
+    )
+    _store(
+        second_store,
+        [("other", "run.started", "launch", 5, {"run_id": "other"})],
+    )
+    server = HTTPServer(
+        ("127.0.0.1", 0),
+        handler_class(
+            page,
+            stores={
+                8101: first_store,
+                8201: second_store,
+                8301: tmp_path / "missing.db",
+            },
+        ),
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
@@ -46,6 +71,72 @@ def serving(tmp_path: Path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def _store(path: Path, rows: list[tuple[str, str, str, int, dict]]) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE events ("
+            "id TEXT PRIMARY KEY, message_type TEXT, source TEXT NOT NULL, "
+            "timestamp_ms INTEGER, payload_json TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+            [
+                (event_id, message_type, source, timestamp_ms, json.dumps(payload))
+                for event_id, message_type, source, timestamp_ms, payload in rows
+            ],
+        )
+
+
+def test_history_has_the_stream_shape_in_timestamp_order(serving):
+    _, get = serving
+
+    status, headers, body = get("/history?stream=8101")
+
+    assert status == 200
+    assert headers.get("Content-Type") == "application/json"
+    assert json.loads(body) == [
+        {
+            "type": "run.started",
+            "source": "launch",
+            "timestamp": 10,
+            "payload": {"run_id": "sb-1"},
+            "id": "earlier",
+        },
+        {
+            "type": "shard.submitted",
+            "source": "dispatch-implement",
+            "timestamp": 20,
+            "payload": {"run_id": "sb-2"},
+            "id": "later",
+        },
+    ]
+
+
+def test_history_store_is_selected_per_stream(serving):
+    _, get = serving
+
+    status, _, body = get("/history?stream=8201")
+
+    assert status == 200
+    assert [event["id"] for event in json.loads(body)] == ["other"]
+
+
+@pytest.mark.parametrize("stream", ["9999", "8301"])
+def test_unknown_or_missing_history_is_an_empty_success(serving, stream):
+    _, get = serving
+
+    status, _, body = get(f"/history?stream={stream}")
+
+    assert status == 200
+    assert json.loads(body) == []
+
+
+def test_history_is_served_uncacheable(serving):
+    _, get = serving
+    _, headers, _ = get("/history?stream=8101")
+    assert headers.get("Cache-Control") == "no-store"
 
 
 def test_the_served_page_tracks_the_file_rather_than_a_snapshot(serving):

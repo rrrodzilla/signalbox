@@ -127,6 +127,87 @@ def test_every_event_moves_the_card_before_any_topic_specific_branch():
     )
 
 
+def test_dashboard_uses_the_declared_shard_denominator():
+    """Issue #85: sb-69 must not show 2/2 while its third shard is unopened."""
+    apply_body = PAGE_TEXT[
+        PAGE_TEXT.index("function apply(msg)") : PAGE_TEXT.index("function shardSidings")
+    ]
+    sidings = PAGE_TEXT[
+        PAGE_TEXT.index("function shardSidings") : PAGE_TEXT.index("const LAMP_FOR")
+    ]
+
+    assert re.search(
+        r"run\.stages\.set\(p\.stage_id,\s*"
+        r"recorded\s*==\s*null\s*\?\s*p\.shard_count\s*:\s*"
+        r"Math\.max\(recorded,\s*p\.shard_count\)\)",
+        apply_body,
+    ), (
+        "shard_count must be retained without letting a conflict-reopen subset "
+        "lower an established stage declaration"
+    )
+    assert re.search(r'done\s*\+\s*"/"\s*\+\s*declared', sidings), (
+        "the shard meter must render the stage's declared shard_count"
+    )
+    assert not re.search(r'done\s*\+\s*"/"\s*\+\s*run\.shards\.size', sidings), (
+        "observed shard IDs are not the declared denominator"
+    )
+
+
+def test_dashboard_counts_every_unique_shard_terminal_as_done():
+    """Issue #85: sb-69's numerator includes every review-loop terminal."""
+    apply_body = PAGE_TEXT[
+        PAGE_TEXT.index("function apply(msg)") : PAGE_TEXT.index("function shardSidings")
+    ]
+    sidings = PAGE_TEXT[
+        PAGE_TEXT.index("function shardSidings") : PAGE_TEXT.index("const LAMP_FOR")
+    ]
+
+    approved = apply_body[
+        apply_body.index('case "shard.approved"') :
+        apply_body.index('case "shard.changes-requested"')
+    ]
+    assert 'run.shards.set(p.shard_id, "done")' in approved
+
+    failed_terminals = apply_body[
+        apply_body.index('case "shard.escalated"') :
+        apply_body.index('case "stage.merged"')
+    ]
+    for topic in (
+        "shard.escalated",
+        "shard.abandoned",
+        "shard.invalid-verdict",
+        "shard.silent",
+        "scope.violated",
+    ):
+        assert f'case "{topic}"' in failed_terminals, f"{topic} is not terminal"
+    assert 'run.shards.set(p.shard_id, "escalated")' in failed_terminals
+    assert re.search(
+        r'new Set\(\[\s*"done",\s*"escalated"\s*\]\)', sidings
+    ), "both successful and unsuccessful shard terminals must advance done"
+
+
+def test_dashboard_uses_the_declared_stage_denominator():
+    """Issue #85: sb-69's stage position comes from event-carried stage_count."""
+    apply_body = PAGE_TEXT[
+        PAGE_TEXT.index("function apply(msg)") : PAGE_TEXT.index("function shardSidings")
+    ]
+    sidings = PAGE_TEXT[
+        PAGE_TEXT.index("function shardSidings") : PAGE_TEXT.index("const LAMP_FOR")
+    ]
+
+    assert re.search(
+        r"run\.stageCount\s*=\s*p\.stage_count", apply_body
+    ), "stage_count must be captured from the replayed event stream"
+    assert re.search(
+        r"stage '\s*\+\s*Math\.min\(run\.merged\s*\+\s*1,\s*run\.stageCount\)"
+        r'\s*\+\s*" of "\s*\+\s*run\.stageCount',
+        sidings,
+    ), (
+        "stage position must render merged+1 of the declared stage_count "
+        "without advancing beyond the final declared stage"
+    )
+
+
 def test_an_event_with_no_run_id_does_not_invent_a_run_card():
     """An unattributed operational event must not mint a phantom run.
 

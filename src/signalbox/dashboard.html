@@ -420,6 +420,7 @@ function runFor(id) {
       blocks: Object.fromEntries(BLOCKS.map((b) => [b, "idle"])),
       counts: Object.fromEntries(BLOCKS.map((b) => [b, 0])),
       shards: new Map(), stages: new Map(), rounds: 0, attempt: 1,
+      stageCount: null, currentStage: null, merged: 0,
       // block -> when the run entered it, for blocks that have not yet spoken.
       waiting: {},
       verdict: { label: "opening", cls: "", detail: "" },
@@ -523,6 +524,11 @@ function apply(msg) {
   if (p.worktree) run.worktree = p.worktree;
   if (p.base_sha) run.base = p.base_sha;
   if (p.attempt) run.attempt = p.attempt;
+  // The declared run shape is event-carried and replayable. Capture it once:
+  // later shard/fix events may repeat identity, but cannot redefine the plan.
+  if (run.stageCount == null && p.stage_count != null) {
+    run.stageCount = p.stage_count;
+  }
 
   const block = blockOf(t);
   const meaning = sev(t);
@@ -582,8 +588,21 @@ function apply(msg) {
     case "plan.draft-failed":
       set("plan", "failed");
       run.verdict = { label: "FAILED", cls: "v-red", detail: p.error || t }; break;
+    case "stage.opened": run.currentStage = p.stage_id;
+      if (p.stage_id && !run.stages.has(p.stage_id)) run.stages.set(p.stage_id, null);
+      before("build"); break;
     case "shard.opened": run.shards.set(p.shard_id, "building");
-      if (p.stage_id) run.stages.set(p.stage_id, p.shard_count || 0);
+      if (p.stage_id) {
+        run.currentStage = p.stage_id;
+        if (p.shard_count != null) {
+          const recorded = run.stages.get(p.stage_id);
+          // A merge-conflict reopen republishes only implicated shards, so its
+          // shard_count is a subset. It may fill an unknown count, never lower
+          // the full stage declaration already reconstructed from the stream.
+          run.stages.set(p.stage_id,
+            recorded == null ? p.shard_count : Math.max(recorded, p.shard_count));
+        }
+      }
       before("build"); break;
     case "shard.submitted": case "shard.built":
       run.shards.set(p.shard_id, "review"); break;
@@ -600,7 +619,8 @@ function apply(msg) {
       run.shards.set(p.shard_id, "escalated");
       run.verdict = { label: t.split(".")[1].toUpperCase().replace(/-/g, " "),
         cls: "v-red", detail: p.reason || p.path || "" }; break;
-    case "stage.merged": run.merged = (run.merged || 0) + 1;
+    case "stage.merged": run.merged++;
+      run.currentStage = null;
       run.shards.clear(); break;   // the next stage opens its own shards
     case "stage.conflicted": set("build", "failed");
       run.verdict = { label: "STAGE CONFLICTED", cls: "v-red",
@@ -660,19 +680,23 @@ function apply(msg) {
 /* ── rendering ───────────────────────────────────────────────────────── */
 
 function shardSidings(run) {
-  const stages = run.merged
-    ? '<span class="sub">' + run.merged + " stage" + (run.merged === 1 ? "" : "s") +
-      " merged</span>"
-    : "";
-  // Shards are cleared when a stage merges, so between stages the only honest
-  // thing to show is how many stages are behind us.
-  if (!run.shards.size) return stages;
+  const stagePosition = run.stageCount == null ? "" :
+    '<span class="sub">stage ' + Math.min(run.merged + 1, run.stageCount) +
+      " of " + run.stageCount + "</span>";
+  const declared = run.currentStage == null ? null : run.stages.get(run.currentStage);
+  // Shards are cleared when a stage merges. The stage position remains visible
+  // between stages, while the next stage's first opened shard restores its
+  // event-carried denominator (and a fresh building lamp, not a repair lamp).
+  if (!run.shards.size || declared == null) return stagePosition;
   const lamps = [...run.shards.entries()]
     .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
     .map(([sid, st]) => '<span class="shard-lamp s-' + esc(st) + '" title="' +
       esc(sid + " · " + st) + '"></span>');
-  const done = [...run.shards.values()].filter((s) => s === "done").length;
-  return '<span class="sub">' + done + "/" + run.shards.size + " shards" +
+  // Every terminal satisfies the stage join. Map keys are shard IDs, so fix
+  // rounds and conflict reopens replace state rather than inflating progress.
+  const terminals = new Set(["done", "escalated"]);
+  const done = [...run.shards.values()].filter((s) => terminals.has(s)).length;
+  return stagePosition + '<span class="sub">' + done + "/" + declared + " shards" +
     (run.merged ? " · " + run.merged + " merged" : "") +
     (run.rounds ? ' <span class="rounds">&#8635; R' + run.rounds + "</span>" : "") +
     "</span>" + '<div class="sidings">' + lamps.join("") + "</div>";

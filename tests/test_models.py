@@ -202,6 +202,75 @@ def test_the_claude_runner_still_names_the_skill():
     assert command[command.index("--model") + 1] == "sonnet"
 
 
+@pytest.mark.parametrize("role", ["plan-notes", "write-note"])
+def test_notes_roles_receive_the_resolved_vault(monkeypatch, tmp_path, role):
+    """Incident #70: notes must escape the disposable judging worktree."""
+    calls = []
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("SIGNALBOX_VAULT", str(vault))
+    monkeypatch.setattr(agent, "_workdir", lambda payload: "/tmp/wt")
+    monkeypatch.setattr(
+        agent.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or SimpleNamespace(returncode=0, stdout='{"verdict":"done"}', stderr=""),
+    )
+    monkeypatch.setattr(agent, "post_provenance", lambda *args, **kwargs: None)
+
+    _, code = agent.run(role, {}, model="sonnet")
+
+    assert code == 0
+    command, kwargs = calls[0]
+    assert command[command.index("--add-dir") + 1] == str(vault.resolve())
+    assert kwargs["env"]["SIGNALBOX_VAULT"] == str(vault.resolve())
+    assert kwargs["env"]["SIGNALBOX_VAULT"] != "None"
+
+
+def test_non_notes_roles_receive_neither_vault_access_nor_a_stamped_env(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setenv("SIGNALBOX_VAULT", "/should/not/be-forwarded")
+    monkeypatch.setattr(agent, "_workdir", lambda payload: "/tmp/wt")
+    monkeypatch.setattr(
+        agent.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or SimpleNamespace(
+            returncode=0,
+            stdout='{"verdict":"approved"}',
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(agent, "post_provenance", lambda *args, **kwargs: None)
+
+    _, code = agent.run("review", {}, model="opus")
+
+    assert code == 0
+    command, kwargs = calls[0]
+    assert "--add-dir" not in command
+    assert "env" not in kwargs
+
+
+def test_a_missing_notes_vault_is_a_clean_cli_error(monkeypatch, capsys):
+    """Incident #70 configuration errors follow the paths.py caller convention."""
+    monkeypatch.setattr(
+        agent,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            agent.VaultMissing("SIGNALBOX_VAULT is not configured")
+        ),
+    )
+    monkeypatch.setattr(agent.sys, "stdin", SimpleNamespace(read=lambda: "{}"))
+
+    assert agent.main(["plan-notes"]) == 1
+    assert (
+        capsys.readouterr().err
+        == "signalbox agent: SIGNALBOX_VAULT is not configured\n"
+    )
+
+
 @pytest.mark.parametrize("returncode", [0, 17])
 def test_judging_invocation_always_posts_resolved_model(monkeypatch, returncode):
     posted = []

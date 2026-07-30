@@ -43,6 +43,10 @@ preflight() {
   for tool in emergent claude codex gh git jq python3 uv; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
+  # #70: reject the operator shell before `up`; prepare-workspace separately
+  # checks the environment captured by the engine when it started.
+  [[ -n "${SIGNALBOX_VAULT:-}" && -d "$SIGNALBOX_VAULT" ]] \
+    || missing+=("SIGNALBOX_VAULT (export SIGNALBOX_VAULT=/absolute/path/to/vault before '$0 up')")
   ((${#missing[@]} == 0)) || fail "missing tools: ${missing[*]}"
 
   local primitives_dir="$HOME/.local/share/emergent/primitives/bin"
@@ -173,6 +177,10 @@ down() {
 }
 
 status() {
+  # #70: this is the invoking shell's view. The engine may have been started
+  # from another shell and prepare-workspace is authoritative for each run.
+  say "vault:     ${SIGNALBOX_VAULT:-unset}"
+  say "  caveat: live engine environment was captured at 'up' and may differ; prepare-workspace verifies each run"
   local pids
   pids="$(engine_pids)"
   if [[ -n "$pids" ]]; then

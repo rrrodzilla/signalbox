@@ -21,7 +21,7 @@ from pathlib import Path
 
 from signalbox.paths import (
     WorktreeMissing, branch_for, install_skills, require_worktree,
-    state_dir, worktree_for,
+    state_dir, vault_dir, worktree_for,
 )
 
 
@@ -87,6 +87,12 @@ def prepare_workspace(payload: dict) -> dict:
     if root.exists():
         install_skills(root)
         return {**payload, **resolved, "ok": True, "worktree": str(root), "branch": branch}
+
+    # Preflight and the engine may have different environments. When startup
+    # forwarded a vault, re-resolve it here so #70 cannot launch a run against
+    # a path that disappeared. Direct callers historically need no vault.
+    if os.environ.get("SIGNALBOX_VAULT"):
+        vault_dir()
 
     root.parent.mkdir(parents=True, exist_ok=True)
     code, _, err = _run(

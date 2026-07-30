@@ -84,12 +84,18 @@ def main(argv: list[str] | None = None) -> int:
         # install runs a stale copy of the code and skills while the source in
         # front of you reads correct.
         from signalbox.emit import control_url
-        from signalbox.paths import skills_dir, state_dir
+        from signalbox.paths import VaultMissing, skills_dir, state_dir, vault_dir
 
         print(f"package  {__file__.rsplit('/', 1)[0]}")
         print(f"skills   {skills_dir()}")
         print(f"state    {state_dir()}")
         print(f"control  {control_url()}")
+        try:
+            vault = vault_dir()
+        except VaultMissing as exc:
+            print(f"signalbox paths: {exc}", file=sys.stderr)
+            return 1
+        print(f"vault    {vault}")
         return 0
 
     if command in ACT_COMMANDS:

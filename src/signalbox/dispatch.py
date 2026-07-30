@@ -67,6 +67,7 @@ CLAUDE_TOOLS = ("Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill")
 # unique only within its plan, so it is run-scoped. `test_every_pending_kind_is
 # _globally_addressable` holds the line as kinds are added.
 PENDING_KEYS: dict[str, tuple[str, ...]] = {
+    "approval": ("run_id",),
     "pr": ("pr",),
     "shard": ("run_id", "shard_id"),
 }

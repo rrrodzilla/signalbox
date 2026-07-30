@@ -56,9 +56,14 @@ RUNNER_MODEL_VARS = {
 
 CLAUDE_TOOLS = ("Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill")
 
+PENDING_KEYS = {
+    "pr": "pr",
+    "shard": "shard_id",
+}
+
 
 def pending_path(kind: str, payload: dict) -> Path:
-    key = payload.get("shard_id") or payload.get("run_id") or "unknown"
+    key = payload.get(PENDING_KEYS[kind], "unknown")
     return state_dir() / "pending" / f"{kind}-{key}.json"
 
 

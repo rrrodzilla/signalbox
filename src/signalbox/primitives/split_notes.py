@@ -10,8 +10,11 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import Awaitable, Callable
 
 from signalbox.identity import project
+
+Publish = Callable[[dict, object], Awaitable[None]]
 
 
 def note_events(payload: dict) -> list[dict]:
@@ -32,18 +35,57 @@ def note_events(payload: dict) -> list[dict]:
     ]
 
 
+def synced_event(payload: dict) -> dict | None:
+    """A terminal join-shaped payload when the plan contains no notes."""
+    if any(payload.get("notes") or []):
+        return None
+    return {
+        "expected": 0,
+        "received": 0,
+        "timed_out": False,
+        "results": [],
+        **project(payload),
+    }
+
+
+async def publish_events(
+    payload: dict,
+    cause: object,
+    publish_note: Publish,
+    publish_synced: Publish,
+) -> None:
+    """Publish drafted notes, or the synthetic terminal event for an empty plan."""
+    events = note_events(payload)
+    if not events:
+        print("split-notes: plan named no notes", file=sys.stderr)
+        event = synced_event(payload)
+        assert event is not None
+        await publish_synced(event, cause)
+        return
+    for event in events:
+        await publish_note(event, cause)
+
+
 def main() -> None:
     from emergent import create_message, run_handler
 
     async def split(msg, handler) -> None:
-        events = note_events(msg.payload_as(dict) or {})
-        if not events:
-            print("split-notes: plan named no notes", file=sys.stderr)
-            return
-        for event in events:
+        async def publish_note(event: dict, _cause: object) -> None:
             await handler.publish(
                 create_message("note.drafted").caused_by(msg.id).payload(event)
             )
+
+        async def publish_synced(event: dict, _cause: object) -> None:
+            await handler.publish(
+                create_message("notes.synced").caused_by(msg.id).payload(event)
+            )
+
+        await publish_events(
+            msg.payload_as(dict) or {},
+            msg.id,
+            publish_note,
+            publish_synced,
+        )
 
     name = os.environ.get("EMERGENT_PRIMITIVE_NAME", "split-notes")
     asyncio.run(run_handler(name, ["notes.planned"], split))

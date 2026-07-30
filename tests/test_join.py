@@ -15,7 +15,7 @@ from signalbox.primitives.join_terminal import (
     expected_count,
     summarise,
 )
-from signalbox.primitives.split_notes import note_events
+from signalbox.primitives.split_notes import note_events, publish_events, synced_event
 from signalbox.primitives.split_shards import events_for, reopened_shards
 
 
@@ -189,6 +189,44 @@ def test_note_events_carry_the_count_so_the_join_terminates():
     assert len(events) == 3
     assert all(e["note_count"] == 3 for e in events)
     assert [e["note"] for e in events] == ["arch", "testing", "shards"]
+
+
+@pytest.mark.asyncio
+async def test_the_pure_layer_returns_a_notes_synced_event_for_an_empty_plan_not_nothing():
+    """A zero-note plan once vanished at the splitter and left its run waiting forever."""
+    event = synced_event({"run_id": "r1", "note_count": 0, "notes": []})
+
+    assert event is not None
+
+
+@pytest.mark.asyncio
+async def test_an_empty_plan_still_publishes_an_event_so_the_run_reaches_a_terminal():
+    """The splitter logged the empty plan but silence gave downstream no terminal fact."""
+    recorder = Recorder()
+
+    await publish_events(
+        {"run_id": "r1", "note_count": 0, "notes": []},
+        "planned-message",
+        lambda payload, cause: pytest.fail("an empty plan drafted a note"),
+        recorder,
+    )
+
+    assert len(recorder.published) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_synthetic_payload_matches_the_join_summary_shape_with_projected_identity():
+    """The direct terminal must look like the join result consumers already understand."""
+    payload = {"run_id": "r1", "note_count": 0, "notes": []}
+
+    assert synced_event(payload) == {
+        "expected": 0,
+        "received": 0,
+        "timed_out": False,
+        "results": [],
+        "run_id": "r1",
+        "note_count": 0,
+    }
 
 
 def test_a_stage_item_keeps_the_identity_a_stage_actually_has():

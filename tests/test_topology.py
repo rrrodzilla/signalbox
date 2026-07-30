@@ -7,6 +7,7 @@ just a run that quietly does less than it should.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -50,6 +51,70 @@ def test_dashboard_observes_every_topic_the_topology_publishes():
     """Gate 2's log test. An unobserved event is a blind spot on the dashboard."""
     missing = published() - RAW - set(named(SINKS, "dashboard")["subscribes"])
     assert not missing, f"dashboard would not show: {sorted(missing)}"
+
+
+PAGE_TEXT = (ROOT / "src" / "signalbox" / "dashboard.html").read_text()
+
+BLOCK_NAMES = {"plan", "build", "gate", "promote", "docs"}
+MEANINGS = {"go", "work", "judge", "stop", "hold"}
+
+
+def event_table() -> dict[str, tuple[str | None, str]]:
+    """The page's topic -> (block, meaning) table, as data."""
+    body = PAGE_TEXT[PAGE_TEXT.index("const EVENT = {") :]
+    body = body[: body.index("\n};")]
+    return {
+        topic: (None if block == "null" else block.strip('"'), meaning)
+        for topic, block, meaning in re.findall(
+            r'"([a-z][\w.\-]*)":\s*\[\s*(null|"[a-z]+")\s*,\s*"([a-z]+)"\s*\]', body
+        )
+    }
+
+
+def test_the_dashboard_renders_every_topic_it_subscribes_to():
+    """Subscribing is not rendering, and only the first half was ever asserted.
+
+    The sink can carry a topic the page has no entry for. The register then
+    renders the row in the fallback colour and the run card does not move at
+    all. Thirteen published topics were in exactly that state, `run.completed`
+    and `checks.silent` among them, which is why a healthy run could look dead.
+    """
+    missing = set(named(SINKS, "dashboard")["subscribes"]) - RAW - {"model.invoked"}
+    missing -= set(event_table())
+    assert not missing, f"the page has no entry for: {sorted(missing)}"
+
+
+def test_both_dashboard_views_are_coloured_by_one_table():
+    """The register's colour and the card's colour must have a single source.
+
+    They did not: a block table drove the card and four independent regexes
+    drove the register, so `shard.built` was green in one view while the other
+    painted the same shard blue. Only one of those can be right, and nothing
+    made them agree.
+    """
+    table = event_table()
+    assert table, "the page's EVENT table could not be parsed"
+    for topic, (block, meaning) in table.items():
+        assert meaning in MEANINGS, f"{topic} has an unknown meaning {meaning!r}"
+        assert block is None or block in BLOCK_NAMES, f"{topic} names no section"
+    assert "sev(e.type)" in PAGE_TEXT, "the register does not read the table"
+    assert "const meaning = sev(t);" in PAGE_TEXT, "the card does not read the table"
+
+
+def test_every_event_moves_the_card_before_any_topic_specific_branch():
+    """A run card that only reacts to topics it has a `case` for reads as dead.
+
+    Most events changed nothing visible, because the switch handles 25 topics
+    and the stream carries far more. The counter, tick line, and rail flash have
+    to be updated unconditionally, ahead of the switch, or the gap comes back
+    one unhandled topic at a time.
+    """
+    body = PAGE_TEXT[PAGE_TEXT.index("function apply(msg)") : PAGE_TEXT.index("function shardSidings")]
+    for unconditional in ("run.events++", "run.tick =", "run.pulse ="):
+        assert unconditional in body, f"{unconditional} is missing from apply()"
+        assert body.index(unconditional) < body.index("switch (t)"), (
+            f"{unconditional} must run before the topic switch, not inside it"
+        )
 
 
 def test_no_sse_sink_relies_on_a_wildcard():

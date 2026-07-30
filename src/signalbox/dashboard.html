@@ -16,6 +16,14 @@
   --white-lamp:#eef4fa;  /* route set */
   --violet:#a78bfa;      /* waiting on a human */
   --blue:#5aa7e8;
+
+  /* The five meanings. Both views read these and nothing else, so a colour
+     means the same thing in the register as it does on the card. */
+  --go:var(--green);     /* a block or shard reached its finished state */
+  --work:var(--amber);   /* normal progress inside a block */
+  --judge:var(--blue);   /* a verdict or report landed, awaiting routing */
+  --stop:var(--red);     /* a failure, violation, or rejection */
+  --hold:var(--violet);  /* waiting on a human */
 }
 * { box-sizing:border-box; margin:0; }
 html { scrollbar-color:var(--seam) var(--enamel); }
@@ -104,13 +112,42 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 .sidings .bar { width:8px; height:2px; background:var(--seam); flex:none; }
 .shard-lamp { width:8px; height:8px; border-radius:2px; flex:none;
   background:transparent; border:1px solid var(--faint); }
-.shard-lamp.s-building { background:var(--amber); border-color:var(--amber); }
-.shard-lamp.s-review { background:var(--blue); border-color:var(--blue); }
-.shard-lamp.s-fixing { background:var(--red); border-color:var(--red); }
-.shard-lamp.s-done { background:var(--green); border-color:var(--green); }
-.shard-lamp.s-escalated { background:var(--red); border-color:var(--red);
+/* Same five meanings as everything else. A shard in a fix round is *working*
+   (amber fill) but carries the rejection that sent it back (red ring); it used
+   to be solid red, which made ordinary rework look like an escalation. */
+.shard-lamp.s-building { background:var(--work); border-color:var(--work); }
+.shard-lamp.s-review { background:var(--judge); border-color:var(--judge); }
+.shard-lamp.s-fixing { background:var(--work); border-color:var(--stop); }
+.shard-lamp.s-done { background:var(--go); border-color:var(--go); }
+.shard-lamp.s-escalated { background:var(--stop); border-color:var(--stop);
   animation:pulse 2.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .shard-lamp.s-escalated { animation:none; } }
+
+/* The tick line. Its whole job is to move for EVERY event, including the many
+   that change no block state — the count always advances and the topic almost
+   always does, so silence on the card now means silence on the wire. */
+.tick { display:flex; align-items:baseline; gap:8px; padding:5px 12px 0;
+  font-size:10px; letter-spacing:.06em; color:var(--faint); }
+.tick .tdot { width:6px; height:6px; border-radius:50%; flex:none;
+  background:var(--sev, var(--faint)); align-self:center; }
+.tick .ttype { color:var(--sev, var(--dim)); overflow-wrap:anywhere; min-width:0; }
+.tick .tcount { margin-left:auto; flex:none; }
+@keyframes tick-in { from { opacity:.25; } to { opacity:1; } }
+.tick.fresh .ttype { animation:tick-in .5s ease-out; }
+
+/* The rail flashes in the meaning's colour, so the register row and the block
+   that moved are the same colour at the same moment. */
+@keyframes rail-flash {
+  0%   { background:var(--sev); box-shadow:0 0 9px 2px var(--sev); }
+  100% { box-shadow:0 0 0 0 transparent; }
+}
+.block.pulse::before { animation:rail-flash .9s ease-out; }
+.block .bcount { position:absolute; top:0; right:2px; font-size:9px;
+  color:var(--faint); letter-spacing:.04em; }
+@media (prefers-reduced-motion: reduce) {
+  .block.pulse::before { animation:none; }
+  .tick.fresh .ttype { animation:none; }
+}
 
 .verdict { display:flex; gap:8px; align-items:baseline; padding:8px 12px 10px;
   font-size:12px; color:var(--dim); }
@@ -139,17 +176,27 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
   border:1px solid var(--seam); border-radius:2px; padding:2px 7px;
   color:var(--dim); background:none; cursor:pointer; }
 .badge.on { color:var(--white-lamp); border-color:var(--dim); }
+/* The legend carries the colour it filters for, so the register's chips double
+   as the key to the card. */
+.badges .badge[class*="sev-"]::before { content:""; display:inline-block;
+  width:6px; height:6px; border-radius:50%; margin-right:5px; vertical-align:0;
+  background:var(--sev, var(--faint)); }
 #feed { overflow-y:auto; padding:0 14px 24px; }
 .ev { border-top:1px solid var(--seam); padding:6px 0; }
 .ev .hd { color:var(--faint); font-size:10px; display:flex; gap:8px; }
 .ev .hd .badge { margin-left:auto; cursor:default; }
 .ev .ty { font-weight:700; }
 .ev .bd { color:var(--dim); font-size:11px; overflow-wrap:anywhere; }
-.ev.k-good .ty { color:var(--green); }
-.ev.k-bad .ty { color:var(--red); }
-.ev.k-warn .ty { color:var(--amber); }
-.ev.k-park .ty { color:var(--violet); }
-.ev.k-info .ty { color:var(--blue); }
+/* One palette, read by the register row, the card's tick line, and the rail
+   flash. Adding a meaning here changes all three at once, on purpose. */
+.sev-go    { --sev:var(--go); }
+.sev-work  { --sev:var(--work); }
+.sev-judge { --sev:var(--judge); }
+.sev-stop  { --sev:var(--stop); }
+.sev-hold  { --sev:var(--hold); }
+.sev-unmapped { --sev:var(--white-lamp); }
+.ev .ty { color:var(--sev, var(--dim)); }
+.ev.sev-unmapped .ty::after { content:" ?"; color:var(--white-lamp); }
 </style>
 
 <header>
@@ -177,41 +224,74 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 /* The five track sections a run passes through. Every event maps to one. */
 const BLOCKS = ["plan", "build", "gate", "promote", "docs"];
 
-const BLOCK_OF = {
-  "run.requested":"plan", "workspace.ready":"plan", "workspace.failed":"plan",
-  "issue.fetched":"plan", "issue.fetch-failed":"plan", "codebase.surveyed":"plan",
-  "survey.failed":"plan", "plan.submitted":"plan", "plan.checked":"plan",
-  "plan.accepted":"plan", "plan.rejected":"plan", "plan.draft-failed":"plan",
-  "stage.opened":"build", "shard.opened":"build", "shard.file-written":"build",
-  "shard.check-ran":"build", "shard.submitted":"build", "shard.built":"build",
-  "shard.abandoned":"build", "shard.invalid-verdict":"build", "shard.silent":"build",
-  "scope.violated":"build", "review.submitted":"build", "review.failed":"build",
-  "review.invalid-verdict":"build", "shard.approved":"build",
-  "shard.changes-requested":"build", "fix.opened":"build", "shard.escalated":"build",
-  "stage.closed":"build", "stage.mergeable":"build", "merge.attempted":"build",
-  "stage.merged":"build", "stage.conflicted":"build", "run.built":"build",
-  "suite.ran":"gate", "suite.errored":"gate", "gate.assessed":"gate",
-  "assess.failed":"gate", "gate.cleared":"gate", "gate.blocked":"gate",
-  "gate.invalid-verdict":"gate", "approval.requested":"gate", "approval.granted":"gate",
-  "branch.pushed":"promote", "branch.push-failed":"promote", "pr.opened":"promote",
-  "pr.open-failed":"promote", "checks.reported":"promote", "checks.passed":"promote",
-  "checks.failed":"promote", "pr.merged":"promote", "pr.merge-failed":"promote",
-  "notes.planned":"docs", "notes.plan-failed":"docs", "note.drafted":"docs",
-  "note.written":"docs", "note.write-failed":"docs", "notes.synced":"docs",
+/* The single source of truth for BOTH views: topic -> [block, meaning].
+   The register colours a row by the meaning and the card colours the same
+   event's block by the same meaning, so the two can never drift apart. They
+   used to be computed separately — a block table here and four regexes there —
+   which is how `shard.built` came to be green in the register while the card
+   painted the same shard blue.
+
+   The meanings, and the only five there are:
+     go     a block or shard reached its finished state
+     work   normal progress inside a block
+     judge  a verdict or report landed and is awaiting routing
+     stop   a failure, violation, or rejection
+     hold   waiting on a human
+
+   A topic absent from this table is a topology change the page has not been
+   taught yet; `sev()` calls that out rather than quietly rendering it grey. */
+const EVENT = {
+  "run.requested":["plan","work"], "workspace.ready":["plan","work"],
+  "workspace.failed":["plan","stop"], "issue.fetched":["plan","work"],
+  "issue.fetch-failed":["plan","stop"], "codebase.surveyed":["plan","work"],
+  "survey.failed":["plan","stop"], "plan.submitted":["plan","judge"],
+  "plan.checked":["plan","judge"], "plan.accepted":["plan","go"],
+  "plan.rejected":["plan","stop"], "plan.draft-failed":["plan","stop"],
+
+  "stage.opened":["build","work"], "shard.opened":["build","work"],
+  "shard.file-written":["build","work"], "shard.check-ran":["build","work"],
+  "shard.submitted":["build","judge"], "shard.built":["build","judge"],
+  "shard.abandoned":["build","stop"], "shard.invalid-verdict":["build","stop"],
+  "shard.silent":["build","stop"], "scope.violated":["build","stop"],
+  "review.submitted":["build","judge"], "review.failed":["build","stop"],
+  "review.invalid-verdict":["build","stop"], "shard.approved":["build","go"],
+  "shard.changes-requested":["build","stop"], "fix.opened":["build","work"],
+  "shard.escalated":["build","stop"], "stage.closed":["build","work"],
+  "stage.mergeable":["build","judge"], "merge.attempted":["build","judge"],
+  "stage.merged":["build","go"], "stage.conflicted":["build","stop"],
+  "stages.exhausted":["build","work"], "run.built":["build","go"],
+
+  "suite.ran":["gate","judge"], "suite.errored":["gate","stop"],
+  "gate.assessed":["gate","judge"], "assess.failed":["gate","stop"],
+  "gate.cleared":["gate","go"], "gate.blocked":["gate","stop"],
+  "gate.invalid-verdict":["gate","stop"], "approval.requested":["gate","hold"],
+  "approval.granted":["gate","go"],
+
+  "branch.pushed":["promote","work"], "branch.push-failed":["promote","stop"],
+  "pr.opened":["promote","work"], "pr.open-failed":["promote","stop"],
+  "checks.observed":["promote","judge"], "checks.reported":["promote","judge"],
+  "checks.detailed":["promote","judge"], "checks.detail-failed":["promote","stop"],
+  "checks.passed":["promote","go"], "checks.failed":["promote","stop"],
+  "checks.silent":["promote","stop"], "checks.unknown-pr":["promote","stop"],
+  "pr.merged":["promote","go"], "pr.merge-failed":["promote","stop"],
+
+  "notes.planned":["docs","work"], "notes.plan-failed":["docs","stop"],
+  "note.drafted":["docs","work"], "note.written":["docs","go"],
+  "note.write-failed":["docs","stop"], "notes.synced":["docs","go"],
+
+  /* Run-level: no single block owns them. */
+  "run.completed":[null,"go"], "run.halted":[null,"stop"],
+  "control.unknown-event":[null,"stop"],
 };
 
-const BAD  = /halted|failed|violated|blocked|invalid|conflicted|abandoned|escalated|silent|unknown-event|errored/;
-const GOOD = /completed|approved|merged|passed|cleared|synced|written|accepted|built|ready/;
-const PARK = /approval\.requested/;
-const WARN = /requested|changes|rejected|opened|submitted/;
+const SEVERITIES = ["go", "work", "judge", "stop", "hold"];
 
-function kind(type) {
-  if (PARK.test(type)) return "k-park";
-  if (BAD.test(type)) return "k-bad";
-  if (GOOD.test(type)) return "k-good";
-  if (WARN.test(type)) return "k-warn";
-  return "k-info";
-}
+function blockOf(type) { return (EVENT[type] || [])[0] || null; }
+
+/* An unmapped topic is a real signal: the topology publishes something this
+   page does not understand. Say so in the loudest colour rather than hiding it
+   among the informational rows, which is where the old default sent it. */
+function sev(type) { return (EVENT[type] || [])[1] || "unmapped"; }
 
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g,
   (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
@@ -238,10 +318,14 @@ function runFor(id) {
     runs.set(id, {
       key: id, repo: "unknown", issue: null, title: null,
       blocks: Object.fromEntries(BLOCKS.map((b) => [b, "idle"])),
+      counts: Object.fromEntries(BLOCKS.map((b) => [b, 0])),
       shards: new Map(), stages: new Map(), rounds: 0, attempt: 1,
       verdict: { label: "opening", cls: "", detail: "" },
       first: Date.now(), last: Date.now(), state: "running",
       worktree: null, base: null, notes: [], suite: null, pr: null,
+      // Every event moves these three, which is what guarantees the card
+      // reacts even when no block changes state.
+      events: 0, tick: null, pulse: null,
     });
   }
   return runs.get(id);
@@ -304,7 +388,19 @@ function apply(msg) {
   if (p.base_sha) run.base = p.base_sha;
   if (p.attempt) run.attempt = p.attempt;
 
-  const block = BLOCK_OF[t];
+  const block = blockOf(t);
+  const meaning = sev(t);
+
+  // Unconditional, before any switch. Every event advances the counter, names
+  // itself on the tick line, and flashes the rail it belongs to — so an event
+  // that changes no state is still visibly an event, which is the whole point.
+  run.events++;
+  run.tick = { type: t, sev: meaning, at: run.last };
+  if (block) {
+    run.counts[block] = (run.counts[block] || 0) + 1;
+    run.pulse = { block, sev: meaning, at: Date.now() };
+  }
+
   if (block && run.blocks[block] === "idle") run.blocks[block] = "active";
 
   const set = (b, s) => { run.blocks[b] = s; };
@@ -312,8 +408,16 @@ function apply(msg) {
     if (run.blocks[x] !== "failed") run.blocks[x] = "done";
   });
 
+  // Milestones set the verdict too, not only failures. Without them the line
+  // latches on the last bad news and keeps shouting it while the run recovers:
+  // a card reading CHANGES REQUESTED while the register showed the same run
+  // already at checks.reported.
+  const milestone = (label) => {
+    run.verdict = { label, cls: "v-green", detail: "" };
+  };
+
   switch (t) {
-    case "plan.accepted": set("plan", "done"); break;
+    case "plan.accepted": set("plan", "done"); milestone("PLAN ACCEPTED"); break;
     case "plan.rejected": run.verdict = { label: "PLAN REJECTED", cls: "v-amber",
       detail: (p.violations || []).join("; ") }; break;
     case "workspace.failed": case "issue.fetch-failed": case "survey.failed":
@@ -323,8 +427,14 @@ function apply(msg) {
     case "shard.opened": run.shards.set(p.shard_id, "building");
       if (p.stage_id) run.stages.set(p.stage_id, p.shard_count || 0);
       before("build"); break;
-    case "shard.built": run.shards.set(p.shard_id, "review"); break;
-    case "shard.approved": run.shards.set(p.shard_id, "done"); break;
+    case "shard.submitted": case "shard.built":
+      run.shards.set(p.shard_id, "review"); break;
+    case "shard.approved": run.shards.set(p.shard_id, "done");
+      milestone("SHARD APPROVED"); break;
+    case "shard.changes-requested": run.shards.set(p.shard_id, "fixing");
+      run.rounds = Math.max(run.rounds, p.round || 0);
+      run.verdict = { label: "CHANGES REQUESTED", cls: "v-red",
+        detail: p.shard_id ? p.shard_id + " round " + (p.round || 1) : "" }; break;
     case "fix.opened": run.shards.set(p.shard_id, "fixing");
       run.rounds = Math.max(run.rounds, p.round || 0); break;
     case "shard.escalated": case "shard.abandoned": case "scope.violated":
@@ -332,15 +442,20 @@ function apply(msg) {
       run.shards.set(p.shard_id, "escalated");
       run.verdict = { label: t.split(".")[1].toUpperCase().replace(/-/g, " "),
         cls: "v-red", detail: p.reason || p.path || "" }; break;
-    case "stage.merged": break;
-    case "run.built": set("build", "done"); before("gate"); break;
+    case "stage.merged": run.merged = (run.merged || 0) + 1;
+      run.shards.clear(); break;   // the next stage opens its own shards
+    case "stage.conflicted": set("build", "failed");
+      run.verdict = { label: "STAGE CONFLICTED", cls: "v-red",
+        detail: p.stage_id || "" }; break;
+    case "run.built": set("build", "done"); before("gate"); milestone("BUILT"); break;
     case "suite.ran": run.suite = p.ran
       ? (p.ok ? "suite passed" : "suite FAILED") : "no suite ran"; break;
-    case "gate.cleared": set("gate", "done"); before("promote"); break;
+    case "gate.cleared": set("gate", "done"); before("promote"); milestone("GATE CLEARED"); break;
     case "approval.requested": set("gate", "parked"); run.state = "parked";
       run.verdict = { label: "AWAITING APPROVAL", cls: "v-violet",
         detail: p.rationale || "" }; break;
-    case "approval.granted": set("gate", "done"); run.state = "running"; break;
+    case "approval.granted": set("gate", "done"); run.state = "running";
+      milestone("APPROVED"); break;
     case "gate.blocked": set("gate", "failed");
       run.verdict = { label: "BLOCKED", cls: "v-red",
         detail: (p.reasons || []).join("; ") || p.rationale || "" }; break;
@@ -348,14 +463,29 @@ function apply(msg) {
       set("promote", "failed");
       run.verdict = { label: "PROMOTE FAILED", cls: "v-red", detail: p.error || "" }; break;
     case "pr.opened": run.pr = p.pr || p.url; break;
-    case "pr.merged": set("promote", "done"); before("docs"); break;
+    case "checks.passed": run.suite = "checks passed"; milestone("CHECKS PASSED"); break;
+    case "checks.failed": run.suite = "checks FAILED";
+      run.verdict = { label: "CHECKS FAILED", cls: "v-red",
+        detail: (p.failed || []).join(", ") }; break;
+    case "checks.silent": case "checks.unknown-pr":
+      set("promote", "failed");
+      run.verdict = { label: t.split(".")[1].toUpperCase().replace(/-/g, " "),
+        cls: "v-red", detail: p.reason || p.branch || "" }; break;
+    case "pr.merged": set("promote", "done"); before("docs"); milestone("MERGED"); break;
     case "note.written": run.notes.push(p.note); break;
-    case "notes.synced": set("docs", "done"); break;
+    case "notes.plan-failed": case "note.write-failed":
+      set("docs", "failed");
+      run.verdict = { label: "NOTES FAILED", cls: "v-red",
+        detail: p.error || p.note || "" }; break;
+    case "notes.synced": set("docs", "done"); milestone("NOTES SYNCED"); break;
     case "run.completed": BLOCKS.forEach((b) => { if (run.blocks[b] !== "failed") run.blocks[b] = "done"; });
       run.state = "stopped";
       run.verdict = { label: "COMPLETE", cls: "v-green", detail: run.suite || "" }; break;
     case "run.halted": run.state = "halted";
-      if (block) set(block, "failed");
+      // A halt names no block, so nothing on the track used to turn red and the
+      // card claimed HALTED above five rails that still read as progressing.
+      // The block it died in is the first one not yet finished.
+      set(BLOCKS.find((b) => run.blocks[b] !== "done") || BLOCKS[0], "failed");
       run.verdict = { label: "HALTED", cls: "v-red", detail: p.reason || "" }; break;
   }
 
@@ -367,14 +497,20 @@ function apply(msg) {
 /* ── rendering ───────────────────────────────────────────────────────── */
 
 function shardSidings(run) {
-  if (!run.shards.size) return "";
-  const order = ["building", "review", "fixing", "escalated", "done"];
+  const stages = run.merged
+    ? '<span class="sub">' + run.merged + " stage" + (run.merged === 1 ? "" : "s") +
+      " merged</span>"
+    : "";
+  // Shards are cleared when a stage merges, so between stages the only honest
+  // thing to show is how many stages are behind us.
+  if (!run.shards.size) return stages;
   const lamps = [...run.shards.entries()]
     .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
     .map(([sid, st]) => '<span class="shard-lamp s-' + esc(st) + '" title="' +
       esc(sid + " · " + st) + '"></span>');
   const done = [...run.shards.values()].filter((s) => s === "done").length;
   return '<span class="sub">' + done + "/" + run.shards.size + " shards" +
+    (run.merged ? " · " + run.merged + " merged" : "") +
     (run.rounds ? ' <span class="rounds">&#8635; R' + run.rounds + "</span>" : "") +
     "</span>" + '<div class="sidings">' + lamps.join("") + "</div>";
 }
@@ -390,14 +526,31 @@ function headLamp(run) {
 }
 
 function renderRun(run, now) {
+  // The flash is time-bounded rather than latched, so the 15s idle re-render
+  // that keeps the age column honest does not replay it.
+  const hot = run.pulse && now - run.pulse.at < 1200 ? run.pulse : null;
+
   const track = BLOCKS.map((b) => {
     const st = run.blocks[b];
     const sub = b === "build" ? shardSidings(run)
       : (b === "plan" && run.attempt > 1 ? '<span class="sub">attempt ' + run.attempt + "</span>" : "");
-    return '<div class="block ' + esc(st) + '"><span class="lamp ' +
-      esc(LAMP_FOR[st] || "") + '"></span><span class="bname">' + esc(b) + "</span>" +
-      sub + "</div>";
+    const n = run.counts[b] || 0;
+    const flash = hot && hot.block === b ? " pulse sev-" + esc(hot.sev) : "";
+    return '<div class="block ' + esc(st) + flash + '"><span class="lamp ' +
+      esc(LAMP_FOR[st] || "") + '"></span>' +
+      (n ? '<span class="bcount">' + n + "</span>" : "") +
+      '<span class="bname">' + esc(b) + "</span>" + sub + "</div>";
   }).join("");
+
+  const tick = run.tick
+    ? '<div class="tick sev-' + esc(run.tick.sev) + (hot ? " fresh" : "") + '">' +
+        '<span class="tdot"></span>' +
+        '<span class="ttime">' +
+          new Date(run.tick.at).toLocaleTimeString([], { hour12:false }) + "</span>" +
+        '<span class="ttype">' + esc(run.tick.type) + "</span>" +
+        '<span class="tcount">' + run.events + " events</span>" +
+      "</div>"
+    : "";
 
   const attention = run.state === "halted" ||
     [...run.shards.values()].some((s) => s === "escalated");
@@ -412,7 +565,7 @@ function renderRun(run, now) {
       '<span class="livery ' + esc(run.state) + '">' + esc(run.state) + "</span>" +
       '<span class="run-age">' + age(now, run.last) + " ago</span>" +
     "</button>" +
-    '<div class="track">' + track + "</div>" +
+    '<div class="track">' + track + "</div>" + tick +
     '<div class="verdict ' + esc(run.verdict.cls) + '"><b>' + esc(run.verdict.label) + "</b>" +
       "<span>" + esc(run.verdict.detail) + "</span></div>" +
     '<details class="drawer"' + (openDrawers.has(run.key) ? " open" : "") +
@@ -456,7 +609,7 @@ function renderBoard() {
 
 function renderFeed() {
   const el = document.getElementById("feed");
-  const shown = feed.filter((e) => !filter || kind(e.type) === filter).slice(0, 250);
+  const shown = feed.filter((e) => !filter || sev(e.type) === filter).slice(0, 250);
   if (!shown.length) { el.innerHTML = '<div class="empty">No events match.</div>'; return; }
   el.innerHTML = shown.map((e) => {
     const invocation = invocationFor(e);
@@ -464,7 +617,7 @@ function renderFeed() {
       ? '<span class="badge">' + esc(invocation.runner) +
         (invocation.model == null ? "" : " · " + esc(invocation.model)) + "</span>"
       : "";
-    return '<div class="ev ' + kind(e.type) + '">' +
+    return '<div class="ev sev-' + esc(sev(e.type)) + '">' +
       '<div class="hd"><span>' + new Date(e.timestamp).toLocaleTimeString([], { hour12:false }) +
       '</span><span class="ty">' + esc(e.type) + "</span><span>" + esc(e.source || "") +
       "</span>" + badge + "</div>" +
@@ -492,14 +645,20 @@ function summarise(p) {
   return out.join("  ");
 }
 
+/* The filter names ARE the five meanings, so the legend that explains the
+   register also explains the card. An `unmapped` chip appears only once such an
+   event has actually arrived, where it reads as the alarm it is. */
+const SEV_LABEL = { go:"finished", work:"working", judge:"judging",
+                    stop:"stopped", hold:"waiting", unmapped:"unmapped" };
+
 function renderBadges() {
-  const kinds = [["k-good","clear"],["k-warn","caution"],["k-bad","danger"],
-                 ["k-park","waiting"],["k-info","info"]];
+  const present = new Set(feed.map((e) => sev(e.type)));
+  const kinds = SEVERITIES.concat(present.has("unmapped") ? ["unmapped"] : []);
   document.getElementById("badges").innerHTML =
     '<button class="badge' + (filter ? "" : " on") + '" data-filter="">all</button>' +
-    kinds.map(([k, label]) =>
-      '<button class="badge' + (filter === k ? " on" : "") + '" data-filter="' + k + '">' +
-      label + "</button>").join("");
+    kinds.map((k) =>
+      '<button class="badge sev-' + k + (filter === k ? " on" : "") +
+      '" data-filter="' + k + '">' + SEV_LABEL[k] + "</button>").join("");
 }
 
 document.addEventListener("click", (e) => {
@@ -547,8 +706,15 @@ function meta() {
 }
 
 let dirty = false;
+let pending = false;   // one trailing render, to take a spent flash back off
 function schedule() { dirty = true; }
-setInterval(() => { if (dirty) { dirty = false; renderBoard(); renderFeed(); } meta(); }, 800);
+// 800ms is inside the 1200ms pulse window, so no event's flash is missed; the
+// extra pass 1s later is what clears a flash when nothing follows it.
+setInterval(() => {
+  if (dirty) { dirty = false; renderBoard(); renderFeed(); renderBadges(); pending = true; }
+  else if (pending) { pending = false; renderBoard(); }
+  meta();
+}, 800);
 setInterval(renderBoard, 15000);   // keep the age column honest while idle
 
 for (const url of streamUrls()) {

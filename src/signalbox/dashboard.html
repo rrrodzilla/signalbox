@@ -349,8 +349,11 @@ const EVENT = {
   "shard.escalated":["build","stop"], "stage.closed":["build","work"],
   "stage.mergeable":["build","judge"], "merge.attempted":["build","judge"],
   "stage.merged":["build","work"], "stage.conflicted":["build","stop"],
-  "stages.exhausted":["build","go"], "run.built":["build","go"],
+  "stages.exhausted":["build","go"], "run.built":["build","go","rebase-branch","in"],
 
+  "branch.rebase-attempted":["gate","judge","rebase-branch","out"],
+  "branch.rebased":["gate","work"], "branch.rebase-conflicted":["gate","stop"],
+  "branch.rebase-failed":["gate","stop"], "branch.rebase-invalid-verdict":["gate","stop"],
   "suite.ran":["gate","judge","assess","in"], "suite.errored":["gate","stop"],
   "gate.assessed":["gate","judge","assess","out"], "assess.failed":["gate","stop"],
   "gate.cleared":["gate","go"], "gate.blocked":["gate","stop"],
@@ -534,6 +537,18 @@ function recordProvenance(p) {
     ...id, runner: p.runner, model: p.model, produces: p.produces, ok: p.ok,
     stderr: p.stderr, exit_code: p.exit_code, command: p.command,
   });
+  // exec-handler's failure event has no run identity, so the provenance edge
+  // is the only honest way to close this run's rebase window after a runner
+  // crash or timeout. The unattributed failure still appears in the register.
+  if (p.role === "rebase" && p.ok === false && p.run_id && runs.has(p.run_id)) {
+    const run = runs.get(p.run_id);
+    for (const [key, flight] of run.inFlight) {
+      if (flight.node === "rebase-branch") run.inFlight.delete(key);
+    }
+    run.blocks.gate = "failed";
+    run.verdict = { label: "REBASE FAILED", cls: "v-red",
+      detail: p.stderr || "model invocation failed" };
+  }
 }
 
 function renderInvocationFailures(run) {
@@ -700,6 +715,11 @@ function apply(msg) {
       run.verdict = { label: "STAGE CONFLICTED", cls: "v-red",
         detail: p.stage_id || "" }; break;
     case "run.built": set("build", "done"); before("gate"); milestone("BUILT"); break;
+    case "branch.rebased": milestone("REBASED"); break;
+    case "branch.rebase-conflicted": case "branch.rebase-invalid-verdict":
+      set("gate", "failed");
+      run.verdict = { label: "REBASE BLOCKED", cls: "v-red",
+        detail: (p.conflicts || []).join(", ") || p.error || t }; break;
     case "suite.ran": run.suite = p.ran
       ? (p.ok ? "suite passed" : "suite FAILED") : "no suite ran"; break;
     case "gate.cleared": set("gate", "done"); before("promote"); milestone("GATE CLEARED"); break;

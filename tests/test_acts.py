@@ -16,6 +16,8 @@ from signalbox.acts import (
     notify,
     prepare_workspace,
     pr_state_is_merged,
+    push_branch,
+    push_branch_command,
     read_session,
     reap,
     record_session,
@@ -175,6 +177,55 @@ def test_stage_files_deduplicates_and_preserves_order():
 
 def test_stage_files_of_an_empty_stage_is_empty():
     assert stage_files({}) == []
+
+
+def test_push_branch_command_force_pushes_with_a_lease():
+    assert push_branch_command("signalbox/run-sb-113") == [
+        "git",
+        "push",
+        "--force-with-lease",
+        "-u",
+        "origin",
+        "signalbox/run-sb-113",
+    ]
+
+
+def test_push_branch_runs_the_leased_command(tmp_path, monkeypatch):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    calls = []
+
+    def fake_run(cmd, cwd=None, timeout=120):
+        calls.append((cmd, cwd, timeout))
+        return (0, "abc123", "")
+
+    monkeypatch.setattr(acts, "_run", fake_run)
+
+    result = push_branch({"run_id": "sb-113"})
+
+    assert result["ok"] is True
+    assert calls[0] == (
+        push_branch_command("signalbox/run-sb-113"),
+        str(tmp_path / "worktrees" / "sb-113"),
+        120,
+    )
+
+
+def test_push_branch_reports_push_failure_as_data(tmp_path, monkeypatch):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    monkeypatch.setattr(
+        acts,
+        "_run",
+        lambda cmd, cwd=None, timeout=120: (1, "", "lease rejected"),
+    )
+
+    result = push_branch({"run_id": "sb-113"})
+
+    assert result["ok"] is False
+    assert result["error"] == "lease rejected"
 
 
 def _merge_result(tmp_path, monkeypatch, responses):

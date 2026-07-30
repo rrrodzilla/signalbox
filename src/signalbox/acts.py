@@ -289,10 +289,19 @@ def merge_stage(payload: dict) -> dict:
 # ── promotion ────────────────────────────────────────────────────────────────
 
 
+def push_branch_command(branch: str) -> list[str]:
+    """Build the push argv for a branch that may have been rebased."""
+    return ["git", "push", "--force-with-lease", "-u", "origin", branch]
+
+
 def push_branch(payload: dict) -> dict:
     root = str(worktree_for(payload))
     branch = branch_for(payload)
-    code, _, err = _run(["git", "push", "-u", "origin", branch], cwd=root, timeout=120)
+    # The lease is a fix-loop and approval re-entry safety net, not the primary
+    # rebase path. Force-pushing an existing PR makes its old suite stale or
+    # cancelled, and the check router deliberately drops those conclusions, so
+    # the rebase belongs before the first push and this only protects a repeat.
+    code, _, err = _run(push_branch_command(branch), cwd=root, timeout=120)
     if code != 0:
         return {**payload, "ok": False, "error": err}
     _, sha, _ = _run(["git", "rev-parse", "HEAD"], cwd=root)

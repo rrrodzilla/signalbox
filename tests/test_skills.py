@@ -48,7 +48,7 @@ ALL_SKILLS = sorted(set(ROLE_SKILLS.values()) | dispatch_skills())
 
 
 def test_every_role_and_dispatch_names_a_distinct_skill():
-    assert len(ALL_SKILLS) == 8, ALL_SKILLS
+    assert len(ALL_SKILLS) == 9, ALL_SKILLS
 
 
 def test_the_planners_subagent_skills_exist_though_no_role_names_them():
@@ -79,6 +79,7 @@ def test_skill_exists_with_frontmatter(skill: str):
     "skill,vocabulary",
     [
         ("signalbox-review", ("approved", "changes_requested")),
+        ("signalbox-rebase", ("ok", "rebased_onto_sha", "conflicts")),
         ("signalbox-assess", ("clear", "needs_human", "block")),
         ("signalbox-audit-plan", ("approved", "changes_requested")),
     ],
@@ -100,6 +101,19 @@ def test_acting_skills_document_only_emittable_events():
             event = line.split("signalbox emit ", 1)[1].split()[0]
             assert event in ALLOWED_EVENTS, f"{skill} teaches unemittable {event!r}"
     assert "model.invoked" not in ALLOWED_EVENTS
+
+
+def test_rebase_skill_targets_the_live_base_tip_and_preserves_launch_identity():
+    body = (SKILLS / "signalbox-rebase" / "SKILL.md").read_text()
+    assert "LIVE tip" in body
+    assert "git fetch origin" in body
+    assert "origin/<base_branch>" in body
+    assert "never the carried `base_sha`" in body
+    assert "do not overwrite `base_sha`" in body
+    assert "`run.built`" in body
+    assert "`branch.rebased`" in body
+    assert "`branch.rebase-conflicted`" in body
+    assert "dropping a hunk" in body
 
 
 def test_operator_approval_is_a_cli_act_not_an_agent_event():

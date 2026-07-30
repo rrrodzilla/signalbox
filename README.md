@@ -63,12 +63,12 @@ run.requested ─> workspace.ready ─> issue.fetched
                                        └─> stage.opened     stages.exhausted                                    │
                                                  ┌──────────────────────────────────────────────────────────────┘
                                                  ▼
-                                             run.built ─> suite.ran ─> gate.assessed
-                                                                            │
-                                   ┌────────────────────────────────────────┤
-                             gate.cleared                         approval.requested
-                                   │                                        │
-                                   └──────────> branch.pushed <── approval.granted
+                                             run.built ─> branch.rebased ─> suite.ran ─> gate.assessed
+                                                                                               │
+                                   ┌───────────────────────────────────────────────────────────┤
+                             gate.cleared                                            approval.requested
+                                   │                                                           │
+                                   └─────────────────> branch.pushed <────────────── approval.granted
                                                      │
                                                  pr.opened
                                                      │

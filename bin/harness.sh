@@ -17,6 +17,8 @@ DASHBOARD_LOG="$LOG_DIR/dashboard.log"
 DASHBOARD_PIDFILE="$LOG_DIR/dashboard.pid"
 FORWARD_LOG="$LOG_DIR/forward.log"
 FORWARD_PIDFILE="$LOG_DIR/forward.pid"
+FORWARD_CHILD_PIDFILE="$LOG_DIR/forward.child.pid"
+FORWARD_READYFILE="$LOG_DIR/forward.ready"
 
 CONTROL_PORT=8100
 STREAM_PORT=8101
@@ -198,9 +200,13 @@ status() {
   local fpid
   fpid="$(forward_pid || true)"
   if [[ -n "$fpid" ]]; then
-    say "forwarder: up (pid $fpid, $(cat "$LOG_DIR/forward.repo" 2>/dev/null || echo unknown))"
+    if [[ -f "$FORWARD_READYFILE" ]]; then
+      say "forwarder: up (pid $fpid, $(cat "$LOG_DIR/forward.repo" 2>/dev/null || echo unknown))"
+    else
+      say "FORWARDER FAILURE: supervisor up but tunnel is not connected — inspect retries with: tail -f $FORWARD_LOG"
+    fi
   else
-    say "forwarder: down — a run will reach pr.opened and then wait for a delivery that cannot arrive"
+    say "FORWARDER FAILURE: down — restore it with: $0 forward <owner/name>"
   fi
   for entry in "control:$CONTROL_PORT" "stream:$STREAM_PORT" \
                "topology:$TOPOLOGY_PORT" "dashboard:$DASHBOARD_PORT" \
@@ -235,6 +241,51 @@ forward_pid() {
   [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && printf '%s' "$pid"
 }
 
+forward_supervise() {
+  local repo="$1"
+  local backoff=1
+  local stopping=0
+  local child=""
+
+  stop_forward_child() {
+    stopping=1
+    if [[ -n "$child" ]]; then
+      kill -TERM "$child" 2>/dev/null || true
+      wait "$child" 2>/dev/null || true
+    fi
+  }
+  trap stop_forward_child TERM INT EXIT
+
+  while ((stopping == 0)); do
+    rm -f "$FORWARD_READYFILE"
+    printf '[%s] starting webhook forwarder for %s\n' "$(date -Is)" "$repo"
+    gh webhook forward \
+      --repo="$repo" \
+      --events=check_suite \
+      --url="http://127.0.0.1:$GITHUB_PORT/github" &
+    child="$!"
+    printf '%s' "$child" >"$FORWARD_CHILD_PIDFILE"
+    sleep 1
+    if kill -0 "$child" 2>/dev/null; then
+      : >"$FORWARD_READYFILE"
+      printf '[%s] webhook forwarder is running\n' "$(date -Is)"
+    fi
+    wait "$child" 2>/dev/null || true
+    child=""
+    rm -f "$FORWARD_CHILD_PIDFILE" "$FORWARD_READYFILE"
+    ((stopping == 0)) || break
+    printf '[%s] webhook forwarder exited; restarting in %ss\n' "$(date -Is)" "$backoff"
+    sleep "$backoff" &
+    child="$!"
+    wait "$child" 2>/dev/null || true
+    child=""
+    if ((backoff < 30)); then
+      backoff=$((backoff * 2))
+      ((backoff > 30)) && backoff=30
+    fi
+  done
+}
+
 forward_up() {
   local repo="${1:-$FORWARD_REPO}"
   [[ -n "$repo" ]] || fail "usage: $0 forward <owner/name>"
@@ -250,23 +301,28 @@ forward_up() {
 
   mkdir -p "$LOG_DIR"
   printf '%s' "$repo" >"$LOG_DIR/forward.repo"
+  rm -f "$FORWARD_READYFILE"
+  : >"$FORWARD_LOG"
   say "forwarding $repo check suites to http://127.0.0.1:$GITHUB_PORT/github"
-  nohup gh webhook forward \
-    --repo="$repo" \
-    --events=check_suite \
-    --url="http://127.0.0.1:$GITHUB_PORT/github" \
-    >"$FORWARD_LOG" 2>&1 &
+  nohup "$0" _forward-supervise "$repo" >"$FORWARD_LOG" 2>&1 &
   printf '%s' "$!" >"$FORWARD_PIDFILE"
 
-  # It either establishes the websocket or it does not; a forwarder that failed
-  # to authenticate looks exactly like one waiting for a delivery.
-  sleep 3
+  local deadline=$((SECONDS + 3))
+  until [[ -f "$FORWARD_READYFILE" ]] \
+    || grep -q 'webhook forwarder exited' "$FORWARD_LOG" 2>/dev/null; do
+    ((SECONDS < deadline)) || break
+    sleep 0.1
+  done
   if [[ -z "$(forward_pid || true)" ]]; then
     say "  forwarder exited immediately:"
     sed 's/^/    /' "$FORWARD_LOG" >&2
     fail "webhook forwarding did not start"
   fi
-  say "  forwarder up (pid $(forward_pid))"
+  if [[ -f "$FORWARD_READYFILE" ]]; then
+    say "  forwarder up (pid $(forward_pid))"
+  else
+    say "  forwarder supervisor up, but the tunnel has not connected; retrying with capped backoff (see $FORWARD_LOG)"
+  fi
 }
 
 forward_down() {
@@ -277,9 +333,18 @@ forward_down() {
   else
     say "stopping forwarder: $pid"
     kill -TERM "$pid" 2>/dev/null || true
-    sleep 1
+    local deadline=$((SECONDS + 10))
+    while kill -0 "$pid" 2>/dev/null; do
+      ((SECONDS < deadline)) || { kill -9 "$pid" 2>/dev/null || true; break; }
+      sleep 1
+    done
   fi
-  rm -f "$FORWARD_PIDFILE"
+  local child=""
+  [[ -f "$FORWARD_CHILD_PIDFILE" ]] && child="$(cat "$FORWARD_CHILD_PIDFILE" 2>/dev/null || true)"
+  if [[ -n "$child" ]] && kill -0 "$child" 2>/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true
+  fi
+  rm -f "$FORWARD_PIDFILE" "$FORWARD_CHILD_PIDFILE" "$FORWARD_READYFILE"
 }
 
 # ── launch ───────────────────────────────────────────────────────────────────
@@ -290,6 +355,36 @@ launch() {
   (($# >= 1)) || fail "usage: $0 launch <issue> [--repo owner/name] [--repo-path DIR] [--run-id ID] ..."
   [[ -n "$(engine_pids)" ]] || fail "no engine running; start one with: $0 up"
   port_held "$CONTROL_PORT" || fail "control endpoint is not listening on $CONTROL_PORT"
+  local promote_capable=0
+  local repo_path="$PWD"
+  local previous=""
+  local arg
+  for arg in "$@"; do
+    if [[ "$previous" == "--repo-path" ]]; then
+      repo_path="$arg"
+      previous=""
+      continue
+    fi
+    case "$arg" in
+      --repo|--repo=*) promote_capable=1 ;;
+      --repo-path=*) repo_path="${arg#--repo-path=}" ;;
+      --repo-path) previous="--repo-path" ;;
+    esac
+  done
+  local repo_root=""
+  repo_root="$(git -C "$repo_path" rev-parse --show-toplevel 2>/dev/null || true)"
+  local exact_repo_path=""
+  exact_repo_path="$(cd "$repo_path" 2>/dev/null && pwd -P || true)"
+  if [[ -n "$repo_root" && "$repo_root" == "$exact_repo_path" ]] \
+    && git -C "$repo_root" remote get-url origin >/dev/null 2>&1; then
+    promote_capable=1
+  fi
+  if [[ -z "$(forward_pid || true)" ]]; then
+    if ((promote_capable)); then
+      fail "webhook forwarder is down; restore it with: $0 forward <owner/name>"
+    fi
+    say "  warning: webhook forwarder is down; continuing because this run has no resolvable promote path"
+  fi
   signalbox launch "$@"
 }
 
@@ -326,6 +421,7 @@ case "${1:-}" in
   dogfood)   shift; dogfood "$@" ;;
   forward)   shift; forward_up "$@" ;;
   unforward) shift; forward_down ;;
+  _forward-supervise) shift; forward_supervise "$@" ;;
   *)
     cat >&2 <<USAGE
 usage: $0 <command>

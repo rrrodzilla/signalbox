@@ -8,6 +8,7 @@ accident.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,8 +23,10 @@ from signalbox.agent import (
 )
 from signalbox.dispatch import (
     claude_command,
+    claude_resume_command,
     codex_command,
     codex_prompt,
+    codex_resume_command,
     model_for as dispatch_model_for,
     runner_for,
 )
@@ -157,6 +160,32 @@ def test_codex_runs_in_the_worktree_and_can_reach_the_control_endpoint():
     assert "sandbox_workspace_write.network_access=true" in joined
     assert 'shell_environment_policy.inherit="all"' in joined
     assert "workspace-write" in joined
+
+
+def test_resume_commands_preserve_session_sandbox_and_current_scope():
+    payload = {"shard_id": "a", "round": 2, "declared": ["src/only.py"]}
+
+    claude = claude_resume_command("signalbox-fix", payload, "sonnet", "session-1")
+    assert claude[claude.index("--resume") + 1] == "session-1"
+    assert "--session-id-source" not in claude
+    assert "src/only.py" in claude[claude.index("-p") + 1]
+
+    codex = codex_resume_command(None, "session-2")
+    assert codex[:3] == ["codex", "exec", "resume"]
+    assert codex[-2:] == ["session-2", "-"]
+    assert "-C" not in codex and "--sandbox" not in codex and "-s" not in codex
+    joined = " ".join(codex)
+    assert 'sandbox_mode="workspace-write"' in joined
+    assert "sandbox_workspace_write.network_access=true" in joined
+    assert 'shell_environment_policy.inherit="all"' in joined
+
+
+def test_cold_start_commands_request_a_session_identity():
+    claude = claude_command(
+        "signalbox-fix", {"shard_id": "a"}, "sonnet", "minted-uuid"
+    )
+    assert claude[claude.index("--session-id") + 1] == "minted-uuid"
+    assert "--json" in codex_command(Path("/tmp/wt"), None)
 
 
 def test_codex_names_the_skill_in_its_own_mention_syntax():
@@ -395,3 +424,189 @@ def test_acting_nonzero_invocation_still_posts_provenance(tmp_path, monkeypatch)
         "shard.submitted",
         False,
     )
+
+
+def test_dispatch_resumes_matching_stored_codex_session(monkeypatch, tmp_path):
+    calls = []
+    recorded = []
+    payload = {
+        "run_id": "r1",
+        "shard_id": "a",
+        "round": 2,
+        "declared": ["src/only.py"],
+    }
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path / "state"))
+    monkeypatch.setattr(dispatch, "worktree_for", lambda payload: tmp_path)
+    monkeypatch.setattr(dispatch, "require_skill", lambda *args: None)
+    monkeypatch.setattr(
+        dispatch,
+        "read_session",
+        lambda *args: {"runner": "codex", "session_id": "thread-123"},
+    )
+    monkeypatch.setattr(
+        dispatch, "record_session", lambda *args: recorded.append(args)
+    )
+    monkeypatch.setattr(
+        dispatch.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or SimpleNamespace(
+            returncode=0,
+            stdout='{"type":"thread.started","thread_id":"thread-current"}\n',
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(dispatch, "post_provenance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dispatch.sys, "stdin", SimpleNamespace(read=lambda: json.dumps(payload)))
+
+    assert dispatch.main(["--skill", "signalbox-fix"]) == 0
+    command, kwargs = calls[0]
+    assert command[:3] == ["codex", "exec", "resume"]
+    assert command[-2] == "thread-123"
+    assert "--json" in command
+    assert kwargs["cwd"] == str(tmp_path)
+    assert kwargs["env"]["SIGNALBOX_SESSION_ID"] == "thread-123"
+    assert '"declared": [\n    "src/only.py"\n  ]' in kwargs["input"]
+    assert recorded == [("r1", "a", "codex", "thread-current")]
+
+
+@pytest.mark.parametrize("round_number", [1, 2])
+def test_successful_codex_cold_start_records_jsonl_thread(
+    monkeypatch, tmp_path, round_number
+):
+    recorded = []
+    payload = {
+        "run_id": "r1",
+        "shard_id": "a",
+        "round": round_number,
+        "declared": [],
+    }
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path / "state"))
+    monkeypatch.setattr(dispatch, "worktree_for", lambda payload: tmp_path)
+    monkeypatch.setattr(dispatch, "require_skill", lambda *args: None)
+    monkeypatch.setattr(dispatch, "read_session", lambda *args: None)
+    monkeypatch.setattr(
+        dispatch,
+        "record_session",
+        lambda *args: recorded.append(args),
+    )
+    monkeypatch.setattr(
+        dispatch.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout='{"type":"thread.started","thread_id":"thread-new"}\n',
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(dispatch, "post_provenance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dispatch.sys, "stdin", SimpleNamespace(read=lambda: json.dumps(payload)))
+
+    assert dispatch.main(["--skill", "signalbox-implement"]) == 0
+    assert recorded == [("r1", "a", "codex", "thread-new")]
+
+
+def test_failed_codex_resume_falls_back_and_records_replacement(monkeypatch, tmp_path):
+    calls = []
+    recorded = []
+    payload = {"run_id": "r1", "shard_id": "a", "round": 2, "declared": []}
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path / "state"))
+    monkeypatch.setattr(dispatch, "worktree_for", lambda payload: tmp_path)
+    monkeypatch.setattr(dispatch, "require_skill", lambda *args: None)
+    monkeypatch.setattr(
+        dispatch,
+        "read_session",
+        lambda *args: {"runner": "codex", "session_id": "thread-stale"},
+    )
+    monkeypatch.setattr(
+        dispatch, "record_session", lambda *args: recorded.append(args)
+    )
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        if "resume" in command:
+            return SimpleNamespace(returncode=1, stdout="", stderr="missing thread")
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"type":"thread.started","thread_id":"thread-new"}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(dispatch.subprocess, "run", run)
+    monkeypatch.setattr(dispatch, "post_provenance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        dispatch.sys, "stdin", SimpleNamespace(read=lambda: json.dumps(payload))
+    )
+
+    assert dispatch.main(["--skill", "signalbox-fix"]) == 0
+    assert calls[0][0][:3] == ["codex", "exec", "resume"]
+    assert calls[1][0][:2] == ["codex", "exec"]
+    assert calls[1][0][:3] != ["codex", "exec", "resume"]
+    assert calls[1][1]["env"]["SIGNALBOX_SESSION_ID"] == ""
+    assert recorded == [("r1", "a", "codex", "thread-new")]
+
+
+def test_failed_codex_resume_with_output_does_not_run_shard_twice(
+    monkeypatch, tmp_path
+):
+    calls = []
+    recorded = []
+    payload = {"run_id": "r1", "shard_id": "a", "round": 2, "declared": []}
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path / "state"))
+    monkeypatch.setattr(dispatch, "worktree_for", lambda payload: tmp_path)
+    monkeypatch.setattr(dispatch, "require_skill", lambda *args: None)
+    monkeypatch.setattr(
+        dispatch,
+        "read_session",
+        lambda *args: {"runner": "codex", "session_id": "thread-stale"},
+    )
+    monkeypatch.setattr(
+        dispatch, "record_session", lambda *args: recorded.append(args)
+    )
+    monkeypatch.setattr(
+        dispatch.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or SimpleNamespace(
+            returncode=1,
+            stdout='{"type":"thread.started","thread_id":"thread-current"}\n'
+            '{"type":"item.completed","item":{"type":"agent_message"}}\n',
+            stderr="stream closed",
+        ),
+    )
+    monkeypatch.setattr(dispatch, "post_provenance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        dispatch.sys, "stdin", SimpleNamespace(read=lambda: json.dumps(payload))
+    )
+
+    assert dispatch.main(["--skill", "signalbox-fix"]) == 1
+    assert len(calls) == 1
+    assert recorded == [("r1", "a", "codex", "thread-current")]
+
+
+def test_failed_codex_cold_start_still_records_jsonl_thread(monkeypatch, tmp_path):
+    recorded = []
+    payload = {"run_id": "r1", "shard_id": "a", "round": 1, "declared": []}
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path / "state"))
+    monkeypatch.setattr(dispatch, "worktree_for", lambda payload: tmp_path)
+    monkeypatch.setattr(dispatch, "require_skill", lambda *args: None)
+    monkeypatch.setattr(dispatch, "read_session", lambda *args: None)
+    monkeypatch.setattr(
+        dispatch, "record_session", lambda *args: recorded.append(args)
+    )
+    monkeypatch.setattr(
+        dispatch.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout='{"type":"thread.started","thread_id":"thread-new"}\n',
+            stderr="rate limited",
+        ),
+    )
+    monkeypatch.setattr(dispatch, "post_provenance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        dispatch.sys, "stdin", SimpleNamespace(read=lambda: json.dumps(payload))
+    )
+
+    assert dispatch.main(["--skill", "signalbox-implement"]) == 1
+    assert recorded == [("r1", "a", "codex", "thread-new")]

@@ -35,6 +35,7 @@ _ENV_KEYS = {
     "shard_count": "SIGNALBOX_SHARD_COUNT",
     "stage_count": "SIGNALBOX_STAGE_COUNT",
     "round": "SIGNALBOX_ROUND",
+    "session_id": "SIGNALBOX_SESSION_ID",
 }
 
 _NUMERIC_FIELDS = frozenset({"shard_count", "stage_count", "round", "issue"})

@@ -991,6 +991,43 @@ def test_a_run_level_invocation_cannot_match_a_shard_scoped_entry():
     )
 
 
+def test_a_topic_producer_wins_when_two_invocations_share_a_run():
+    """Issue #98: plan.audited must resolve to its audit invocation."""
+    matcher = PAGE_TEXT[
+        PAGE_TEXT.index("function invocationFor") : PAGE_TEXT.index(
+            "function isProvenance"
+        )
+    ]
+    preference = "const produces = invocation.produces === entry.type;"
+    selection = "(produces && !bestProduces)"
+    assert preference in matcher
+    assert selection in matcher
+    assert matcher.index(preference) < matcher.index(selection)
+
+
+def test_recorded_provenance_keeps_the_topic_an_invocation_produces():
+    """Issue #98: the client must retain the server's producer discriminator."""
+    recorder = PAGE_TEXT[
+        PAGE_TEXT.index("function recordProvenance") : PAGE_TEXT.index(
+            "let unattributed"
+        )
+    ]
+    assert "produces: p.produces" in recorder
+
+
+def test_an_equal_score_provenance_tie_yields_no_badge():
+    """Issue #98: ambiguous provenance must never depend on arrival order."""
+    matcher = PAGE_TEXT[
+        PAGE_TEXT.index("function invocationFor") : PAGE_TEXT.index(
+            "function isProvenance"
+        )
+    ]
+    tie = "produces === bestProduces && score === bestScore"
+    assert tie in matcher
+    assert "tied = true;" in matcher
+    assert matcher.index(tie) < matcher.index("return tied ? null : best;")
+
+
 def test_the_page_treats_heartbeat_traffic_as_proof_of_life_not_content():
     """Consumed telemetry must not weaken the interval proof-of-life contract.
 

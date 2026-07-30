@@ -662,12 +662,15 @@ subscribes = ["pr.merged"]
 # after the code path has merged.
 publishes = ["notes.planned", "notes.plan-failed", "model.invoked"]
 
+# An empty notes plan has nothing for the fan-out or join to count, so the
+# splitter short-circuits their silence by publishing the join's output topic
+# directly and lets the run reach its terminal.
 [[handlers]]
 name = "split-notes"
 path = "signalbox"
 args = ["primitive", "split-notes"]
 subscribes = ["notes.planned"]
-publishes = ["note.drafted"]
+publishes = ["note.drafted", "notes.synced"]
 
 [[handlers]]
 name = "write-note"

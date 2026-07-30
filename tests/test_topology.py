@@ -147,6 +147,34 @@ def test_every_published_event_has_a_consumer():
     assert not unconsumed, f"nothing consumes: {sorted(unconsumed)}"
 
 
+def test_a_zero_note_plan_can_reach_the_run_terminal():
+    """A zero-note plan once answered with silence and the merged run never reached a terminal."""
+    splitter = next(
+        handler for handler in HANDLERS
+        if "notes.planned" in handler.get("subscribes", [])
+    )
+    assert splitter["name"] == "split-notes"
+    assert "notes.synced" in splitter["publishes"]
+
+    edges = [
+        (incoming, outgoing)
+        for handler in HANDLERS
+        for incoming in handler.get("subscribes", [])
+        for outgoing in handler.get("publishes", [])
+        if incoming in published() and outgoing in subscribed()
+    ]
+    assert ("notes.synced", "run.completed") in edges
+
+    reachable = set(splitter["publishes"])
+    while downstream := {
+        outgoing
+        for incoming, outgoing in edges
+        if incoming in reachable and outgoing not in reachable
+    }:
+        reachable.update(downstream)
+    assert "run.completed" in reachable
+
+
 @pytest.mark.parametrize(
     "continue_handler,exhaust_handler",
     [

@@ -67,10 +67,10 @@ VAULT_ROLES = NOTES_ROLES | {"plan"}
 # that ships its own default model should keep owning it, and a Claude alias in
 # a codex argv fails at the least convenient moment.
 ROLE_MODELS: dict[str, str | None] = {
-    "plan": "fable",
+    "plan": "opus",
     "audit": None,
     "review": "opus",
-    "assess": "fable",
+    "assess": "opus",
     "plan-notes": "sonnet",
     "write-note": "sonnet",
 }

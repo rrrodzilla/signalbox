@@ -203,32 +203,58 @@ def test_every_published_event_has_a_consumer():
     assert not unconsumed, f"nothing consumes: {sorted(unconsumed)}"
 
 
-def test_a_zero_note_plan_can_reach_the_run_terminal():
-    """A zero-note plan once answered with silence and the merged run never reached a terminal."""
-    splitter = next(
-        handler for handler in HANDLERS
-        if "notes.planned" in handler.get("subscribes", [])
-    )
-    assert splitter["name"] == "split-notes"
+def test_notes_planning_fans_out_with_merge_only_after_checks_pass():
+    planner = named(HANDLERS, "plan-notes")
+    merger = named(HANDLERS, "merge-pr")
+    assert planner["subscribes"] == ["checks.passed"]
+    assert merger["subscribes"] == ["checks.passed"]
+    assert "pr.merged" not in planner["subscribes"]
+
+
+def test_run_completion_is_only_published_by_the_two_arm_rendezvous():
+    producers = [handler for handler in HANDLERS
+                 if "run.completed" in handler.get("publishes", [])]
+    assert [handler["name"] for handler in producers] == ["join-completion"]
+
+    joiner = producers[0]
+    assert joiner["path"] == "signalbox"
+    assert joiner["subscribes"] == ["pr.merged", "notes.synced"]
+    args = " ".join(joiner["args"])
+    assert "--key run_id" in args
+    assert "--arms pr.merged,notes.synced" in args
+    assert "--timeout-seconds" in args
+
+
+def test_a_zero_note_plan_needs_the_merge_arm_to_reach_the_run_terminal():
+    """The direct notes terminal is one arm, never a substitute for the merge."""
+    splitter = named(HANDLERS, "split-notes")
+    assert splitter["subscribes"] == ["notes.planned"]
     assert "notes.synced" in splitter["publishes"]
 
-    edges = [
-        (incoming, outgoing)
+    completion = named(HANDLERS, "join-completion")
+    assert completion["subscribes"] == ["pr.merged", "notes.synced"]
+    assert completion["publishes"] == ["run.completed"]
+    assert "--arms" in completion["args"], (
+        "a count join could mistake duplicate notes.synced events for both arms"
+    )
+    assert not any(
+        handler["name"] != "join-completion"
+        and "run.completed" in handler.get("publishes", [])
         for handler in HANDLERS
-        for incoming in handler.get("subscribes", [])
-        for outgoing in handler.get("publishes", [])
-        if incoming in published() and outgoing in subscribed()
-    ]
-    assert ("notes.synced", "run.completed") in edges
+    )
 
-    reachable = set(splitter["publishes"])
-    while downstream := {
-        outgoing
-        for incoming, outgoing in edges
-        if incoming in reachable and outgoing not in reachable
-    }:
-        reachable.update(downstream)
-    assert "run.completed" in reachable
+
+@pytest.mark.parametrize("topic", ["pr.merged", "notes.synced"])
+def test_one_completion_arm_alone_has_no_stateless_path_to_run_completed(topic):
+    """Neither arm may be routed directly to completion, including zero notes."""
+    direct = [
+        handler["name"]
+        for handler in HANDLERS
+        if topic in handler.get("subscribes", [])
+        and "run.completed" in handler.get("publishes", [])
+        and handler["name"] != "join-completion"
+    ]
+    assert direct == []
 
 
 @pytest.mark.parametrize(
@@ -574,6 +600,20 @@ def test_a_concluded_suite_becomes_a_promote_signal(conclusion, expected):
     assert routed["pr"] == 57
     assert routed["run_id"] == "sb-56", "run identity comes from the branch name"
     assert routed["repo"] == "rrrodzilla/signalbox"
+
+
+def test_checks_passed_carries_string_run_identity_to_notes_planning():
+    reported = {
+        "run_id": "sb-69",
+        "repo": "rrrodzilla/signalbox",
+        "issue": 69,
+        "base_sha": "abc123",
+        "conclusion": "success",
+    }
+    passed = route("route-checks-passed", reported)
+    assert passed == reported
+    assert isinstance(passed["run_id"], str)
+    assert named(HANDLERS, "plan-notes")["subscribes"] == ["checks.passed"]
 
 
 @pytest.mark.parametrize("conclusion", ["cancelled", "stale"])

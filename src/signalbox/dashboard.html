@@ -228,6 +228,11 @@ header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 .drawer > summary::before { content:"+ "; }
 .drawer[open] > summary::before { content:"\2212 "; }
 .drawer-body { padding:2px 12px 12px; }
+.group > summary { list-style:none; cursor:pointer; padding:8px 0; margin-top:4px;
+  font-size:10px; text-transform:uppercase; letter-spacing:.18em; color:var(--faint); }
+.group > summary::-webkit-details-marker { display:none; }
+.group > summary::before { content:"+ "; }
+.group[open] > summary::before { content:"\2212 "; }
 .idline { color:var(--faint); font-size:11px; overflow-wrap:anywhere; }
 .idline b { color:var(--dim); font-weight:400; }
 
@@ -397,7 +402,16 @@ const provenance = new Map();
 let totalEvents = 0;
 let filter = null;
 const openDrawers = new Set();
+const openGroups = new Set();
 let selected = null;
+
+/* The page backfills from the store now, so without a horizon a reload replays
+   every run and event the engine has ever seen, and the useful ones drown. An
+   hour is the window in which something is still worth acting on; older than
+   that is history, and history has a queryable home already. The board and the
+   register share this horizon, and both age out on the idle tick rather than
+   only on reload. */
+const HORIZON_MS = 60 * 60 * 1000;
 
 function runFor(id) {
   if (!runs.has(id)) {
@@ -726,29 +740,56 @@ function renderRun(run, now) {
 function renderBoard() {
   const board = document.getElementById("board");
   const now = Date.now();
-  if (!runs.size) {
-    board.innerHTML = '<div class="empty">No runs yet. Launch one with ' +
+  const fresh = [...runs.values()].filter((r) => now - r.last < HORIZON_MS);
+  if (!fresh.length) {
+    board.innerHTML = '<div class="empty">' +
+      (runs.size ? "No runs in the last hour." : "No runs yet.") +
+      " Launch one with " +
       "<code>signalbox launch &lt;issue&gt; --repo-path &lt;path&gt;</code>.</div>";
     return;
   }
   const byRepo = new Map();
-  for (const run of runs.values()) {
+  for (const run of fresh) {
     if (!byRepo.has(run.repo)) byRepo.set(run.repo, []);
     byRepo.get(run.repo).push(run);
   }
   const sections = [...byRepo.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   board.innerHTML = sections.map(([repo, list]) => {
     list.sort((a, b) => b.last - a.last);
-    const live = list.filter((r) => r.state === "running" || r.state === "parked").length;
+    /* Only a completed run folds away. Halted and parked runs are precisely the
+       ones the board exists to surface, so collapsing by "terminal" rather than
+       by "completed" would hide the cards that need a human. */
+    const done = list.filter((r) => r.state === "stopped");
+    const active = list.filter((r) => r.state !== "stopped");
+    const live = active.filter((r) => r.state === "running" || r.state === "parked").length;
+    const group = "group:" + repo;
     return "<section>" +
       '<div class="section-head"><span class="plate">' + esc(repo) + "</span>" +
       '<span class="count">' + list.length + " run" + (list.length === 1 ? "" : "s") +
       (live ? " · " + live + " live" : "") + "</span></div>" +
-      list.map((r) => renderRun(r, now)).join("") + "</section>";
+      active.map((r) => renderRun(r, now)).join("") +
+      (done.length
+        ? '<details class="group"' + (openGroups.has(group) ? " open" : "") +
+            ' data-group="' + esc(group) + '"><summary>' + done.length +
+            " completed</summary>" + done.map((r) => renderRun(r, now)).join("") +
+          "</details>"
+        : "") +
+      "</section>";
   }).join("");
 }
 
+/* Pruned, not filtered at render: the retained array, the rendered rows and the
+   severity chips all read `feed`, and filtering in one of them would let the
+   three disagree about what "recent" means. feed is newest-first, so everything
+   past the horizon is at the tail. */
+function pruneFeed() {
+  const horizon = Date.now() - HORIZON_MS;
+  while (feed.length && feed[feed.length - 1].timestamp < horizon) feed.pop();
+  if (feed.length > 1000) feed.length = 1000;
+}
+
 function renderFeed() {
+  pruneFeed();
   const el = document.getElementById("feed");
   const shown = feed.filter((e) => !filter || sev(e.type) === filter).slice(0, 250);
   if (!shown.length) { el.innerHTML = '<div class="empty">No events match.</div>'; return; }
@@ -793,6 +834,7 @@ const SEV_LABEL = { go:"finished", work:"working", judge:"judging",
                     stop:"stopped", hold:"waiting", unmapped:"unmapped" };
 
 function renderBadges() {
+  pruneFeed();
   const present = new Set(feed.map((e) => sev(e.type)));
   const kinds = SEVERITIES.concat(present.has("unmapped") ? ["unmapped"] : []);
   document.getElementById("badges").innerHTML =
@@ -808,10 +850,18 @@ document.addEventListener("click", (e) => {
   const s = e.target.closest("[data-select]");
   if (s) { selected = selected === s.dataset.select ? null : s.dataset.select; renderBoard(); }
 });
+/* Drawer first, and it returns: a drawer inside the completed group would also
+   match `closest("details.group")` on its ancestor, so testing the group first
+   would file every drawer toggle as a group toggle. */
 document.addEventListener("toggle", (e) => {
   const d = e.target.closest("details.drawer");
-  if (!d) return;
-  if (d.open) openDrawers.add(d.dataset.run); else openDrawers.delete(d.dataset.run);
+  if (d) {
+    if (d.open) openDrawers.add(d.dataset.run); else openDrawers.delete(d.dataset.run);
+    return;
+  }
+  const g = e.target.closest("details.group");
+  if (!g) return;
+  if (g.open) openGroups.add(g.dataset.group); else openGroups.delete(g.dataset.group);
 }, true);
 
 /* ── streams ──────────────────────────────────────────────────────────
@@ -864,7 +914,9 @@ setInterval(() => {
   else if (pending || anyWaiting()) { pending = false; renderBoard(); }
   meta();
 }, 800);
-setInterval(renderBoard, 15000);   // keep the age column honest while idle
+// Keeps the age column honest while idle, and expires the horizon on both
+// surfaces — an idle page still has to let cards and events age out.
+setInterval(() => { renderBoard(); renderFeed(); renderBadges(); }, 15000);
 
 function replayKey(msg) {
   return JSON.stringify([msg.type, msg.timestamp, msg.payload]);
@@ -888,7 +940,7 @@ function handleMessage(msg, url, replay) {
   else unattributed++;
   feed.unshift({ type: msg.type, source: msg.source, timestamp: msg.timestamp,
                  summary: summarise(msg.payload), ...identity(msg.payload) });
-  if (feed.length > 1000) feed.length = 1000;
+  pruneFeed();
   document.getElementById("feed-empty")?.remove();
   schedule();
 }

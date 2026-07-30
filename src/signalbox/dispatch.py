@@ -92,13 +92,14 @@ def environment(payload: dict, base: dict[str, str]) -> dict[str, str]:
             "SIGNALBOX_STAGE_COUNT": str(payload.get("stage_count", "")),
             "SIGNALBOX_ROUND": str(payload.get("round", 1)),
             "SIGNALBOX_DECLARED": json.dumps(payload.get("declared") or []),
+            # Set unconditionally like every other key: `emit._ENV_KEYS` reads
+            # this side back without asking whether it was worth writing, so a
+            # conditional writer here is an asymmetry the invariant test catches.
+            # `or ""` rather than a `get` default because a payload can carry an
+            # explicit null, and `str(None)` would spell the title "None".
+            "SIGNALBOX_TITLE": str(payload.get("title") or ""),
         }
     )
-    title = payload.get("title")
-    if title is None:
-        env.pop("SIGNALBOX_TITLE", None)
-    else:
-        env["SIGNALBOX_TITLE"] = str(title)
     return env
 
 

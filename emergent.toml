@@ -235,7 +235,7 @@ publishes = ["issue.fetched", "issue.fetch-failed"]
 name = "survey-codebase"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "issue.fetched", "--publish-as", "codebase.surveyed",
-        "-e", "survey.failed", "-t", "300000", "--",
+        "-e", "survey.failed", "-t", "600000", "--",
         "signalbox", "agent", "survey"]
 subscribes = ["issue.fetched"]
 # Provenance is load-bearing beside the verdict: success alone cannot prove
@@ -246,21 +246,27 @@ publishes = ["codebase.surveyed", "survey.failed", "model.invoked"]
 name = "recall-vault"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "issue.fetched", "--publish-as", "vault.recalled",
-        "-e", "vault.recall-failed", "-t", "300000", "--",
+        "-e", "vault.recall-failed", "-t", "600000", "--",
         "signalbox", "agent", "recall"]
 subscribes = ["issue.fetched"]
 publishes = ["vault.recalled", "vault.recall-failed", "model.invoked"]
 
-# Recall and survey start from the same event and each has a five-minute
+# Recall and survey start from the same event and each has a ten-minute
 # invocation budget. The join timer starts on the first result, so it must cover
 # the other invocation's full budget (plus scheduling slack) to be a real
 # rendezvous rather than a race between the two agents.
+#
+# The budget was five minutes until sb-90, where survey on opus was killed at
+# exactly 300s and the run halted for want of a survey it was still producing.
+# Surveys had been climbing toward that wall for a while — sb-89 took 252s — so
+# the ceiling, not the issue, was the defect. Raising one arm alone would leave
+# the join covering the shorter budget, which is why all three move together.
 [[handlers]]
 name = "join-plan-inputs"
 path = "signalbox"
 args = ["primitive", "join-terminal", "--key", "run_id",
         "--arms", "codebase.surveyed,vault.recalled", "--carry-payloads",
-        "--timeout-seconds", "310", "--publish-as", "plan.inputs.closed"]
+        "--timeout-seconds", "620", "--publish-as", "plan.inputs.closed"]
 subscribes = ["codebase.surveyed", "vault.recalled"]
 publishes = ["plan.inputs.closed"]
 

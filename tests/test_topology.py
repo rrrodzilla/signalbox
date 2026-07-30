@@ -614,7 +614,6 @@ def test_planning_rendezvous_covers_both_agent_invocation_budgets():
         "vault.recall-failed",
         "model.invoked",
     ]
-    assert recall["args"][recall["args"].index("-t") + 1] == "300000"
 
     joiner = named(HANDLERS, "join-plan-inputs")
     assert joiner["subscribes"] == ["codebase.surveyed", "vault.recalled"]
@@ -622,8 +621,27 @@ def test_planning_rendezvous_covers_both_agent_invocation_budgets():
     args = " ".join(joiner["args"])
     assert "--arms codebase.surveyed,vault.recalled" in args
     assert "--carry-payloads" in args
+
+    # Derive each arm's budget from the handler that actually produces it, so
+    # this covers an arm nobody has named yet and an arm whose -t moves.  Pinning
+    # a literal here is what let sb-90 through: the join asserted only that it
+    # outlived 300s while survey-codebase, the arm that died, went unread.
+    arms = joiner["args"][joiner["args"].index("--arms") + 1].split(",")
+    budgets = {}
+    for arm in arms:
+        producers = [h for h in HANDLERS if arm in h.get("publishes", [])]
+        assert producers, f"no handler publishes join arm {arm!r}"
+        for producer in producers:
+            budgets[producer["name"]] = float(
+                producer["args"][producer["args"].index("-t") + 1]
+            )
+
     timeout = float(joiner["args"][joiner["args"].index("--timeout-seconds") + 1])
-    assert timeout > 300, "the first arrival must not time out the other agent"
+    slowest = max(budgets.values()) / 1000
+    assert timeout > slowest, (
+        "the first arrival must not time out the other agent: the join waits "
+        f"{timeout}s but {max(budgets, key=budgets.get)} may take {slowest}s"
+    )
 
     planner = named(HANDLERS, "draft-plan")
     assert planner["subscribes"] == ["plan.inputs", "plan.rejected"]

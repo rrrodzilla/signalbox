@@ -24,8 +24,10 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
+from signalbox.acts import read_session, record_session
 from signalbox.emit import post_provenance
 from signalbox.paths import SkillMissing, require_skill, state_dir, worktree_for
 
@@ -98,6 +100,7 @@ def environment(payload: dict, base: dict[str, str]) -> dict[str, str]:
             # `or ""` rather than a `get` default because a payload can carry an
             # explicit null, and `str(None)` would spell the title "None".
             "SIGNALBOX_TITLE": str(payload.get("title") or ""),
+            "SIGNALBOX_SESSION_ID": str(payload.get("session_id") or ""),
         }
     )
     return env
@@ -146,8 +149,26 @@ def codex_prompt(skill: str, payload: dict) -> str:
     )
 
 
-def claude_command(skill: str, payload: dict, model: str | None) -> list[str]:
+def claude_command(
+    skill: str, payload: dict, model: str | None, session_id: str | None = None
+) -> list[str]:
     command = ["claude", "-p", prompt_for(skill, payload)]
+    command += ["--session-id", session_id] if session_id else []
+    if model:
+        command += ["--model", model]
+    return command + ["--allowedTools", *CLAUDE_TOOLS]
+
+
+def claude_resume_command(
+    skill: str, payload: dict, model: str | None, session_id: str
+) -> list[str]:
+    command = [
+        "claude",
+        "-p",
+        prompt_for(skill, payload),
+        "--resume",
+        session_id,
+    ]
     if model:
         command += ["--model", model]
     return command + ["--allowedTools", *CLAUDE_TOOLS]
@@ -176,12 +197,48 @@ def codex_command(worktree: Path, model: str | None) -> list[str]:
         'shell_environment_policy.inherit="all"',
         "-c",
         'approval_policy="never"',
+        "--json",
     ]
     if model:
         command += ["--model", model]
     # `-` makes codex read the prompt from stdin, which keeps the work item off
     # the command line where it would show up in every process listing.
     return command + ["-"]
+
+
+def codex_resume_command(model: str | None, session_id: str) -> list[str]:
+    """Resume codex without flags unsupported by `codex exec resume`."""
+    command = [
+        "codex",
+        "exec",
+        "resume",
+        "-c",
+        'sandbox_mode="workspace-write"',
+        "-c",
+        "sandbox_workspace_write.network_access=true",
+        "-c",
+        'shell_environment_policy.inherit="all"',
+        "-c",
+        'approval_policy="never"',
+        "--json",
+    ]
+    if model:
+        command += ["--model", model]
+    return command + [session_id, "-"]
+
+
+def codex_session_id(stdout: str) -> str | None:
+    """Extract the thread id emitted by `codex exec --json`."""
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "thread.started" and isinstance(
+            event.get("thread_id"), str
+        ):
+            return event["thread_id"]
+    return None
 
 
 def main(argv: list[str]) -> int:
@@ -216,40 +273,95 @@ def main(argv: list[str]) -> int:
         print(f"signalbox dispatch: {exc}", file=sys.stderr)
         return 1
 
-    if runner == "codex":
-        command = codex_command(worktree, model)
-        stdin_text = codex_prompt(args.skill, payload)
-    else:
-        command = claude_command(args.skill, payload, model)
+    session = read_session(
+        str(payload.get("run_id") or ""), str(payload.get("shard_id") or "")
+    )
+    resumed_session_id = (
+        session["session_id"] if session and session["runner"] == runner else None
+    )
+    minted_session_id = (
+        str(uuid.uuid4()) if runner == "claude" and not resumed_session_id else None
+    )
+    if resumed_session_id:
+        payload["session_id"] = resumed_session_id
+    elif minted_session_id:
+        payload["session_id"] = minted_session_id
+
+    def invocation(resume_id: str | None) -> tuple[list[str], str]:
+        if runner == "codex":
+            command = (
+                codex_resume_command(model, resume_id)
+                if resume_id
+                else codex_command(worktree, model)
+            )
+            return command, codex_prompt(args.skill, payload)
+        command = (
+            claude_resume_command(args.skill, payload, model, resume_id)
+            if resume_id
+            else claude_command(args.skill, payload, model, minted_session_id)
+        )
         # The sink already closed our stdin; hand the child an empty one rather
         # than a spent pipe.
-        stdin_text = ""
+        return command, ""
 
     marker = pending_path("shard", payload)
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({**payload, "runner": runner, "model": model}))
 
-    invocation_env = environment(payload, dict(os.environ))
-    started = time.monotonic()
-    completed = subprocess.run(
-        command,
-        cwd=str(worktree),
-        env=invocation_env,
-        input=stdin_text,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    duration_ms = round((time.monotonic() - started) * 1000)
-    post_provenance(
-        args.skill.removeprefix("signalbox-"),
-        runner,
-        model,
-        "shard.submitted",
-        completed.returncode == 0,
-        duration_ms,
-        env=invocation_env,
-    )
+    def run(resume_id: str | None) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+        command, stdin_text = invocation(resume_id)
+        invocation_env = environment(payload, dict(os.environ))
+        started = time.monotonic()
+        completed = subprocess.run(
+            command,
+            cwd=str(worktree),
+            env=invocation_env,
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        duration_ms = round((time.monotonic() - started) * 1000)
+        post_provenance(
+            args.skill.removeprefix("signalbox-"),
+            runner,
+            model,
+            "shard.submitted",
+            completed.returncode == 0,
+            duration_ms,
+            env=invocation_env,
+        )
+        return completed, invocation_env
+
+    def persist_session(completed: subprocess.CompletedProcess[str]) -> None:
+        session_id = minted_session_id or codex_session_id(
+            getattr(completed, "stdout", "")
+        )
+        if session_id:
+            record_session(
+                str(payload.get("run_id") or ""),
+                str(payload.get("shard_id") or ""),
+                runner,
+                session_id,
+            )
+
+    completed, invocation_env = run(resumed_session_id)
+    persist_session(completed)
+    if (
+        completed.returncode != 0
+        and resumed_session_id
+        and not getattr(completed, "stdout", "").strip()
+    ):
+        # Session histories are local runner state and can disappear. A stale
+        # continuity hint must not prevent the shard from running at all. Only
+        # retry a silent resume failure: any agent output can include a terminal
+        # announcement, which must never be dispatched a second time.
+        payload.pop("session_id", None)
+        minted_session_id = str(uuid.uuid4()) if runner == "claude" else None
+        if minted_session_id:
+            payload["session_id"] = minted_session_id
+        completed, invocation_env = run(None)
+        persist_session(completed)
     # The marker stays whatever happens; that is the point. Only a shard that
     # announced a terminal verdict clears it, and the reaper finds the rest.
     if completed.returncode != 0:

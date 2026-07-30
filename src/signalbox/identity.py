@@ -37,6 +37,9 @@ CARRIED_KEYS: tuple[str, ...] = (
     "stage_count",
     "declared",
     "round",
+    # Runner sessions are assigned at the process boundary. Carrying this key
+    # mechanically prevents a model from replacing the session to be resumed.
+    "session_id",
     "note",
     "note_count",
     "pr",

@@ -11,6 +11,10 @@ declared list of files, and other shards of the same stage are being implemented
 plan guaranteed your file list is disjoint from theirs. Writing outside your
 declared list breaks that guarantee for someone else.
 
+Round 1 is the cold-start implementation session for this shard. Dispatch
+records that runner session so a later review fix can resume your context;
+`signalbox-fix` defines the round > 1 contract.
+
 ## Your action space
 
 Three commands. That is the whole set.
@@ -98,6 +102,7 @@ Two independent mechanisms enforce this, so working around one does not help:
 
 ## If this is a fix round
 
-`round > 1` means review sent this shard back. Read `findings` in your payload
-and address each one. You are re-entering the same vocabulary: announce every
-file you rewrite, then `shard.submitted` again. See `signalbox-fix`.
+`round > 1` means review sent this shard back and dispatch resumed the shard's
+recorded runner session. Read `findings` in your payload and address each one.
+You are re-entering the same vocabulary: announce every file you rewrite, then
+`shard.submitted` again. See `signalbox-fix`.

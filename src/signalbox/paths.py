@@ -22,6 +22,11 @@ def state_dir() -> Path:
     return Path(root)
 
 
+def sessions_dir(run_id: str) -> Path:
+    """One run's shard sessions, kept outside the pending reaper's namespace."""
+    return state_dir() / "sessions" / run_id
+
+
 def worktree_for(payload: dict) -> Path:
     return state_dir() / "worktrees" / str(payload.get("run_id", "unknown"))
 

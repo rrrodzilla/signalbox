@@ -449,6 +449,18 @@ def test_every_pending_marker_has_something_that_clears_it():
         assert erasers, f"nothing clears a {kind} marker, so success reads as silence"
 
 
+def test_fixer_sessions_stay_outside_reaped_pending_kinds(monkeypatch, tmp_path):
+    """Session records use a namespace that pending-marker reapers never sweep."""
+    from signalbox.paths import sessions_dir
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    session_path = sessions_dir("run-1") / "session-shard-1.json"
+    session_kind = session_path.relative_to(tmp_path).parts[0]
+
+    assert session_kind == "sessions"
+    assert session_kind not in reaped_kinds()
+
+
 def test_each_reaper_raises_only_its_own_kind():
     """Both reapers publish through `exec.output`, so the selectors must not
     overlap. A bare test("reap") matched both and would have announced a stalled

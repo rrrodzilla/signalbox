@@ -27,6 +27,7 @@ def _shard(**overrides) -> dict:
         "shard_count": 2,
         "stage_count": 3,
         "round": 1,
+        "session_id": "session-123",
         "declared": ["src/a.py"],
     }
     payload.update(overrides)
@@ -116,6 +117,7 @@ def test_both_join_counts_survive_an_agents_emission():
     body = build_body("shard.submitted", {"outcome": "done"}, env)
     assert body["stage_count"] == 3
     assert body["base_sha"] == "abc123"
+    assert body["session_id"] == "session-123"
 
 
 def test_an_absent_count_is_omitted_rather_than_sent_as_an_empty_string():

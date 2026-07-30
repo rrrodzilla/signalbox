@@ -378,8 +378,10 @@ path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "fix.opened", "-t", "2400000", "--",
         "signalbox", "dispatch", "--skill", "signalbox-fix"]
 subscribes = ["fix.opened"]
-# Fix rounds are fresh model calls, so their provenance cannot be inferred from
-# the original implementation dispatch.
+# A shard's fix rounds resume its recorded runner session; the review router
+# increments and guards the round counter described in review-loop.md. CI
+# findings deliberately arrive without shard_id and therefore cold-start a
+# fixer session. See #90.
 publishes = ["model.invoked"]
 
 # The other half of the reaper's contract. A shard that announced is not silent,

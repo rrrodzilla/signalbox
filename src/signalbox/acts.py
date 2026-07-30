@@ -21,7 +21,7 @@ from pathlib import Path
 
 from signalbox.paths import (
     WorktreeMissing, branch_for, install_skills, require_worktree,
-    state_dir, vault_dir, worktree_for,
+    sessions_dir, state_dir, vault_dir, worktree_for,
 )
 
 
@@ -430,6 +430,43 @@ def map_ci_findings(payload: dict) -> dict:
 # ── silence ──────────────────────────────────────────────────────────────────
 
 
+def _session_path(run_id: str, shard_id: str) -> Path:
+    return sessions_dir(run_id) / f"session-{shard_id}.json"
+
+
+def read_session(run_id: str, shard_id: str) -> dict | None:
+    """The runner session recorded for a shard, or no resumable session."""
+    try:
+        session = json.loads(_session_path(run_id, shard_id).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(session, dict)
+        or not isinstance(session.get("runner"), str)
+        or not isinstance(session.get("session_id"), str)
+    ):
+        return None
+    return {"runner": session["runner"], "session_id": session["session_id"]}
+
+
+def record_session(
+    run_id: str, shard_id: str, runner: str, session_id: str
+) -> Path:
+    """Persist the runner identity needed to resume this shard next round."""
+    path = _session_path(run_id, shard_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"runner": runner, "session_id": session_id}))
+    return path
+
+
+def clear_session(run_id: str, shard_id: str) -> bool:
+    """Forget a shard's runner session once that shard is retired."""
+    path = _session_path(run_id, shard_id)
+    existed = path.exists()
+    path.unlink(missing_ok=True)
+    return existed
+
+
 def reap(kind: str, stale_minutes: int) -> str:
     """Pending markers older than the threshold, as one JSON line each."""
     import time
@@ -447,6 +484,11 @@ def reap(kind: str, stale_minutes: int) -> str:
         except (OSError, json.JSONDecodeError):
             continue
         marker.unlink(missing_ok=True)
+        if kind == "shard":
+            clear_session(
+                str(payload.get("run_id", "unknown")),
+                str(payload.get("shard_id", "unknown")),
+            )
         lines.append(
             json.dumps({**payload, "outcome": "silent", "reason": f"{kind} emitted nothing"})
         )
@@ -527,6 +569,15 @@ def clear_pending(kind: str, payload: dict) -> bool:
     marker = pending_path(kind, payload)
     existed = marker.exists()
     marker.unlink(missing_ok=True)
+    if kind == "shard" and payload.get("event") in {
+        "shard.approved",
+        "scope.violated",
+        "pr.merged",
+    }:
+        clear_session(
+            str(payload.get("run_id", "unknown")),
+            str(payload.get("shard_id", "unknown")),
+        )
     return existed
 
 

@@ -28,6 +28,15 @@ def test_project_follows_new_carried_keys(monkeypatch):
     assert project({"run_id": "r1", "sentinel": "carried"})["sentinel"] == "carried"
 
 
+def test_all_identity_operations_follow_future_carried_keys(monkeypatch):
+    monkeypatch.setattr(identity, "CARRIED_KEYS", (*CARRIED_KEYS, "sentinel"))
+    inbound = {"sentinel": "system"}
+    produced = {"sentinel": "model"}
+
+    assert carry(inbound, produced)["sentinel"] == "system"
+    assert spoofed_keys(inbound, produced) == ["sentinel"]
+
+
 def test_carry_overrides_model_supplied_identity():
     inbound = {"run_id": "r1", "shard_id": "a", "declared": ["src/a.py"], "round": 2}
     produced = {"verdict": "done", "shard_id": "b", "declared": ["src/", "**"]}

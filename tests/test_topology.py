@@ -419,6 +419,33 @@ def reaped_kinds() -> set[str]:
     return kinds
 
 
+def test_approval_wait_is_marked_and_cleared_for_the_same_run():
+    """A grant for one overlapping run must not release another run's gate."""
+    marker = named(SINKS, "mark-approval-pending")
+    clearer = named(SINKS, "clear-approval-pending")
+
+    assert marker["subscribes"] == ["approval.requested"]
+    assert marker["args"][-3:] == ["mark-pending", "--kind", "approval"]
+    assert clearer["subscribes"] == ["approval.granted"]
+    assert clearer["args"][-3:] == ["clear-pending", "--kind", "approval"]
+
+    from signalbox.dispatch import PENDING_KEYS
+
+    assert PENDING_KEYS["approval"] == ("run_id",)
+
+
+def test_approval_waits_are_not_reaped_on_agent_or_ci_clocks():
+    """Human approval may legitimately take far longer than either reaper."""
+    assert "approval" not in reaped_kinds()
+    raiser_programs = [
+        h["args"][-1]
+        for h in HANDLERS
+        if h.get("subscribes") == ["exec.output"] and "reap" in h["args"][-1]
+    ]
+    assert raiser_programs
+    assert all("reap --kind approval" not in program for program in raiser_programs)
+
+
 def test_every_pending_marker_has_something_that_clears_it():
     """The reaper turns silence into an event; something must end the silence.
 

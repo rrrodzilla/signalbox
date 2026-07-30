@@ -455,6 +455,23 @@ args = ["-s", "pr.opened", "-t", "10000", "--",
         "signalbox", "mark-pending", "--kind", "pr"]
 subscribes = ["pr.opened"]
 
+# Human approval waits are deliberately not reaped on the shard or PR clocks:
+# the marker is durable storage for this run's projected identity until the
+# operator grants that same run. PENDING_KEYS supplies run_id as the natural key.
+[[sinks]]
+name = "mark-approval-pending"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "approval.requested", "-t", "10000", "--",
+        "signalbox", "mark-pending", "--kind", "approval"]
+subscribes = ["approval.requested"]
+
+[[sinks]]
+name = "clear-approval-pending"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "approval.granted", "-t", "10000", "--",
+        "signalbox", "clear-pending", "--kind", "approval"]
+subscribes = ["approval.granted"]
+
 [[sinks]]
 name = "clear-pending"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"

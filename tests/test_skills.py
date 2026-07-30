@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from signalbox.agent import ROLE_SKILLS
+from signalbox.cli import ACT_COMMANDS, COMMANDS
 from signalbox.emit import ALLOWED_EVENTS
 from signalbox.paths import VaultMissing, vault_dir
 
@@ -99,6 +100,12 @@ def test_acting_skills_document_only_emittable_events():
             event = line.split("signalbox emit ", 1)[1].split()[0]
             assert event in ALLOWED_EVENTS, f"{skill} teaches unemittable {event!r}"
     assert "model.invoked" not in ALLOWED_EVENTS
+
+
+def test_operator_approval_is_a_cli_act_not_an_agent_event():
+    assert "approve" in ACT_COMMANDS
+    assert "approve" in COMMANDS
+    assert "approval.granted" not in ALLOWED_EVENTS
 
 
 def test_acting_skills_forbid_advancing_the_run():

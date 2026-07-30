@@ -8,6 +8,8 @@ minutes later.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from signalbox.acts import clear_pending, mark_pending, reap, rehydrate
@@ -64,6 +66,25 @@ def test_a_pr_webhook_round_trip_uses_the_pr_marker(tmp_path, monkeypatch):
     assert marker.name == "pr-57.json"
     assert rehydrate("pr", payload) == payload
     assert not marker.exists()
+
+
+def test_approval_marker_carries_the_full_projected_run_identity(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    payload = _shard(
+        event="approval.requested",
+        title="Repair approval",
+        base_branch="release",
+        extra="not identity",
+    )
+
+    marker = mark_pending("approval", payload)
+
+    assert marker.name == "approval-r1.json"
+    assert json.loads(marker.read_text()) == {
+        key: payload[key] for key in CARRIED_KEYS if key in payload
+    }
 
 
 def test_a_shard_marker_separates_shards_within_a_run_and_across_runs(tmp_path, monkeypatch):

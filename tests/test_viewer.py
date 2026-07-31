@@ -282,6 +282,17 @@ def test_preflight_requires_the_operator_vault():
     assert "before '$0 up'" in body
 
 
+def test_dogfood_passes_the_matched_github_repo_only_on_the_origin_branch():
+    harness = (ROOT / "bin" / "harness.sh").read_text()
+    body = harness.split("\ndogfood() {", 1)[1].split("\n}", 1)[0]
+    origin_branch, no_origin_branch = body.split("\n  else\n", 1)
+
+    assert 'local repo="${BASH_REMATCH[1]}"' in origin_branch
+    assert 'forward_up "$repo"' in origin_branch
+    assert 'launch "$issue" --repo "$repo" --repo-path "$ROOT"' in origin_branch
+    assert "--repo " not in no_origin_branch
+
+
 def _status_with_engine_pid(
     tmp_path: Path, pid: int | None, invoking_vault: Path
 ) -> subprocess.CompletedProcess[str]:

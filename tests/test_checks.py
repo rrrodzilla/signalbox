@@ -418,17 +418,14 @@ def test_the_title_survives_the_agent_environment_seam():
 def test_a_none_title_does_not_round_trip_as_the_string_none():
     """sb-78 must not repeat #74's str(None) precedent at the agent env seam.
 
-    The variable is stamped unconditionally, like every other key, because
-    `emit._ENV_KEYS` reads this side back without checking whether the writer
-    thought it worthwhile. What matters is the property, not the mechanism: an
-    absent title must not reach the agent as the string "None", must not leave a
-    stale value standing, and must not come back as a title.
+    An absent title must not reach the agent as the string "None", must not
+    leave a stale value standing, and must not come back as a title.
     """
     from signalbox.dispatch import environment
     from signalbox.emit import identity_from_env
 
     stamped = environment({"title": None}, {"SIGNALBOX_TITLE": "stale title"})
-    assert stamped["SIGNALBOX_TITLE"] == ""
+    assert "SIGNALBOX_TITLE" not in stamped
     assert "title" not in identity_from_env(stamped)
 
 
@@ -488,7 +485,7 @@ def test_a_none_intent_does_not_round_trip_as_the_string_none():
     from signalbox.emit import identity_from_env
 
     stamped = environment({"intent": None}, {"SIGNALBOX_INTENT": "stale intent"})
-    assert stamped["SIGNALBOX_INTENT"] == ""
+    assert "SIGNALBOX_INTENT" not in stamped
     assert "intent" not in identity_from_env(stamped)
 
 

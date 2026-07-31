@@ -6,7 +6,7 @@ The name is from railway signaling. A signal box is where the interlocking lives
 
 ## The shape
 
-One engine. Four sources, one hundred seven handlers, ten sinks, and no script that knows what comes next.
+One engine. Four sources, one hundred ten handlers, ten sinks, and no script that knows what comes next.
 
 ```
 route-run-requested ─> [run.requested] ─> prepare-workspace, dashboard
@@ -25,7 +25,8 @@ route-prepare-ready ─> [workspace.ready] ─> fetch-issue, dashboard
 │         route-rebase-failed-halted, route-suite-error-halted,
 │         route-assess-failed-halted, route-remediation-closed-halted,
 │         route-remediation-invalid-halted, route-remediation-failed-halted,
-│         route-notes-plan-failed-halted, route-completion-short
+│         route-notes-plan-failed-halted, route-notes-invalid-halted,
+│         route-completion-short
 └─> to: dashboard, notify, trace
 [issue.fetch-attempted]
 ├─< from: fetch-issue
@@ -107,7 +108,9 @@ route-approved ─> [shard.approved] ─> join-stage, dashboard
 [pr.merge-attempted]
 ├─< from: merge-pr
 └─> to: route-merge-pr-merged, route-merge-pr-failed, dashboard
-plan-notes ─> [notes.planned] ─> split-notes, dashboard
+[notes.planned]
+├─< from: plan-notes
+└─> to: route-notes-plan-accepted, route-notes-plan-invalid, dashboard
 guard-rounds-continue ─> [fix.opened] ─> dispatch-fix, dashboard
 [stage.merged]
 ├─< from: route-merge-ok
@@ -123,13 +126,16 @@ route-detail-failed ─> [checks.detail-failed] ─> map-ci-to-findings, dashboa
 [pr.merge-failed]
 ├─< from: route-merge-pr-failed
 └─> to: route-remediation-open, dashboard
-split-notes, join-notes ─> [notes.synced] ─> join-completion, dashboard
+route-notes-plan-accepted ─> [notes.plan-accepted] ─> split-notes, dashboard
+[notes.invalid-verdict (halt)]
+├─< from: route-notes-plan-invalid
+└─> to: route-notes-invalid-halted, dashboard, trace
 guard-stages-exhaust ─> [stages.exhausted] ─> dashboard
 join-run ─> [run.built] ─> rebase-branch, dashboard
 [issue.close-attempted]
 ├─< from: close-issue
 └─> to: route-issue-closed, route-issue-close-failed, dashboard
-write-note ─> [note.written] ─> join-notes, dashboard
+split-notes, join-notes ─> [notes.synced] ─> join-completion, dashboard
 [completion.closed (halt)]
 ├─< from: join-completion
 └─> to: route-completion-full, route-completion-short, dashboard
@@ -139,6 +145,7 @@ write-note ─> [note.written] ─> join-notes, dashboard
         dashboard
 route-issue-closed ─> [issue.closed] ─> dashboard
 route-issue-close-failed ─> [issue.close-failed] ─> dashboard
+write-note ─> [note.written] ─> join-notes, dashboard
 [run.completed]
 ├─< from: route-completion-full
 └─> to: release-workspace, dashboard, trace

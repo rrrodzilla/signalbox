@@ -486,6 +486,199 @@ def test_forwarder_teardown_reaps_processes_and_purges_its_github_hook(
     assert "--method DELETE repos/owner/repo/hooks/42" in api_calls.read_text()
 
 
+def test_unforward_without_ownership_leaves_another_harness_hook(tmp_path: Path):
+    """#125: one harness cannot purge another harness's live forwarder hook."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    api_calls = tmp_path / "api-calls"
+    gh = fake_bin / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        "case \"$1\" in\n"
+        "  extension) echo 'cli/gh-webhook'; exit 0 ;;\n"
+        "  api)\n"
+        f"    printf '%s\\n' \"$*\" >> {api_calls}\n"
+        "    if [[ \"$*\" != *'--method DELETE'* ]]; then echo 42; fi\n"
+        "    exit 0 ;;\n"
+        "esac\n"
+        "trap 'exit 0' TERM INT\n"
+        "while true; do sleep 1; done\n"
+    )
+    gh.chmod(0o755)
+    shared_env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+    log_a = tmp_path / "harness-a"
+    log_b = tmp_path / "harness-b"
+    env_a = {**shared_env, "SIGNALBOX_LOG_DIR": str(log_a)}
+    env_b = {**shared_env, "SIGNALBOX_LOG_DIR": str(log_b)}
+
+    subprocess.run(
+        [ROOT / "bin/harness.sh", "forward", "owner/repo"],
+        env=env_a,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    supervisor = int((log_a / "forward.pid").read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not (log_a / "forward.owner").exists():
+        time.sleep(0.1)
+    assert (log_a / "forward.owner").exists()
+
+    log_b.mkdir()
+    (log_b / "forward.repo").write_text("owner/repo")
+    before = api_calls.read_text() if api_calls.exists() else ""
+    stopped_b = subprocess.run(
+        [ROOT / "bin/harness.sh", "unforward"],
+        env=env_b,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    after_b = api_calls.read_text() if api_calls.exists() else ""
+
+    assert stopped_b.returncode == 0, stopped_b.stderr
+    assert stopped_b.stderr == ""
+    assert "--method DELETE repos/owner/repo/hooks/" not in after_b[len(before) :]
+    os.kill(supervisor, 0)
+    assert "owner/repo" in stopped_b.stdout
+    assert "forward owner/repo" in stopped_b.stdout
+
+    stopped_a = subprocess.run(
+        [ROOT / "bin/harness.sh", "unforward"],
+        env=env_a,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert stopped_a.returncode == 0, stopped_a.stderr
+    with pytest.raises(ProcessLookupError):
+        os.kill(supervisor, 0)
+    assert "--method DELETE repos/owner/repo/hooks/42" in api_calls.read_text()
+
+
+def test_recycled_pid_cannot_satisfy_forward_hook_ownership(tmp_path: Path):
+    """#125: matching live PIDs do not replace a process start-time identity."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    api_calls = tmp_path / "api-calls"
+    gh = fake_bin / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == api ]]; then\n"
+        f"  printf '%s\\n' \"$*\" >> {api_calls}\n"
+        "  if [[ \"$*\" != *'--method DELETE'* ]]; then echo 42; fi\n"
+        "  exit 0\n"
+        "fi\n"
+        "trap 'exit 0' TERM INT\n"
+        "while true; do sleep 1; done\n"
+    )
+    gh.chmod(0o755)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "forward.repo").write_text("owner/repo")
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "SIGNALBOX_LOG_DIR": str(log_dir),
+    }
+    forward_log = log_dir / "forward.log"
+    with forward_log.open("w") as output:
+        supervisor = subprocess.Popen(
+            [ROOT / "bin/harness.sh", "_forward-supervise", "owner/repo"],
+            env=env,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        (log_dir / "forward.pid").write_text(str(supervisor.pid))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not (log_dir / "forward.owner").exists():
+            time.sleep(0.1)
+        assert (log_dir / "forward.owner").exists(), forward_log.read_text()
+        stale_start = (log_dir / "forward.owner").read_text().split(maxsplit=2)[1]
+        supervisor.terminate()
+        assert supervisor.wait(timeout=5) == 0
+
+    stranger = subprocess.Popen(["sleep", "30"])
+    try:
+        (log_dir / "forward.pid").write_text(str(stranger.pid))
+        (log_dir / "forward.owner").write_text(
+            f"{stranger.pid} {stale_start} {log_dir.resolve()}\n"
+        )
+        stopped = subprocess.run(
+            [ROOT / "bin/harness.sh", "unforward"],
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert stopped.returncode == 0, stopped.stderr
+        calls = api_calls.read_text() if api_calls.exists() else ""
+        assert "--method DELETE repos/owner/repo/hooks/" not in calls
+    finally:
+        if stranger.poll() is None:
+            stranger.terminate()
+        stranger.wait(timeout=5)
+
+
+def test_foreign_log_directory_cannot_satisfy_forward_hook_ownership(
+    tmp_path: Path,
+):
+    """#125: a copied identity record cannot license a hook purge."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    api_calls = tmp_path / "api-calls"
+    gh = fake_bin / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == api ]]; then\n"
+        f"  printf '%s\\n' \"$*\" >> {api_calls}\n"
+        "  if [[ \"$*\" != *'--method DELETE'* ]]; then echo 42; fi\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    gh.chmod(0o755)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "forward.repo").write_text("owner/repo")
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "SIGNALBOX_LOG_DIR": str(log_dir),
+    }
+
+    live_process = subprocess.Popen(["sleep", "30"])
+    try:
+        raw_stat = Path(f"/proc/{live_process.pid}/stat").read_text()
+        live_start = raw_stat.rsplit(") ", 1)[1].split()[19]
+        (log_dir / "forward.pid").write_text(str(live_process.pid))
+        (log_dir / "forward.owner").write_text(
+            f"{live_process.pid} {live_start} {tmp_path / 'foreign-logs'}\n"
+        )
+
+        stopped = subprocess.run(
+            [ROOT / "bin/harness.sh", "unforward"],
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        assert stopped.returncode == 0, stopped.stderr
+        assert stopped.stderr == ""
+        calls = api_calls.read_text() if api_calls.exists() else ""
+        assert "--method DELETE repos/owner/repo/hooks/" not in calls
+    finally:
+        if live_process.poll() is None:
+            live_process.terminate()
+        live_process.wait(timeout=5)
+
+
 def test_forwarder_repairs_a_refused_stale_hook_then_connects(tmp_path: Path):
     """#107: the one repairable startup failure is purged and retried once."""
     fake_bin = tmp_path / "bin"

@@ -17,7 +17,7 @@ import sys
 ACT_COMMANDS = frozenset({
     "prepare-workspace", "release-workspace", "fetch-issue", "run-suite",
     "merge-stage", "push-branch",
-    "open-pr", "merge-pr", "check-details", "map-ci-findings", "reap",
+    "open-pr", "merge-pr", "close-issue", "check-details", "map-ci-findings", "reap",
     "mark-pending", "clear-pending", "rehydrate", "notify", "launch", "approve",
 })
 

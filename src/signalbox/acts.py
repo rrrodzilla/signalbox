@@ -506,6 +506,43 @@ def merge_pr(payload: dict) -> dict:
     return {**payload, "ok": True}
 
 
+def issue_state_is_closed(raw: str) -> bool:
+    """Whether an issue-state response says the issue is closed."""
+    try:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return (
+        isinstance(body, dict)
+        and str(body.get("state") or "").upper() == "CLOSED"
+    )
+
+
+def close_issue(payload: dict) -> dict:
+    """Close the run's issue and verify the observed remote state."""
+    repo = payload.get("repo")
+    if not repo:
+        return {**payload, "ok": True}
+
+    issue = str(payload.get("issue"))
+    close_code, close_out, close_err = _run(
+        ["gh", "issue", "close", issue, "--repo", str(repo)],
+        timeout=45,
+    )
+    state_code, state_out, state_err = _run(
+        ["gh", "issue", "view", issue, "--repo", str(repo), "--json", "state"],
+        timeout=30,
+    )
+    if state_code != 0 or not issue_state_is_closed(state_out):
+        error = close_err or close_out or state_err or state_out
+        if not error:
+            error = (
+                f"close exited {close_code}; issue state could not verify closure"
+            )
+        return {**payload, "ok": False, "error": error}
+    return {**payload, "ok": True}
+
+
 # Conclusions GitHub reports that do not mean "this broke". Shared by the suite
 # router in the topology and the per-check detail fetch below, so the two can
 # never disagree about what counts as green.
@@ -874,6 +911,7 @@ def main(command: str, argv: list[str]) -> int:
         "push-branch": push_branch,
         "open-pr": open_pr,
         "merge-pr": merge_pr,
+        "close-issue": close_issue,
         "check-details": check_details,
         "map-ci-findings": map_ci_findings,
     }

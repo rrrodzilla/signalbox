@@ -1139,6 +1139,30 @@ args = ["-s", "pr.merge-attempted", "--publish-as", "pr.merge-failed", "--",
 subscribes = ["pr.merge-attempted"]
 publishes = ["pr.merge-failed"]
 
+[[handlers]]
+name = "close-issue"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "pr.merged", "--publish-as", "issue.close-attempted",
+        "-t", "60000", "--", "signalbox", "close-issue"]
+subscribes = ["pr.merged"]
+publishes = ["issue.close-attempted"]
+
+[[handlers]]
+name = "route-issue-closed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "issue.close-attempted", "--publish-as", "issue.closed", "--",
+        "jq", "-c", "select(.ok == true)"]
+subscribes = ["issue.close-attempted"]
+publishes = ["issue.closed"]
+
+[[handlers]]
+name = "route-issue-close-failed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "issue.close-attempted", "--publish-as", "issue.close-failed", "--",
+        "jq", "-c", "select(.ok == false)"]
+subscribes = ["issue.close-attempted"]
+publishes = ["issue.close-failed"]
+
 # ─────────────────────────────────────────────────────────────────────────────
 # NOTES — one event per note. No shared document, no lock, nothing serialises.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1310,7 +1334,8 @@ subscribes = ["exec.output", "exec.exit",
               "checks.failed", "checks.observed", "checks.passed", "checks.reported",
               "checks.silent", "checks.unknown-pr",
               "completion.closed", "control.unknown-event", "fix.opened", "gate.assessed",
-              "gate.blocked", "gate.cleared", "gate.invalid-verdict", "issue.fetch-failed",
+              "gate.blocked", "gate.cleared", "gate.invalid-verdict", "issue.close-attempted",
+              "issue.close-failed", "issue.closed", "issue.fetch-failed",
               "issue.fetch-attempted", "issue.fetched", "merge.attempted", "model.invoked", "note.drafted", "note.write-failed",
               "note.written", "notes.plan-failed", "notes.planned", "notes.synced",
               "plan.accepted", "plan.audit-failed", "plan.audited", "plan.checked",

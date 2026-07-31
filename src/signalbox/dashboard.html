@@ -379,6 +379,8 @@ const EVENT = {
   "checks.silent":["promote","stop"], "checks.unknown-pr":["promote","stop"],
   "pr.merge-attempted":["promote","judge","merge-pr","out"],
   "pr.merged":["promote","go"], "pr.merge-failed":["promote","stop"],
+  "issue.close-attempted":["promote","judge","close-issue","out"],
+  "issue.closed":["promote","go"], "issue.close-failed":["promote","stop"],
 
   "remediation.requested":[null,"work","remediate","in"],
   "remediation.assessed":[null,"judge","remediate","out"],

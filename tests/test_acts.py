@@ -9,8 +9,10 @@ import pytest
 
 from signalbox.acts import (
     approve,
+    close_issue,
     clear_pending,
     clear_session,
+    issue_state_is_closed,
     map_ci_findings,
     mark_pending,
     notify,
@@ -457,6 +459,102 @@ def test_pr_state_is_merged_judges_raw_json_without_a_network():
     assert pr_state_is_merged('{"state":"MERGED","mergedAt":null}') is False
     assert pr_state_is_merged("not json") is False
     assert pr_state_is_merged("[]") is False
+
+
+def test_close_issue_closes_then_verifies_observed_state(monkeypatch):
+    from signalbox import acts
+
+    calls = []
+    responses = iter([(0, "", ""), (0, '{"state":"CLOSED"}', "")])
+    monkeypatch.setattr(
+        acts, "_run",
+        lambda cmd, cwd=None, timeout=120: (
+            calls.append((cmd, cwd, timeout)) or next(responses)
+        ),
+    )
+
+    result = close_issue(
+        {"run_id": "sb-67", "repo": "acme/widget", "issue": 67}
+    )
+
+    assert result["ok"] is True
+    assert calls[0][0] == ["gh", "issue", "close", "67", "--repo", "acme/widget"]
+    assert calls[1][0] == [
+        "gh", "issue", "view", "67", "--repo", "acme/widget", "--json", "state"
+    ]
+
+
+def test_close_issue_accepts_an_already_closed_issue(monkeypatch):
+    from signalbox import acts
+
+    responses = iter([
+        (1, "", "issue is already closed"),
+        (0, '{"state":"CLOSED"}', ""),
+    ])
+    monkeypatch.setattr(acts, "_run", lambda *args, **kwargs: next(responses))
+
+    assert close_issue({"repo": "acme/widget", "issue": 67})["ok"] is True
+
+
+def test_close_issue_without_a_repo_is_a_no_op(monkeypatch):
+    from signalbox import acts
+
+    calls = []
+    monkeypatch.setattr(acts, "_run", lambda *args, **kwargs: calls.append(args))
+
+    result = close_issue({"run_id": "sb-local", "issue": 67})
+
+    assert result["ok"] is True
+    assert calls == []
+
+
+def test_close_issue_refusal_carries_run_identity(monkeypatch):
+    from signalbox import acts
+
+    responses = iter([(1, "", "permission denied"), (0, '{"state":"OPEN"}', "")])
+    monkeypatch.setattr(acts, "_run", lambda *args, **kwargs: next(responses))
+
+    result = close_issue(
+        {"run_id": "sb-67", "repo": "acme/widget", "issue": 67}
+    )
+
+    assert result["ok"] is False
+    assert result["run_id"] == "sb-67"
+    assert result["error"] == "permission denied"
+
+
+def test_issue_state_is_closed_judges_raw_json_without_a_network():
+    assert issue_state_is_closed('{"state":"CLOSED"}') is True
+    assert issue_state_is_closed('{"state":"OPEN"}') is False
+    assert issue_state_is_closed("not json") is False
+    assert issue_state_is_closed("[]") is False
+
+
+def test_open_pr_keeps_the_issue_closing_trailer(tmp_path, monkeypatch):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    calls = []
+    responses = iter([
+        (0, "https://github.test/acme/widget/pull/67", ""),
+        (
+            0,
+            '{"number":67,"url":"https://github.test/acme/widget/pull/67",'
+            '"baseRefName":"main","headRefName":"signalbox/run-sb-67","state":"OPEN"}',
+            "",
+        ),
+    ])
+    monkeypatch.setattr(
+        acts, "_run",
+        lambda cmd, cwd=None, timeout=120: calls.append(cmd) or next(responses),
+    )
+
+    result = acts.open_pr(
+        {"run_id": "sb-67", "issue": 67, "base_branch": "main", "title": "Close it"}
+    )
+
+    assert result["ok"] is True
+    assert calls[0][calls[0].index("--body") + 1].startswith("Closes #67\n")
 
 
 def test_ci_failure_becomes_review_findings():

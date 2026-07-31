@@ -330,6 +330,8 @@ PASSIVE_CONSUMER_EXEMPTIONS = {
     "workspace.released": "successful cleanup occurs after the run terminal and needs no successor",
     "checks.unknown-pr": "a check_suite delivery without a pending marker names no run to terminate",
     "workspace.release-failed": "workspace release begins only after the run terminal",
+    "issue.closed": "issue closure is observed after merge and does not advance run control",
+    "issue.close-failed": "issue closure failure is observed after merge and does not halt the run",
     "control.unknown-event": (
         "an event outside the control allowlist is an operator error whose payload may name no run"
     ),

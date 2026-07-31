@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from signalbox.agent import close_unclosed_root, extract_verdict, scan_objects
+from signalbox.agent import (
+    UNPARSEABLE_OUTPUT_ELISION_MARKER,
+    UNPARSEABLE_OUTPUT_HEAD_LIMIT,
+    UNPARSEABLE_OUTPUT_TAIL_LIMIT,
+    close_unclosed_root,
+    elide_unparseable_output,
+    extract_verdict,
+    scan_objects,
+)
 from signalbox.emit import ALLOWED_EVENTS, build_body, identity_from_env, parse_fields
 from signalbox import identity
 from signalbox.identity import CARRIED_KEYS, carry, merge, project, spoofed_keys
@@ -204,6 +212,24 @@ def test_extract_verdict_handles_nesting_and_braces_in_strings():
 def test_extract_verdict_returns_none_when_there_is_no_object():
     assert extract_verdict("I could not complete this task.") is None
     assert extract_verdict("") is None
+
+
+def test_unparseable_output_elision_keeps_both_ends_and_names_the_omission():
+    head = "h" * UNPARSEABLE_OUTPUT_HEAD_LIMIT
+    omitted = "x" * 17
+    tail = "t" * UNPARSEABLE_OUTPUT_TAIL_LIMIT
+
+    output, elided = elide_unparseable_output(head + omitted + tail)
+
+    marker = UNPARSEABLE_OUTPUT_ELISION_MARKER.format(elided=len(omitted))
+    assert output == head + marker + tail
+    assert elided == len(omitted)
+
+
+def test_unparseable_output_elision_keeps_short_output_whole():
+    stdout = "malformed but complete diagnostic text"
+
+    assert elide_unparseable_output(stdout) == (stdout, 0)
 
 
 # ── repairing a root object the model forgot to close ────────────────────────

@@ -787,6 +787,7 @@ def test_forwarder_lifecycle_and_launch_guard_are_explicit():
     )
     assert "forward_pid" in launch
     assert "promote_capable" in launch
+    assert "forwarder decision: refuse" in launch
     assert "$0 forward <owner/name>" in launch
 
 
@@ -799,6 +800,91 @@ def test_launch_checks_only_the_exact_target_repository():
     assert "rev-parse --show-toplevel" in launch
     assert '"$repo_root" == "$exact_repo_path"' in launch
     assert 'git -C "$repo_root" remote get-url origin' in launch
+    assert 'find "$repo_root/.github/workflows"' in launch
+
+
+def _launch_with_remote_workflow_count(
+    tmp_path: Path, workflow_count: int, *extra_args: str
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    forwarded_args = tmp_path / "launch-args"
+    scripts = {
+        "pgrep": "#!/usr/bin/env bash\nprintf '1234\\n'\n",
+        "fuser": "#!/usr/bin/env bash\nexit 0\n",
+        "gh": (
+            "#!/usr/bin/env bash\n"
+            "if [[ \"$1\" == api && \"$2\" == "
+            "'repos/owner/repo/actions/workflows' ]]; then\n"
+            f"  printf '%s\\n' {workflow_count}\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 1\n"
+        ),
+        "signalbox": (
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' \"$*\" > {forwarded_args}\n"
+        ),
+    }
+    for name, script in scripts.items():
+        executable = fake_bin / name
+        executable.write_text(script)
+        executable.chmod(0o755)
+    result = subprocess.run(
+        [
+            ROOT / "bin/harness.sh",
+            "launch",
+            "105",
+            "--repo",
+            "owner/repo",
+            *extra_args,
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SIGNALBOX_LOG_DIR": str(tmp_path / "logs"),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    return result, forwarded_args.read_text() if forwarded_args.exists() else ""
+
+
+def test_remote_without_workflow_launches_with_forwarder_warning(tmp_path: Path):
+    """#105: a remote alone is not a resolvable promote path."""
+    result, forwarded_args = _launch_with_remote_workflow_count(tmp_path, 0)
+
+    assert result.returncode == 0, result.stderr
+    assert "forwarder decision: warn" in result.stdout
+    assert "  warning: webhook forwarder is down; continuing" in result.stdout
+    assert forwarded_args == "launch 105 --repo owner/repo\n"
+
+
+def test_remote_with_workflow_refuses_without_forwarder(tmp_path: Path):
+    """#105: a detected workflow retains the named forwarder refusal."""
+    result, forwarded_args = _launch_with_remote_workflow_count(tmp_path, 1)
+
+    assert result.returncode == 1
+    assert "forwarder decision: refuse (resolvable promote path; no forwarder)" in (
+        result.stdout
+    )
+    assert "forward <owner/name>" in result.stderr
+    assert forwarded_args == ""
+
+
+def test_no_forwarder_downgrades_workflow_refusal(tmp_path: Path):
+    """#105: the escape hatch warns and is stripped before CLI launch."""
+    result, forwarded_args = _launch_with_remote_workflow_count(
+        tmp_path, 1, "--no-forwarder"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "forwarder decision: warn" in result.stdout
+    assert "  warning: webhook forwarder is down; continuing" in result.stdout
+    assert "--no-forwarder" not in forwarded_args
+    assert forwarded_args == "launch 105 --repo owner/repo\n"
 
 
 def test_forwarder_reports_a_supervisor_without_a_connected_tunnel():

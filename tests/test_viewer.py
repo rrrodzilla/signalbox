@@ -282,13 +282,76 @@ def test_preflight_requires_the_operator_vault():
     assert "before '$0 up'" in body
 
 
-def test_status_names_the_shell_vault_and_engine_environment_split():
-    """#70: status sees this shell; prepare-workspace checks the live engine."""
-    harness = (ROOT / "bin" / "harness.sh").read_text()
-    body = harness.split("\nstatus() {", 1)[1].split("\n}", 1)[0]
-    assert 'say "vault:     ${SIGNALBOX_VAULT:-unset}"' in body
-    assert "engine environment was captured at 'up' and may differ" in body
-    assert "prepare-workspace verifies each run" in body
+def _status_with_engine_pid(
+    tmp_path: Path, pid: int | None, invoking_vault: Path
+) -> subprocess.CompletedProcess[str]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    pgrep = fake_bin / "pgrep"
+    pgrep.write_text(
+        "#!/usr/bin/env bash\n"
+        + (f"printf '%s\\n' {pid}\n" if pid is not None else "exit 1\n")
+    )
+    pgrep.chmod(0o755)
+    return subprocess.run(
+        [ROOT / "bin/harness.sh", "status"],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SIGNALBOX_LOG_DIR": str(tmp_path / "logs"),
+            "SIGNALBOX_VAULT": str(invoking_vault),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_status_reports_the_running_engines_valid_captured_vault(tmp_path: Path):
+    """#100: status reports the environment that will actually receive notes."""
+    engine_vault = tmp_path / "engine-vault"
+    engine_vault.mkdir()
+    child = subprocess.Popen(
+        ["sleep", "30"], env={**os.environ, "SIGNALBOX_VAULT": str(engine_vault)}
+    )
+    try:
+        result = _status_with_engine_pid(tmp_path, child.pid, engine_vault)
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+
+    assert result.returncode == 0, result.stderr
+    assert str(engine_vault) in result.stdout
+    assert "notes enabled" in result.stdout
+    assert "unset" not in result.stdout
+
+
+def test_status_says_no_captured_environment_when_engine_is_down(tmp_path: Path):
+    result = _status_with_engine_pid(tmp_path, None, tmp_path / "shell-vault")
+
+    assert result.returncode == 0, result.stderr
+    assert "vault:     unavailable (engine down; no captured environment)" in result.stdout
+    assert "engine:    down" in result.stdout
+
+
+def test_status_surfaces_engine_and_invoking_shell_vault_divergence(tmp_path: Path):
+    engine_vault = tmp_path / "engine-vault"
+    shell_vault = tmp_path / "shell-vault"
+    engine_vault.mkdir()
+    shell_vault.mkdir()
+    child = subprocess.Popen(
+        ["sleep", "30"], env={**os.environ, "SIGNALBOX_VAULT": str(engine_vault)}
+    )
+    try:
+        result = _status_with_engine_pid(tmp_path, child.pid, shell_vault)
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+
+    assert result.returncode == 0, result.stderr
+    assert f"vault:     {engine_vault}" in result.stdout
+    assert f"invoking shell differs: {shell_vault}" in result.stdout
+    assert "may differ" not in result.stdout
 
 
 def test_forwarder_pidfile_names_a_supervisor_that_respawns_and_stops(tmp_path: Path):

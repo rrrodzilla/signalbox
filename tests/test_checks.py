@@ -52,15 +52,30 @@ def test_an_unnamed_check_run_is_still_reported():
 
 def test_check_details_names_the_failed_runs(monkeypatch):
     body = {"check_runs": [
-        {"name": "tests", "conclusion": "failure"},
+        {
+            "name": "tests", "id": 901, "conclusion": "failure",
+            "output": {"title": "Tests failed", "summary": "2 failures", "text": "log"},
+            "details_url": "https://ci.example/tests",
+            "html_url": "https://github.example/checks/901",
+            "started_at": "2026-07-31T00:00:00Z",
+        },
         {"name": "lint", "conclusion": "success"},
     ]}
     monkeypatch.setattr(acts, "_run", lambda *a, **k: (0, json.dumps(body), ""))
-    out = acts.check_details({"pr": 57, "check_runs_url": "https://api/x"})
+    identity = {
+        "pr": 57, "sha": "abc123", "run_id": "sb-101", "repo": "acme/widget",
+        "check_runs_url": "https://api/x",
+    }
+    out = acts.check_details(identity)
     assert out["ok"] is True
-    assert out["failed"] == ["tests"]
+    assert out["failed"] == [{
+        "name": "tests", "id": 901,
+        "output": {"title": "Tests failed", "summary": "2 failures"},
+        "details_url": "https://ci.example/tests",
+        "html_url": "https://github.example/checks/901",
+    }]
     assert out["detail_ok"] is True
-    assert out["pr"] == 57, "identity must survive the fetch"
+    assert identity.items() <= out.items(), "run identity must survive the fetch"
 
 
 @pytest.mark.parametrize(
@@ -87,6 +102,25 @@ def test_a_detail_fetch_that_fails_is_data_not_an_exception(
     assert out["failed"] == []
     assert reason_fragment in out["reason"]
     assert out["pr"] == 57
+
+
+def test_failed_detail_still_maps_to_a_ci_round_with_run_identity(monkeypatch):
+    identity = {
+        "pr": 57, "sha": "abc123", "run_id": "sb-101", "repo": "acme/widget",
+        "check_runs_url": "https://api/x",
+    }
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: (1, "", "fetch denied"))
+
+    detailed = acts.check_details(identity)
+    result = acts.map_ci_findings({**detailed, "round": 3})
+
+    assert result["verdict"] == "changes_requested"
+    assert result["round"] == 3
+    assert len(result["findings"]) == 1
+    finding = result["findings"][0]
+    assert identity.items() <= finding.items()
+    assert finding["reason"] == "fetch denied"
+    assert "detail" not in finding
 
 
 def test_check_details_rejects_a_listing_without_check_runs(monkeypatch):

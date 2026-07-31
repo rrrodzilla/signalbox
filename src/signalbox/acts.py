@@ -526,7 +526,7 @@ def failed_check_names(records: list[dict]) -> list[str]:
 
 
 def check_details(payload: dict) -> dict:
-    """Name the checks behind a failed suite, so CI findings say what broke.
+    """Describe the checks behind a failed suite from its check-runs listing.
 
     A `check_suite` webhook carries one conclusion and no per-check detail, so the
     names have to be fetched. This is the only I/O on the failure path and the
@@ -550,22 +550,51 @@ def check_details(payload: dict) -> dict:
     if not isinstance(records, list):
         return {**payload, "ok": False, "failed": [], "detail_ok": False,
                 "reason": "check-runs listing carried no records"}
-    return {
-        **payload, "ok": True, "failed": failed_check_names(records),
-        "detail_ok": True,
-    }
+    failed_names = failed_check_names(records)
+    failed = []
+    for record, name in zip(
+        (record for record in records
+         if str(record.get("conclusion") or "").upper() not in PASSING_CONCLUSIONS),
+        failed_names,
+    ):
+        check = {key: record[key] for key in ("id", "details_url", "html_url")
+                 if key in record}
+        check["name"] = name
+        if isinstance(record.get("output"), dict):
+            output = {key: record["output"][key] for key in ("title", "summary")
+                      if key in record["output"]}
+            if output:
+                check["output"] = output
+        failed.append(check)
+    return {**payload, "ok": True, "failed": failed, "detail_ok": True}
 
 
 def map_ci_findings(payload: dict) -> dict:
     """Turn a red build into review findings, so the existing fix loop handles it."""
+    identity = {
+        key: payload[key]
+        for key in ("pr", "sha", "run_id", "repo", "check_runs_url")
+        if key in payload
+    }
+    findings = []
+    for failed in payload.get("failed") or []:
+        check = failed if isinstance(failed, dict) else {"name": str(failed)}
+        finding = {"source": "ci", **identity}
+        if "name" in check:
+            finding["check"] = check["name"]
+        finding.update({key: check[key] for key in ("id", "output", "details_url", "html_url")
+                        if key in check})
+        findings.append(finding)
+    if not findings:
+        finding = {"source": "ci", **identity}
+        if "reason" in payload:
+            finding["reason"] = payload["reason"]
+        findings.append(finding)
     return {
         **payload,
         "verdict": "changes_requested",
         "round": int(payload.get("round") or 1),
-        "findings": [
-            {"source": "ci", "check": name, "detail": "CI check failed after merge"}
-            for name in payload.get("failed") or []
-        ],
+        "findings": findings,
     }
 
 

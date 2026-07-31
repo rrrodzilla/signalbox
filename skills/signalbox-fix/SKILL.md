@@ -21,9 +21,11 @@ signalbox emit shard.submitted   --field verdict=done
 
 ## The procedure
 
-1. **Read `findings` in your payload.** Each finding names a file, a problem,
-   and usually a location. Treat the list as exhaustive: findings not in it are
-   not your business this round.
+1. **Read `findings` in your payload.** Reviewer findings name a file, a
+   problem, and usually a location. For a shard review round, treat that list as
+   exhaustive: findings not in it are not your business this round. This does
+   not apply to a CI-originated round, whose findings are pointers to failures,
+   not an exhaustive diagnosis.
 
 2. **Continue from your resumed session.** For shard review rounds, dispatch
    resumes the shard's recorded runner session. On round 2 that is the
@@ -32,7 +34,11 @@ signalbox emit shard.submitted   --field verdict=done
    duplicate or competing changes on top. A CI-originated round is different:
    `map-ci-to-findings` rehydrates a PR-level payload with no `shard_id`, so
    there is no shard session to resume and the cold start is deliberate. In
-   either case, read the current state of every declared file before editing.
+   that round, your first job is to read the CI failure itself: use
+   `gh run view --log-failed` to select and inspect the GitHub Actions run, and
+   follow the `details_url` or `html_url` carried in the finding. The payload's
+   `run_id` is the signalbox run identity, not a GitHub Actions run ID. In either
+   case, read the current state of every declared file before editing.
 
 3. **Address every finding.** For each one, either fix it, or be ready to say
    why it should not be fixed (see disagreement below). Partial fixes cost a

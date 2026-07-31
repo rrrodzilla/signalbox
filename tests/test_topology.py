@@ -360,7 +360,10 @@ PASSIVE_CONSUMER_EXEMPTIONS = {
     "shard.check-ran": "a check announcement is progress telemetry while the shard remains in flight",
     "run.halted": "the failure terminal is observed and notified but cannot advance further",
     "workspace.released": "successful cleanup occurs after the run terminal and needs no successor",
-    "checks.unknown-pr": "a check_suite delivery without a pending marker names no run to terminate",
+    "checks.unknown-pr": (
+        "a missing marker is operational evidence: it can be a late suite after a run terminal "
+        "cleared the marker, so routing it to run.halted would duplicate that terminal"
+    ),
     "workspace.release-failed": "workspace release begins only after the run terminal",
     "issue.closed": "issue closure is observed after merge and does not advance run control",
     "issue.close-failed": "issue closure failure is observed after merge and does not halt the run",
@@ -404,8 +407,9 @@ def error_topics() -> set[str]:
 
 
 ERROR_HANDLER_EXEMPTIONS = {
-    # No pending marker means the delivery carries no run identity to terminate.
-    "checks.unknown-pr": "a check_suite delivery without a pending marker names no run",
+    # A late suite can arrive after the run terminal cleared its PR marker;
+    # halting on this error would publish and notify a second false terminal.
+    "checks.unknown-pr": "missing-marker evidence may arrive after the run is already terminal",
     # Release is downstream of run.completed, and refusal publishes a second shape.
     "workspace.release-failed": "workspace release begins only after the run terminal",
 }
@@ -742,6 +746,8 @@ def test_stateful_joins_publish_neutral_topics_before_run_terminals():
         ("route-audit-changes", "route-audit-exhausted"),
         ("guard-stages-advance", "guard-stages-exhaust"),
         ("guard-rounds-continue", "guard-rounds-exhaust"),
+        ("guard-ci-rounds-continue", "guard-ci-rounds-exhaust"),
+        ("guard-ci-review-rounds-continue", "guard-ci-review-rounds-exhaust"),
         ("guard-remediation-retry", "guard-remediation-exhaust"),
         ("guard-remediation-resume-built", "guard-remediation-exhaust"),
         ("guard-remediation-resume-suite", "guard-remediation-exhaust"),
@@ -805,7 +811,7 @@ def test_rebase_precedes_the_suite_without_changing_the_gate_push_edges():
     suite = named(HANDLERS, "run-suite")
     push = named(HANDLERS, "push-branch")
 
-    assert rebase["subscribes"] == ["run.built"]
+    assert rebase["subscribes"] == ["run.built", "run.rebuilt"]
     assert rebase["args"][rebase["args"].index("-e") + 1] == "branch.rebase-failed"
     assert "branch.rebase-failed" in rebase["publishes"]
     assert suite["subscribes"] == ["branch.rebased"]
@@ -992,9 +998,13 @@ def test_every_pending_marker_has_something_that_clears_it():
         erasers = [
             p for p in HANDLERS + SINKS
             if f"clear-pending --kind {kind}" in " ".join(p.get("args", []))
-            or f"rehydrate --kind {kind}" in " ".join(p.get("args", []))
         ]
         assert erasers, f"nothing clears a {kind} marker, so success reads as silence"
+
+    pr_eraser = named(SINKS, "clear-pr-pending")
+    assert pr_eraser["subscribes"] == ["run.completed", "run.halted"]
+    assert "clear-pending --kind pr" in " ".join(pr_eraser["args"])
+    assert "rehydrate" not in " ".join(pr_eraser["args"])
 
 
 def test_fixer_sessions_stay_outside_reaped_pending_kinds(monkeypatch, tmp_path):
@@ -1320,6 +1330,120 @@ def route(handler_name: str, payload: dict) -> dict | None:
     assert done.returncode == 0, f"{handler_name} jq failed: {done.stderr}"
     out = done.stdout.strip()
     return json.loads(out) if out else None
+
+
+@pytest.mark.parametrize("ci_origin", [None, "post-merge"])
+@pytest.mark.parametrize("verdict", ["approved", "changes_requested", "unexpected"])
+def test_review_origin_split_is_exclusive_and_exhaustive(ci_origin, verdict):
+    envelope = {"run_id": "sb-145", "verdict": verdict}
+    if ci_origin is not None:
+        envelope["ci_origin"] = ci_origin
+    normal = ("route-approved", "route-changes", "route-review-invalid")
+    ci = ("route-ci-approved", "route-ci-changes", "route-ci-review-invalid-halted")
+    matches = {name: route(name, envelope) for name in normal + ci}
+    selected = [name for name, output in matches.items() if output is not None]
+    assert len(selected) == 1
+    assert (selected[0] in ci) is (ci_origin == "post-merge")
+
+
+@pytest.mark.parametrize("ci_round,continues", [(1, True), (5, False)])
+def test_ci_depth_guard_executes_both_exclusive_arms(ci_round, continues):
+    # This is the real map_ci_findings success shape, before the fixer/reviewer
+    # seams discard check detail. The guard must sit here to bound complete
+    # approve -> rebuild -> hosted-CI-red cycles, not only review rejections.
+    attempted = {
+        "run_id": "sb-145", "ok": True, "ci_origin": "post-merge",
+        "ci_round": ci_round,
+        "failed": [{"name": "unit"}, {"name": "lint"}],
+        "findings": [
+            {"source": "ci", "check": "unit"},
+            {"source": "ci", "check": "lint"},
+        ],
+    }
+    envelope = route("route-ci-findings-ok", attempted)
+    assert envelope == attempted
+    assert named(HANDLERS, "guard-ci-rounds-continue")["subscribes"] == ["ci.fix-ready"]
+    assert named(HANDLERS, "guard-ci-rounds-exhaust")["subscribes"] == ["ci.fix-ready"]
+    keep = route("guard-ci-rounds-continue", envelope)
+    stop = route("guard-ci-rounds-exhaust", envelope)
+    assert (keep is not None, stop is not None) == (continues, not continues)
+    if stop:
+        assert "unit" in stop["reason"] and "lint" in stop["reason"]
+
+
+def test_dashboard_displays_both_ci_cycle_and_review_counters():
+    apply_body = PAGE_TEXT[
+        PAGE_TEXT.index("function apply(msg)") : PAGE_TEXT.index("function shardSidings")
+    ]
+    ci_case = apply_body[
+        apply_body.index('case "ci.changes-requested"') :
+        apply_body.index('case "fix.opened"')
+    ]
+    assert "p.ci_round" in ci_case
+    assert "p.round" in ci_case
+
+
+@pytest.mark.parametrize("round_number,continues", [(1, True), (5, False)])
+def test_ci_review_rejection_loop_is_bounded_by_its_own_round(round_number, continues):
+    reviewed = {
+        "run_id": "sb-145", "ci_origin": "post-merge", "ci_round": 2,
+        "round": round_number, "verdict": "changes_requested",
+    }
+    changes = route("route-ci-changes", reviewed)
+    keep = route("guard-ci-review-rounds-continue", changes)
+    stop = route("guard-ci-review-rounds-exhaust", changes)
+    assert (keep is not None, stop is not None) == (continues, not continues)
+    if keep:
+        assert keep["round"] == round_number + 1
+        assert keep["ci_round"] == 2
+    if stop:
+        assert stop["stranded_topic"] == "ci.changes-requested"
+        assert "review never approved" in stop["reason"]
+
+
+def test_unknown_pr_is_operational_evidence_not_a_duplicate_run_terminal():
+    consumers = [
+        handler["name"] for handler in HANDLERS
+        if "checks.unknown-pr" in handler.get("subscribes", [])
+    ]
+    assert consumers == []
+    assert "checks.unknown-pr" in PASSIVE_CONSUMER_EXEMPTIONS
+    assert "checks.unknown-pr" in ERROR_HANDLER_EXEMPTIONS
+
+
+def test_ci_refusals_and_terminals_have_run_halted_paths():
+    mapped = {"run_id": "sb-145", "ok": False, "reason": "empty run scope"}
+    assert route("route-ci-findings-ok", mapped) is None
+    refused_findings = route("route-ci-findings-refused-halted", mapped)
+    assert refused_findings["stranded_topic"] == "ci.findings-attempted"
+    assert route("route-ci-findings-refused-terminal", refused_findings)["run_id"] == "sb-145"
+
+    attempted = {"run_id": "sb-145", "ok": False, "reason": "nothing staged"}
+    refused = route("route-ci-commit-refused-halted", attempted)
+    assert refused["stranded_topic"] == "ci.commit-attempted"
+    assert route("route-ci-commit-refused-terminal", refused)["run_id"] == "sb-145"
+
+    for topic, payload in {
+        "shard.abandoned": {"outcome": "abandoned"},
+        "shard.invalid-verdict": {"outcome": "invalid"},
+        "shard.silent": {},
+        "scope.violated": {"outcome": "scope_violation"},
+    }.items():
+        halted = route("route-ci-shard-terminal-halted", {
+            "run_id": "sb-145", "ci_origin": "post-merge", **payload,
+        })
+        assert halted["stranded_topic"] == topic
+
+
+def test_ci_commit_success_reenters_rebase_without_republishing_run_built():
+    rebuilt = route("route-ci-commit-ok", {"run_id": "sb-145", "ok": True})
+    assert rebuilt == {"run_id": "sb-145", "ok": True}
+    assert named(HANDLERS, "rebase-branch")["subscribes"] == ["run.built", "run.rebuilt"]
+    # The CI loop adds no run.built publisher: join-run is still the accumulator
+    # and guard-remediation-resume-built is remediation's declared pre-gate resume.
+    assert {h["name"] for h in HANDLERS if "run.built" in h.get("publishes", [])} == {
+        "join-run", "guard-remediation-resume-built",
+    }
 
 
 def test_notes_plan_routers_execute_as_exclusive_exhaustive_complements():

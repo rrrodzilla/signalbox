@@ -54,6 +54,12 @@ CARRIED_KEYS: tuple[str, ...] = (
     # its own intent could rewrite the standard it is about to be judged by.
     "intent",
     "round",
+    # Marks the post-merge CI-fix path so its outcomes re-enter promotion
+    # instead of the in-stage join, which has already fired by then.
+    "ci_origin",
+    # The post-merge CI loop re-enters the pipeline, so it needs a counter that
+    # cannot be confused with or reset by the in-stage review round.
+    "ci_round",
     # Runner sessions are assigned at the process boundary. Carrying this key
     # mechanically prevents a model from replacing the session to be resumed.
     "session_id",

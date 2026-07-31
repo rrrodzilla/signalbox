@@ -112,10 +112,16 @@ def test_failed_detail_still_maps_to_a_ci_round_with_run_identity(monkeypatch):
     monkeypatch.setattr(acts, "_run", lambda *a, **k: (1, "", "fetch denied"))
 
     detailed = acts.check_details(identity)
-    result = acts.map_ci_findings({**detailed, "round": 3})
+    result = acts.map_ci_findings({
+        **detailed,
+        "round": 3,
+        "stages": [{"shards": [{"files": ["src/fix.py"]}]}],
+    })
 
     assert result["verdict"] == "changes_requested"
-    assert result["round"] == 3
+    assert result["round"] == 1
+    assert result["ci_origin"] == "post-merge"
+    assert result["ci_round"] == 1
     assert len(result["findings"]) == 1
     finding = result["findings"][0]
     assert identity.items() <= finding.items()
@@ -149,7 +155,7 @@ def test_observed_facts_win_over_the_stored_marker():
     assert merged["conclusion"] == "success"
 
 
-def test_rehydrate_restores_run_identity_and_clears_the_marker(tmp_path, monkeypatch):
+def test_rehydrate_restores_run_identity_and_refreshes_the_marker(tmp_path, monkeypatch):
     monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
     opened = {
         "run_id": "sb-56", "repo": "rrrodzilla/signalbox", "issue": 56,
@@ -158,6 +164,10 @@ def test_rehydrate_restores_run_identity_and_clears_the_marker(tmp_path, monkeyp
     marker = acts.mark_pending("pr", opened)
     assert marker.exists()
     assert marker.name == "pr-57.json"
+    marker.touch()
+    old_mtime = marker.stat().st_mtime - 3600
+    import os
+    os.utime(marker, (old_mtime, old_mtime))
 
     observed = {
         "run_id": "sb-56",
@@ -173,7 +183,8 @@ def test_rehydrate_restores_run_identity_and_clears_the_marker(tmp_path, monkeyp
     assert out["issue"] == 56
     assert out["base_sha"] == "d6c8f80"
     assert out["conclusion"] == "success"
-    assert not marker.exists(), "a suite that concluded is not a silent one"
+    assert marker.exists(), "another suite on this PR still needs run identity"
+    assert marker.stat().st_mtime > old_mtime, "rehydration refreshes the silence window"
 
 
 def test_a_suite_for_an_untracked_pr_raises_rather_than_inventing_a_run(

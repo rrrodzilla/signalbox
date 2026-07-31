@@ -350,6 +350,10 @@ const EVENT = {
   "review.submitted":["build","judge","review-shard","out"], "review.failed":["build","stop"],
   "review.invalid-verdict":["build","stop"], "shard.approved":["build","go"],
   "shard.changes-requested":["build","stop"], "fix.opened":["build","work"],
+  "ci.findings-attempted":["promote","judge"], "ci.findings-refused":["promote","stop"],
+  "ci.fix-ready":["promote","work"], "ci.changes-requested":["promote","stop"],
+  "ci.fix-approved":["promote","go"], "ci.commit-attempted":["promote","judge"],
+  "ci.commit-refused":["promote","stop"], "run.rebuilt":["build","go","rebase-branch","in"],
   "shard.escalated":["build","stop"], "stage.closed":["build","work"],
   "stage.mergeable":["build","judge"], "merge.attempted":["build","judge"],
   "stage.merged":["build","work"], "stage.conflicted":["build","stop"],
@@ -746,6 +750,11 @@ function apply(msg) {
       run.rounds = Math.max(run.rounds, p.round || 0);
       run.verdict = { label: "CHANGES REQUESTED", cls: "v-red",
         detail: p.shard_id ? p.shard_id + " round " + (p.round || 1) : "" }; break;
+    case "ci.changes-requested": run.shards.set(p.shard_id, "fixing");
+      run.rounds = Math.max(run.rounds, p.round || 0);
+      run.verdict = { label: "CHANGES REQUESTED", cls: "v-red",
+        detail: p.shard_id ? p.shard_id + " CI cycle " + (p.ci_round || 1) +
+          " review round " + (p.round || 1) : "" }; break;
     case "fix.opened": run.shards.set(p.shard_id, "fixing");
       run.rounds = Math.max(run.rounds, p.round || 0); break;
     case "shard.escalated": case "shard.abandoned": case "scope.violated":
@@ -760,6 +769,12 @@ function apply(msg) {
       run.verdict = { label: "STAGE CONFLICTED", cls: "v-red",
         detail: p.stage_id || "" }; break;
     case "run.built": set("build", "done"); before("gate"); milestone("BUILT"); break;
+    case "run.rebuilt": set("promote", "running"); before("gate");
+      milestone("CI FIX COMMITTED"); break;
+    case "ci.fix-approved": milestone("CI FIX APPROVED"); break;
+    case "ci.commit-refused": set("promote", "failed");
+      run.verdict = { label: "CI COMMIT REFUSED", cls: "v-red",
+        detail: p.reason || "" }; break;
     case "branch.rebased": milestone("REBASED"); break;
     case "branch.rebase-conflicted": case "branch.rebase-invalid-verdict":
       set("gate", "failed");
@@ -785,6 +800,15 @@ function apply(msg) {
     case "checks.failed": run.suite = "checks FAILED";
       run.verdict = { label: "CHECKS FAILED", cls: "v-red",
         detail: (p.failed || []).join(", ") }; break;
+    case "ci.findings-attempted": run.verdict = { label: "MAPPING CI FINDINGS",
+      cls: "v-amber", detail: "" }; break;
+    case "ci.findings-refused": set("promote", "failed");
+      run.verdict = { label: "CI FINDINGS REFUSED", cls: "v-red",
+        detail: p.reason || "" }; break;
+    case "ci.fix-ready": run.verdict = { label: "FIXING CI",
+      cls: "v-amber", detail: p.shard_id || "" }; break;
+    case "ci.commit-attempted": run.verdict = { label: "COMMITTING CI FIX",
+      cls: "v-amber", detail: "" }; break;
     case "checks.silent": case "checks.unknown-pr":
       set("promote", "failed");
       run.verdict = { label: t.split(".")[1].toUpperCase().replace(/-/g, " "),

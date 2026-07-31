@@ -322,6 +322,72 @@ def test_every_published_event_has_a_consumer():
     assert not unconsumed, f"nothing consumes: {sorted(unconsumed)}"
 
 
+def error_topics() -> set[str]:
+    """Every exec-handler error edge declared by the topology."""
+    topics = set()
+    for primitive in HANDLERS + SINKS:
+        args = primitive.get("args", [])
+        topics.update(args[index + 1] for index, arg in enumerate(args[:-1]) if arg == "-e")
+    return topics
+
+
+ERROR_HANDLER_EXEMPTIONS = {
+    # No pending marker means the delivery carries no run identity to terminate.
+    "checks.unknown-pr": "a check_suite delivery without a pending marker names no run",
+    # Release is downstream of run.completed, and refusal publishes a second shape.
+    "workspace.release-failed": "workspace release begins only after the run terminal",
+}
+
+
+def test_every_error_topic_has_a_handler_or_a_written_terminal_exemption():
+    """A new -e edge must not silently strand the run that reached its node."""
+    consumers = {
+        topic
+        for handler in HANDLERS
+        for topic in handler.get("subscribes", [])
+    }
+    assert set(ERROR_HANDLER_EXEMPTIONS) <= error_topics()
+    missing = error_topics() - consumers - set(ERROR_HANDLER_EXEMPTIONS)
+    assert not missing, f"-e topics with no handler: {sorted(missing)}"
+
+
+@pytest.mark.parametrize(
+    "router,reason",
+    [
+        ("route-plan-draft-failed-halted", "plan drafting failed"),
+        ("route-plan-audit-failed-halted", "plan audit failed"),
+        ("route-review-failed-halted", "shard review failed"),
+        ("route-rebase-failed-halted", "branch rebase failed"),
+        ("route-assess-failed-halted", "promotion assessment failed"),
+        ("route-notes-plan-failed-halted", "notes planning failed"),
+    ],
+)
+def test_judging_error_routers_execute_against_nested_error_payloads(router, reason):
+    """The v0.11.0 -e envelope nests diagnostics while retaining run identity."""
+    payload = {
+        "run_id": "sb-110",
+        "error": {"exit_code": 17, "stderr": "quota exhausted"},
+    }
+    assert route(router, payload) == {
+        **payload,
+        "reason": f"{reason} (exit 17): quota exhausted",
+    }
+
+    timed_out = {
+        "run_id": "sb-110",
+        "error": {"exit_code": None, "stderr": "process timed out"},
+    }
+    assert route(router, timed_out) == {
+        **timed_out,
+        "reason": f"{reason} (no exit code): process timed out",
+    }
+
+    # The old, un-nested shape must not accidentally satisfy the selector.
+    assert route(router, {
+        "run_id": "sb-110", "exit_code": 17, "stderr": "quota exhausted"
+    }) is None
+
+
 def test_notes_planning_fans_out_with_merge_only_after_checks_pass():
     planner = named(HANDLERS, "plan-notes")
     merger = named(HANDLERS, "merge-pr")

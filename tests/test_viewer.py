@@ -299,9 +299,10 @@ def test_forwarder_pidfile_names_a_supervisor_that_respawns_and_stops(tmp_path: 
     gh = fake_bin / "gh"
     gh.write_text(
         "#!/usr/bin/env bash\n"
-        "if [[ \"$1 $2\" == \"extension list\" ]]; then\n"
-        "  echo 'cli/gh-webhook'; exit 0\n"
-        "fi\n"
+        "case \"$1\" in\n"
+        "  extension) echo 'cli/gh-webhook'; exit 0 ;;\n"
+        "  api) exit 1 ;;\n"
+        "esac\n"
         f"echo started >> {invocations}\n"
         "trap 'exit 0' TERM INT\n"
         "while true; do sleep 1; done\n"
@@ -345,6 +346,70 @@ def test_forwarder_pidfile_names_a_supervisor_that_respawns_and_stops(tmp_path: 
     with pytest.raises(ProcessLookupError):
         os.kill(supervisor, 0)
     assert not (log_dir / "forward.child.pid").exists()
+
+
+def test_forwarder_teardown_reaps_processes_and_purges_its_github_hook(
+    tmp_path: Path,
+):
+    """#107: stopping is clean and removes the temporary ingress it created."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    api_calls = tmp_path / "api-calls"
+    gh = fake_bin / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        "case \"$1\" in\n"
+        "  extension) echo 'cli/gh-webhook'; exit 0 ;;\n"
+        "  api)\n"
+        f"    printf '%s\\n' \"$*\" >> {api_calls}\n"
+        "    if [[ \"$*\" != *'--method DELETE'* ]]; then echo 42; fi\n"
+        "    exit 0 ;;\n"
+        "esac\n"
+        "trap 'exit 0' TERM INT\n"
+        "while true; do sleep 1; done\n"
+    )
+    gh.chmod(0o755)
+    log_dir = tmp_path / "logs"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "SIGNALBOX_LOG_DIR": str(log_dir),
+    }
+    log_dir.mkdir()
+    (log_dir / "forward.repo").write_text("owner/repo")
+    forward_log = log_dir / "forward.log"
+    with forward_log.open("w") as output:
+        supervisor_process = subprocess.Popen(
+            [ROOT / "bin/harness.sh", "_forward-supervise", "owner/repo"],
+            env=env,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        (log_dir / "forward.pid").write_text(str(supervisor_process.pid))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not (log_dir / "forward.ready").exists():
+            time.sleep(0.1)
+        assert (log_dir / "forward.ready").exists()
+        child = int((log_dir / "forward.child.pid").read_text())
+
+        stopped = subprocess.run(
+            [ROOT / "bin/harness.sh", "unforward"],
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        assert stopped.returncode == 0, stopped.stderr
+        assert supervisor_process.wait(timeout=5) == 0
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
+    assert "unbound variable" not in forward_log.read_text()
+    assert "repos/owner/repo/hooks" in api_calls.read_text()
+    assert "--method DELETE repos/owner/repo/hooks/42" in api_calls.read_text()
 
 
 def test_forwarder_lifecycle_and_launch_guard_are_explicit():

@@ -322,6 +322,44 @@ def test_every_published_event_has_a_consumer():
     assert not unconsumed, f"nothing consumes: {sorted(unconsumed)}"
 
 
+PASSIVE_CONSUMER_EXEMPTIONS = {
+    "exec.exit": "interval-source liveness telemetry is intentionally observed rather than advanced",
+    "model.invoked": "invocation provenance is audit telemetry and not run-control input",
+    "shard.check-ran": "a check announcement is progress telemetry while the shard remains in flight",
+    "run.halted": "the failure terminal is observed and notified but cannot advance further",
+    "workspace.released": "successful cleanup occurs after the run terminal and needs no successor",
+    "checks.unknown-pr": "a check_suite delivery without a pending marker names no run to terminate",
+    "workspace.release-failed": "workspace release begins only after the run terminal",
+    "control.unknown-event": (
+        "an event outside the control allowlist is an operator error whose payload may name no run"
+    ),
+    "stages.exhausted": (
+        "the last stage.merged publishes this redundant progress marker in parallel with run.built; "
+        "routing it to a terminal would halt every healthy run"
+    ),
+}
+
+
+def test_every_published_event_has_an_active_consumer_or_a_written_exemption():
+    """Passive observability sinks must not disguise a stranded run-control event."""
+    passive = {"dashboard", "notify", "trace", "topology"}
+    consumers = {
+        topic: {
+            primitive["name"]
+            for primitive in HANDLERS + SINKS
+            if topic in primitive.get("subscribes", [])
+        }
+        for topic in published()
+    }
+    passive_only = {
+        topic for topic, names in consumers.items()
+        if names and names <= passive
+    }
+    assert set(PASSIVE_CONSUMER_EXEMPTIONS) <= published()
+    missing = passive_only - set(PASSIVE_CONSUMER_EXEMPTIONS)
+    assert not missing, f"published topics with only passive consumers: {sorted(missing)}"
+
+
 def error_topics() -> set[str]:
     """Every exec-handler error edge declared by the topology."""
     topics = set()
@@ -359,6 +397,7 @@ def test_every_error_topic_has_a_handler_or_a_written_terminal_exemption():
         ("route-review-failed-halted", "shard review failed"),
         ("route-rebase-failed-halted", "branch rebase failed"),
         ("route-assess-failed-halted", "promotion assessment failed"),
+        ("route-remediation-failed-halted", "remediation failed"),
         ("route-notes-plan-failed-halted", "notes planning failed"),
     ],
 )
@@ -386,6 +425,106 @@ def test_judging_error_routers_execute_against_nested_error_payloads(router, rea
     assert route(router, {
         "run_id": "sb-110", "exit_code": 17, "stderr": "quota exhausted"
     }) is None
+
+
+def test_pre_worktree_failures_route_directly_to_halted():
+    workspace = {"run_id": "sb-87", "ok": False}
+    assert route("route-prepare-failed-halted", workspace) == {
+        **workspace,
+        "reason": "workspace preparation failed before a worktree was available",
+    }
+    fetched = {"run_id": "sb-87", "ok": False, "issue": 87}
+    assert route("route-fetch-failed-halted", fetched) == {
+        **fetched,
+        "reason": "issue fetch failed before a usable worktree was available",
+    }
+
+
+def test_remediation_selectors_execute_as_a_bounded_exhaustive_loop():
+    stranded = route("route-gate-blocked", {
+        "run_id": "sb-87", "issue": 87, "decision": "block",
+    })
+    assert stranded is not None
+    requested = route("route-remediation-open", stranded)
+    assert requested == {**stranded, "attempt": 1}
+
+    # Mirror agent.py's Shape A publication seam. Only CARRIED_KEYS from the
+    # inbound envelope accompany the verdict, so this proves the live counter
+    # survives project() rather than merely testing an invented post-seam event.
+    from signalbox.identity import merge, project
+
+    verdict = {"remediation": "retry", "reason": "may clear"}
+    merged = merge(requested, verdict, "remediate")
+    retry = {**verdict, **project(merged.payload)}
+    assert retry["attempt"] == 1
+    assert "stranded_topic" not in retry, "non-carried diagnosis context must not be assumed post-seam"
+
+    assert route("guard-remediation-retry", retry) == {
+        **retry, "attempt": 2,
+    }
+    assert route("guard-remediation-exhaust", retry) is None
+    assert route("route-remediation-halt", retry) is None
+    assert route("route-remediation-invalid", retry) is None
+
+    last_retry = {**retry, "attempt": 3}
+    assert route("guard-remediation-retry", last_retry) is None
+    closed = route("guard-remediation-exhaust", last_retry)
+    assert closed == {
+        **last_retry, "reason": "remediation retry budget exhausted: may clear",
+    }
+    assert route("route-remediation-closed-halted", closed) == closed
+
+    # Defensive exhaustiveness: the exact old live envelope had no counter.
+    # It must close, never exploit jq's `null < 3` ordering to restart at one.
+    counterless = {"run_id": "sb-87", **verdict}
+    assert route("guard-remediation-retry", counterless) is None
+    assert route("guard-remediation-exhaust", counterless) == {
+        **counterless,
+        "reason": "remediation retry budget exhausted: may clear",
+    }
+
+    halt = {**requested, "remediation": "halt", "reason": "restore credentials"}
+    assert route("route-remediation-halt", halt) == halt
+    assert route("guard-remediation-retry", halt) is None
+    assert route("guard-remediation-exhaust", halt) is None
+    assert route("route-remediation-invalid", halt) is None
+    assert route("route-remediation-closed-halted", halt) == halt
+
+    invalid = {**requested, "remediation": "continue"}
+    assert route("route-remediation-invalid", invalid) == invalid
+    assert route("route-remediation-invalid-halted", invalid) == {
+        **invalid, "reason": "remediation returned an invalid verdict",
+    }
+
+
+@pytest.mark.parametrize(
+    "router,payload,topic",
+    [
+        ("route-plan-invalid", {"run_id": "sb-87", "stages": []}, "plan.invalid-verdict"),
+        ("route-audit-invalid", {"run_id": "sb-87", "verdict": "maybe"}, "plan.invalid-verdict"),
+        ("route-review-invalid", {"run_id": "sb-87", "verdict": "maybe"}, "review.invalid-verdict"),
+        ("route-rebase-conflict", {"run_id": "sb-87", "ok": False}, "branch.rebase-conflicted"),
+        ("route-rebase-invalid", {"run_id": "sb-87", "ok": "maybe"}, "branch.rebase-invalid-verdict"),
+        ("route-gate-blocked", {"run_id": "sb-87", "decision": "block"}, "gate.blocked"),
+        ("route-gate-invalid", {"run_id": "sb-87", "decision": "maybe"}, "gate.invalid-verdict"),
+        ("route-push-failed", {"run_id": "sb-87", "ok": False}, "branch.push-failed"),
+        ("route-open-failed", {"run_id": "sb-87", "ok": False}, "pr.open-failed"),
+        ("route-merge-pr-failed", {"run_id": "sb-87", "ok": False}, "pr.merge-failed"),
+    ],
+)
+def test_each_remediation_producer_names_the_topic_it_stranded(router, payload, topic):
+    routed = route(router, payload)
+    assert routed == {**payload, "stranded_topic": topic}
+
+
+def test_silent_checks_name_the_topic_the_reaper_stranded():
+    payload = {
+        "command": "signalbox reap --kind pr --stale-minutes 40",
+        "stdout": '{"run_id":"sb-87","pr":87}',
+    }
+    assert route("raise-pr-reaped", payload) == {
+        "run_id": "sb-87", "pr": 87, "stranded_topic": "checks.silent",
+    }
 
 
 def test_notes_planning_fans_out_with_merge_only_after_checks_pass():
@@ -418,6 +557,23 @@ def test_run_completion_is_only_published_by_the_full_completion_router():
     }
     assert route("route-completion-full", summary) == summary
     assert route("route-completion-short", summary) is None
+
+
+def test_remediation_subgraph_cannot_publish_past_the_gate():
+    """The remediation block is topological: none of its nodes can promote a run."""
+    remediation_nodes = [
+        handler for handler in HANDLERS
+        if "remediation" in handler["name"] or handler["name"] == "remediate"
+    ]
+    assert remediation_nodes, "the resolved topology contains no remediation subgraph"
+    published_by_remediation = {
+        topic for handler in remediation_nodes for topic in handler.get("publishes", [])
+    }
+    post_gate = {
+        "gate.cleared", "approval.granted", "run.completed", "run.built",
+        "suite.ran", "branch.pushed", "pr.opened", "checks.passed",
+    }
+    assert published_by_remediation.isdisjoint(post_gate)
 
 
 def test_a_zero_note_plan_needs_the_merge_arm_to_reach_the_run_terminal():
@@ -481,6 +637,7 @@ def test_stateful_joins_publish_neutral_topics_before_run_terminals():
         ("route-audit-changes", "route-audit-exhausted"),
         ("guard-stages-advance", "guard-stages-exhaust"),
         ("guard-rounds-continue", "guard-rounds-exhaust"),
+        ("guard-remediation-retry", "guard-remediation-exhaust"),
     ],
 )
 def test_depth_guards_have_both_sides(continue_handler, exhaust_handler):
@@ -871,6 +1028,7 @@ def test_every_non_deterministic_node_publishes_invocation_provenance():
         "review": "review-shard",
         "rebase": "rebase-branch",
         "assess": "assess",
+        "remediate": "remediate",
         "plan-notes": "plan-notes",
         "write-note": "write-note",
         "implement": "dispatch-implement",
@@ -896,7 +1054,7 @@ def test_every_non_deterministic_node_publishes_invocation_provenance():
 # primitive whose `--max-concurrent` defaults to 1.
 MODEL_NODES = (
     "draft-plan", "audit-plan", "review-shard", "rebase-branch", "assess",
-    "plan-notes", "write-note", "dispatch-implement", "dispatch-fix",
+    "remediate", "plan-notes", "write-note", "dispatch-implement", "dispatch-fix",
 )
 
 
@@ -1148,7 +1306,10 @@ def test_every_refusing_act_routes_one_identity_bearing_attempt_by_its_outcome()
                 f"{node_name} routers are not exclusive and exhaustive for ok={ok}"
             )
             selected_routers[ok] = named(HANDLERS, selected[0])
-            assert matches[selected[0]] == envelope
+            output = matches[selected[0]]
+            assert output is not None
+            assert {key: output[key] for key in envelope} == envelope
+            assert set(output) - set(envelope) <= {"stranded_topic"}
             assert identity.items() <= matches[selected[0]].items()
 
         success = selected_routers[True]
@@ -1218,7 +1379,17 @@ def test_rebase_verdict_routers_are_exclusive_when_executed(payload, matched):
         "invalid": route("route-rebase-invalid", payload),
     }
     assert [name for name, output in outputs.items() if output is not None] == [matched]
-    assert outputs[matched] == payload
+    output = outputs[matched]
+    assert output is not None
+    assert {key: output[key] for key in payload} == payload
+    expected_topic = {
+        "conflict": "branch.rebase-conflicted",
+        "invalid": "branch.rebase-invalid-verdict",
+    }.get(matched)
+    if expected_topic is None:
+        assert output == payload
+    else:
+        assert output == {**payload, "stranded_topic": expected_topic}
 
 
 def checked_stage_plan(run_id: str = "sb-59") -> dict:

@@ -65,11 +65,12 @@ ROLE_PRODUCT_KEYS: dict[str, frozenset[str]] = {
 
 
 class MergeResult(NamedTuple):
-    """A role-aware merge and the two kinds of conflicting model output."""
+    """A role-aware merge and its conflicting or omitted model output."""
 
     payload: dict
     envelope_overridden: list[str]
     product_overridden: list[str]
+    product_omitted: list[str]
 
 
 def project(source: dict) -> dict:
@@ -113,6 +114,9 @@ def merge(inbound: dict, produced: dict, role: str) -> MergeResult:
     product_keys = ROLE_PRODUCT_KEYS.get(role, frozenset())
     merged = dict(inbound)
     merged.update(produced)
+    omitted_product_keys = product_keys & inbound.keys() - produced.keys()
+    for key in omitted_product_keys:
+        merged.pop(key, None)
     for key in CARRIED_KEYS:
         if key in inbound and key not in product_keys:
             merged[key] = inbound[key]
@@ -126,4 +130,5 @@ def merge(inbound: dict, produced: dict, role: str) -> MergeResult:
         payload=merged,
         envelope_overridden=sorted(conflicts - product_keys),
         product_overridden=sorted(conflicts & product_keys),
+        product_omitted=sorted(omitted_product_keys),
     )

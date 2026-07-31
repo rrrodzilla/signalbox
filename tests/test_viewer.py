@@ -412,6 +412,99 @@ def test_forwarder_teardown_reaps_processes_and_purges_its_github_hook(
     assert "--method DELETE repos/owner/repo/hooks/42" in api_calls.read_text()
 
 
+def test_forwarder_repairs_a_refused_stale_hook_then_connects(tmp_path: Path):
+    """#107: the one repairable startup failure is purged and retried once."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    attempts = tmp_path / "attempts"
+    deleted = tmp_path / "deleted"
+    gh = fake_bin / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == api ]]; then\n"
+        f"  if [[ \"$*\" == *'--method DELETE'* ]]; then touch {deleted}; else echo 42; fi\n"
+        "  exit 0\n"
+        "fi\n"
+        f"echo attempt >> {attempts}\n"
+        f"if [[ ! -f {deleted} ]]; then\n"
+        "  echo 'HTTP 422: Hook already exists on this repository' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "trap 'exit 0' TERM INT\n"
+        "while true; do sleep 1; done\n"
+    )
+    gh.chmod(0o755)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "forward.repo").write_text("owner/repo")
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "SIGNALBOX_LOG_DIR": str(log_dir),
+    }
+
+    forward_log = log_dir / "forward.log"
+    with forward_log.open("w") as output:
+        supervisor = subprocess.Popen(
+            [ROOT / "bin/harness.sh", "_forward-supervise", "owner/repo"],
+            env=env,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline and not (log_dir / "forward.ready").exists():
+            time.sleep(0.1)
+        assert (log_dir / "forward.ready").exists(), forward_log.read_text()
+        assert deleted.exists()
+        assert attempts.read_text().count("attempt") == 2
+        supervisor.terminate()
+        assert supervisor.wait(timeout=5) == 0
+
+    assert "purging it and retrying once" in forward_log.read_text()
+
+
+def test_forwarder_terminates_when_stale_hook_repair_does_not_work(tmp_path: Path):
+    """#107: a repeated permanent refusal does not enter capped backoff."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    attempts = tmp_path / "attempts"
+    gh = fake_bin / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == api ]]; then\n"
+        "  if [[ \"$*\" != *'--method DELETE'* ]]; then echo 42; fi\n"
+        "  exit 0\n"
+        "fi\n"
+        f"echo attempt >> {attempts}\n"
+        "echo 'HTTP 422: Hook already exists on this repository' >&2\n"
+        "exit 1\n"
+    )
+    gh.chmod(0o755)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "forward.repo").write_text("owner/repo")
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "SIGNALBOX_LOG_DIR": str(log_dir),
+    }
+
+    result = subprocess.run(
+        [ROOT / "bin/harness.sh", "_forward-supervise", "owner/repo"],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=6,
+    )
+
+    assert result.returncode != 0
+    assert attempts.read_text().count("attempt") == 2
+    assert "terminal webhook forwarder failure" in result.stdout
+    assert "restarting in" not in result.stdout
+
+
 def test_forwarder_lifecycle_and_launch_guard_are_explicit():
     """#63: lifecycle ordering and recovery stay visible as shell invariants."""
     lines = (ROOT / "bin" / "harness.sh").read_text().splitlines()

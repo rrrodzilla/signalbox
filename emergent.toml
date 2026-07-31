@@ -183,9 +183,9 @@ publishes = ["checks.observed"]
 # holds no marker for the delivery, a real non-zero exit rather than a refusal;
 # its success path cannot return ok: false and also merges the marker's stored
 # identity into the observed delivery.
-# checks.unknown-pr needs no run.halted router: by definition this check_suite
-# delivery has no pending marker, so it names no run to halt. The trace sink
-# already consumes it as unattributed operational evidence.
+# checks.unknown-pr is terminally routed below. A repeated suite still carries
+# run identity after #145 because rehydrate refreshes, rather than consumes, the
+# marker; treating a missing marker as necessarily unattributed hid that run.
 [[handlers]]
 name = "rehydrate-pr"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
@@ -555,8 +555,8 @@ args = ["-s", "fix.opened", "-t", "2400000", "--max-concurrent", "40", "--",
 subscribes = ["fix.opened"]
 # A shard's fix rounds resume its recorded runner session; the review router
 # increments and guards the round counter described in review-loop.md. CI
-# findings deliberately arrive without shard_id and therefore cold-start a
-# fixer session. See #90.
+# findings carry a dedicated CI shard identity and therefore cold-start a fixer
+# session instead of resuming the first implementation shard. See #90 and #145.
 #
 # WIDTH, because a whole stage can come back changes_requested at once. A fix
 # inherits its shard's declared file list, so concurrent fixers are disjoint by
@@ -577,6 +577,15 @@ path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "pr.opened", "-t", "10000", "--",
         "signalbox", "mark-pending", "--kind", "pr"]
 subscribes = ["pr.opened"]
+
+# Issue #145 left refreshed PR markers behind after either run terminal, making
+# the reaper resurrect completed and halted runs as checks.silent.
+[[sinks]]
+name = "clear-pr-pending"
+path = "~/.local/share/emergent/primitives/bin/exec-sink"
+args = ["-s", "run.completed", "-s", "run.halted", "-t", "10000", "--",
+        "signalbox", "clear-pending", "--kind", "pr"]
+subscribes = ["run.completed", "run.halted"]
 
 # Human approval waits are deliberately not reaped on the shard or PR clocks:
 # the marker is durable storage for this run's projected identity until the
@@ -666,7 +675,7 @@ publishes = ["run.halted"]
 name = "route-approved"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "review.submitted", "--publish-as", "shard.approved", "--",
-        "jq", "-c", 'select(.verdict == "approved") | . + {outcome: "approved"}']
+        "jq", "-c", 'select(.ci_origin != "post-merge") | select(.verdict == "approved") | . + {outcome: "approved"}']
 subscribes = ["review.submitted"]
 publishes = ["shard.approved"]
 
@@ -674,7 +683,7 @@ publishes = ["shard.approved"]
 name = "route-changes"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "review.submitted", "--publish-as", "shard.changes-requested", "--",
-        "jq", "-c", 'select(.verdict == "changes_requested")']
+        "jq", "-c", 'select(.ci_origin != "post-merge") | select(.verdict == "changes_requested")']
 subscribes = ["review.submitted"]
 publishes = ["shard.changes-requested"]
 
@@ -682,9 +691,59 @@ publishes = ["shard.changes-requested"]
 name = "route-review-invalid"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "review.submitted", "--publish-as", "review.invalid-verdict", "--",
-        "jq", "-c", 'select((.verdict // "") | IN("approved", "changes_requested") | not) | . + {stranded_topic: "review.invalid-verdict"}']
+        "jq", "-c", 'select(.ci_origin != "post-merge") | select((.verdict // "") | IN("approved", "changes_requested") | not) | . + {stranded_topic: "review.invalid-verdict"}']
 subscribes = ["review.submitted"]
 publishes = ["review.invalid-verdict"]
+
+# Issue #145 proved that a CI approval sent to shard.approved is a late arrival
+# at join-stage's already-fired rendezvous, so it needs a distinct commit path.
+[[handlers]]
+name = "route-ci-approved"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.submitted", "--publish-as", "ci.fix-approved", "--",
+        "jq", "-c", 'select(.ci_origin == "post-merge") | select(.verdict == "approved")']
+subscribes = ["review.submitted"]
+publishes = ["ci.fix-approved"]
+
+# Issue #145 keeps reviewer-requested edits inside the current hosted-CI cycle;
+# only a newly observed red suite increments and guards ci_round.
+[[handlers]]
+name = "route-ci-changes"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.submitted", "--publish-as", "ci.changes-requested", "--",
+        "jq", "-c", 'select(.ci_origin == "post-merge") | select(.verdict == "changes_requested")']
+subscribes = ["review.submitted"]
+publishes = ["ci.changes-requested"]
+
+# Issue #145 also bounds reviewer revisions within one hosted-CI attempt. The
+# ordinary round counter is independent of the outer ci_round cycle counter.
+[[handlers]]
+name = "guard-ci-review-rounds-continue"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "ci.changes-requested", "--publish-as", "fix.opened", "--",
+        "jq", "-c", 'select(.round < 5) | .round += 1']
+subscribes = ["ci.changes-requested"]
+publishes = ["fix.opened"]
+
+# Issue #145 previously let a rejecting CI reviewer invoke fixer and reviewer
+# forever; this complementary arm terminates that inner review loop explicitly.
+[[handlers]]
+name = "guard-ci-review-rounds-exhaust"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "ci.changes-requested", "--publish-as", "run.halted", "--",
+        "jq", "-c", '. as $in | select(.round >= 5) | $in + {stranded_topic: "ci.changes-requested", reason: "post-merge CI fix review never approved after five rounds"}']
+subscribes = ["ci.changes-requested"]
+publishes = ["run.halted"]
+
+# Issue #145 made an invalid CI review otherwise fall into remediation without
+# a valid stage rendezvous; halt it with the topic that stranded the run.
+[[handlers]]
+name = "route-ci-review-invalid-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.submitted", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(.ci_origin == "post-merge") | select((.verdict // "") | IN("approved", "changes_requested") | not) | . + {stranded_topic: "review.invalid-verdict", reason: "post-merge CI fix review returned an invalid verdict"}']
+subscribes = ["review.submitted"]
+publishes = ["run.halted"]
 
 # FEEDBACK EDGE 2. Fixes re-enter the IMPLEMENTATION vocabulary, so scope-guard
 # and the reaper apply to them with no additional wiring.
@@ -787,10 +846,10 @@ publishes = ["run.built"]
 [[handlers]]
 name = "rebase-branch"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "run.built", "--publish-as", "branch.rebase-attempted",
+args = ["-s", "run.built", "-s", "run.rebuilt", "--publish-as", "branch.rebase-attempted",
         "-e", "branch.rebase-failed", "-t", "900000", "--max-concurrent", "8", "--",
         "signalbox", "agent", "rebase"]
-subscribes = ["run.built"]
+subscribes = ["run.built", "run.rebuilt"]
 publishes = ["branch.rebase-attempted", "branch.rebase-failed", "model.invoked"]
 
 [[handlers]]
@@ -1135,10 +1194,108 @@ publishes = ["checks.detail-failed"]
 name = "map-ci-to-findings"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "checks.detailed", "-s", "checks.detail-failed",
-        "--publish-as", "shard.changes-requested",
+        "--publish-as", "ci.findings-attempted",
         "-t", "60000", "--", "signalbox", "map-ci-findings"]
 subscribes = ["checks.detailed", "checks.detail-failed"]
-publishes = ["shard.changes-requested"]
+publishes = ["ci.findings-attempted"]
+
+# Issue #145 requires map-ci-findings' empty-scope refusal to be data-routed,
+# not passed to a fixer that must violate scope on its first write.
+[[handlers]]
+name = "route-ci-findings-ok"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "ci.findings-attempted", "--publish-as", "ci.fix-ready", "--",
+        "jq", "-c", 'select(.ok == true)']
+subscribes = ["ci.findings-attempted"]
+publishes = ["ci.fix-ready"]
+
+# Issue #145 guards the complete hosted-CI cycle immediately after mapping a
+# newly observed red suite, while its failed-check names are still present.
+[[handlers]]
+name = "guard-ci-rounds-continue"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "ci.fix-ready", "--publish-as", "fix.opened", "--",
+        "jq", "-c", 'select(.ci_round < 5)']
+subscribes = ["ci.fix-ready"]
+publishes = ["fix.opened"]
+
+# Issue #145 previously cycled forever when every approved fix left hosted CI
+# red; this complementary arm halts with names from the real mapped envelope.
+[[handlers]]
+name = "guard-ci-rounds-exhaust"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "ci.fix-ready", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(.ci_round >= 5) | . + {stranded_topic: "ci.fix-ready", reason: "post-merge CI fix rounds exhausted for failed checks: \((.failed // []) | map(if type == "object" then (.name // "unnamed check") else tostring end) | join(", "))"}']
+subscribes = ["ci.fix-ready"]
+publishes = ["run.halted"]
+
+# Issue #145 otherwise silently strands a run whose carried plan has no scope.
+[[handlers]]
+name = "route-ci-findings-refused-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "ci.findings-attempted", "--publish-as", "ci.findings-refused", "--",
+        "jq", "-c", 'select(.ok == false) | . + {stranded_topic: "ci.findings-attempted"}']
+subscribes = ["ci.findings-attempted"]
+publishes = ["ci.findings-refused"]
+
+# Issue #145 terminates map-ci-findings' empty-scope refusal after the generic
+# act outcome invariant has classified the refusal on its own failure topic.
+[[handlers]]
+name = "route-ci-findings-refused-terminal"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "ci.findings-refused", "--publish-as", "run.halted", "--",
+        "jq", "-c", '. + {reason: (.reason // "post-merge CI findings had no declared run scope")}']
+subscribes = ["ci.findings-refused"]
+publishes = ["run.halted"]
+
+# Issue #145 requires approved post-merge edits to become a real commit before
+# the branch re-enters the promote gate; merge-stage can no longer do that job.
+[[handlers]]
+name = "commit-ci-fix"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "ci.fix-approved", "--publish-as", "ci.commit-attempted",
+        "-t", "120000", "--", "signalbox", "commit-fix"]
+subscribes = ["ci.fix-approved"]
+publishes = ["ci.commit-attempted"]
+
+# Issue #145 re-enters at rebase rather than republishing the run accumulator.
+[[handlers]]
+name = "route-ci-commit-ok"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "ci.commit-attempted", "--publish-as", "run.rebuilt", "--",
+        "jq", "-c", 'select(.ok == true)']
+subscribes = ["ci.commit-attempted"]
+publishes = ["run.rebuilt"]
+
+# Issue #145 made commit refusal look successful because acts exit zero on
+# ok:false; this exclusive arm names the attempted topic and halts the run.
+[[handlers]]
+name = "route-ci-commit-refused-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "ci.commit-attempted", "--publish-as", "ci.commit-refused", "--",
+        "jq", "-c", 'select(.ok == false) | . + {stranded_topic: "ci.commit-attempted"}']
+subscribes = ["ci.commit-attempted"]
+publishes = ["ci.commit-refused"]
+
+# Issue #145 gives the refused commit its own terminal edge after the generic
+# act-outcome invariant has classified it as failure rather than success.
+[[handlers]]
+name = "route-ci-commit-refused-terminal"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "ci.commit-refused", "--publish-as", "run.halted", "--",
+        "jq", "-c", '. + {reason: (.reason // "post-merge CI fix could not be committed")}']
+subscribes = ["ci.commit-refused"]
+publishes = ["run.halted"]
+
+# Issue #145 showed CI-origin shard terminals arrive after join-stage fired;
+# turn each into an explicit run terminal instead of relying on a dead join.
+[[handlers]]
+name = "route-ci-shard-terminal-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "shard.abandoned", "-s", "shard.invalid-verdict", "-s", "shard.silent", "-s", "scope.violated", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(.ci_origin == "post-merge") | . + {stranded_topic: (.stranded_topic // (if .outcome == "abandoned" then "shard.abandoned" elif .outcome == "invalid" then "shard.invalid-verdict" elif .outcome == "scope_violation" then "scope.violated" else "shard.silent" end)), reason: "post-merge CI fixer terminated before approval"}']
+subscribes = ["shard.abandoned", "shard.invalid-verdict", "shard.silent", "scope.violated"]
+publishes = ["run.halted"]
 
 [[handlers]]
 name = "merge-pr"
@@ -1388,6 +1545,8 @@ subscribes = ["exec.output", "exec.exit",
               "checks.detail-attempted", "checks.detail-failed", "checks.detailed",
               "checks.failed", "checks.observed", "checks.passed", "checks.reported",
               "checks.silent", "checks.unknown-pr",
+              "ci.changes-requested", "ci.commit-attempted", "ci.commit-refused",
+              "ci.findings-attempted", "ci.findings-refused", "ci.fix-approved", "ci.fix-ready",
               "completion.closed", "control.unknown-event", "fix.opened", "gate.assessed",
               "gate.blocked", "gate.cleared", "gate.invalid-verdict", "issue.close-attempted",
               "issue.close-failed", "issue.closed", "issue.fetch-failed",
@@ -1400,7 +1559,7 @@ subscribes = ["exec.output", "exec.exit",
               "pr.open-attempted", "pr.open-failed", "pr.opened",
               "remediation.assessed", "remediation.closed", "remediation.failed",
               "remediation.invalid-verdict", "remediation.requested",
-              "review.failed", "review.invalid-verdict", "review.submitted", "run.built",
+              "review.failed", "review.invalid-verdict", "review.submitted", "run.built", "run.rebuilt",
               "run.completed", "run.halted", "run.requested", "scope.violated",
               "shard.abandoned", "shard.approved", "shard.built", "shard.changes-requested",
               "shard.check-ran", "shard.escalated", "shard.file-written",

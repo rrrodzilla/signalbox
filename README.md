@@ -6,7 +6,7 @@ The name is from railway signaling. A signal box is where the interlocking lives
 
 ## The shape
 
-One engine. Four sources, one hundred thirteen handlers, ten sinks, and no script that knows what comes next.
+One engine. Four sources, one hundred twenty-eight handlers, eleven sinks, and no script that knows what comes next.
 
 ```
 route-run-requested ─> [run.requested] ─> prepare-workspace, dashboard
@@ -21,13 +21,16 @@ route-prepare-ready ─> [workspace.ready] ─> fetch-issue, dashboard
 ├─< from: route-prepare-failed-halted, route-fetch-failed-halted,
 │         route-plan-draft-failed-halted, route-plan-exhausted,
 │         route-plan-audit-failed-halted, route-audit-exhausted,
-│         route-review-failed-halted, route-stage-dirty,
+│         route-review-failed-halted, guard-ci-review-rounds-exhaust,
+│         route-ci-review-invalid-halted, route-stage-dirty,
 │         route-rebase-failed-halted, route-suite-error-halted,
 │         route-assess-failed-halted, route-remediation-closed-halted,
 │         route-remediation-invalid-halted, route-remediation-failed-halted,
+│         guard-ci-rounds-exhaust, route-ci-findings-refused-terminal,
+│         route-ci-commit-refused-terminal, route-ci-shard-terminal-halted,
 │         route-notes-plan-failed-halted, route-notes-invalid-halted,
 │         route-completion-short
-└─> to: dashboard, notify, trace
+└─> to: clear-pr-pending, dashboard, notify, trace
 [issue.fetch-attempted]
 ├─< from: fetch-issue
 └─> to: route-fetch-fetched, route-fetch-failed, dashboard
@@ -102,9 +105,10 @@ route-check-suite ─> [checks.observed] ─> rehydrate-pr, dashboard
 [checks.reported]
 ├─< from: rehydrate-pr
 └─> to: route-checks-passed, route-checks-failed, dashboard
-[scope.violated]
+[scope.violated (halt)]
 ├─< from: scope-guard
-└─> to: join-stage, clear-pending, dashboard, notify
+└─> to: join-stage, route-ci-shard-terminal-halted, clear-pending, dashboard,
+        notify
 route-shard-done ─> [shard.built] ─> review-shard, dashboard
 [stage.closed (halt)]
 ├─< from: join-stage
@@ -114,9 +118,11 @@ route-shard-done ─> [shard.built] ─> review-shard, dashboard
 └─> to: route-suite-error-halted, dashboard, notify
 route-push-pushed ─> [branch.pushed] ─> open-pr, dashboard
 route-push-failed ─> [branch.push-failed] ─> route-remediation-open, dashboard
-[review.submitted]
+[review.submitted (halt)]
 ├─< from: review-shard
-└─> to: route-approved, route-changes, route-review-invalid, dashboard
+└─> to: route-approved, route-changes, route-review-invalid,
+        route-ci-approved, route-ci-changes, route-ci-review-invalid-halted,
+        dashboard
 route-stage-clean ─> [stage.mergeable] ─> merge-stage, dashboard
 [pr.open-attempted]
 ├─< from: open-pr
@@ -125,8 +131,13 @@ route-checks-passed ─> [checks.passed] ─> merge-pr, plan-notes, dashboard
 route-checks-failed ─> [checks.failed] ─> detail-failed-checks, dashboard
 route-approved ─> [shard.approved] ─> join-stage, dashboard
 [shard.changes-requested]
-├─< from: route-changes, map-ci-to-findings
+├─< from: route-changes
 └─> to: guard-rounds-continue, guard-rounds-exhaust, dashboard
+route-ci-approved ─> [ci.fix-approved] ─> commit-ci-fix, dashboard
+[ci.changes-requested (halt)]
+├─< from: route-ci-changes
+└─> to: guard-ci-review-rounds-continue, guard-ci-review-rounds-exhaust,
+        dashboard
 [merge.attempted]
 ├─< from: merge-stage
 └─> to: route-merge-ok, route-merge-conflict, dashboard
@@ -141,13 +152,19 @@ route-open-failed ─> [pr.open-failed] ─> route-remediation-open, dashboard
 [notes.planned]
 ├─< from: plan-notes
 └─> to: route-notes-plan-accepted, route-notes-plan-invalid, dashboard
-guard-rounds-continue ─> [fix.opened] ─> dispatch-fix, dashboard
+[fix.opened]
+├─< from: guard-ci-review-rounds-continue, guard-rounds-continue,
+│         guard-ci-rounds-continue
+└─> to: dispatch-fix, dashboard
 [stage.merged]
 ├─< from: route-merge-ok
 └─> to: guard-stages-advance, guard-stages-exhaust, join-run, dashboard
 route-merge-conflict ─> [stage.conflicted] ─> split-shards, dashboard
 route-detail-detailed ─> [checks.detailed] ─> map-ci-to-findings, dashboard
 route-detail-failed ─> [checks.detail-failed] ─> map-ci-to-findings, dashboard
+[ci.commit-attempted]
+├─< from: commit-ci-fix
+└─> to: route-ci-commit-ok, route-ci-commit-refused-halted, dashboard
 [pr.merged]
 ├─< from: route-merge-pr-merged
 └─> to: close-issue, join-completion, dashboard
@@ -159,6 +176,13 @@ route-notes-plan-accepted ─> [notes.plan-accepted] ─> split-notes, dashboard
 ├─< from: route-notes-plan-invalid
 └─> to: route-notes-invalid-halted, dashboard, trace
 guard-stages-exhaust ─> [stages.exhausted] ─> dashboard
+[ci.findings-attempted]
+├─< from: map-ci-to-findings
+└─> to: route-ci-findings-ok, route-ci-findings-refused-halted, dashboard
+route-ci-commit-ok ─> [run.rebuilt] ─> rebase-branch, dashboard
+[ci.commit-refused (halt)]
+├─< from: route-ci-commit-refused-halted
+└─> to: route-ci-commit-refused-terminal, dashboard
 [issue.close-attempted]
 ├─< from: close-issue
 └─> to: route-issue-closed, route-issue-close-failed, dashboard
@@ -166,12 +190,18 @@ split-notes, join-notes ─> [notes.synced] ─> join-completion, dashboard
 [completion.closed (halt)]
 ├─< from: join-completion
 └─> to: route-completion-full, route-completion-short, dashboard
+[ci.fix-ready (halt)]
+├─< from: route-ci-findings-ok
+└─> to: guard-ci-rounds-continue, guard-ci-rounds-exhaust, dashboard
+[ci.findings-refused (halt)]
+├─< from: route-ci-findings-refused-halted
+└─> to: route-ci-findings-refused-terminal, dashboard
 route-issue-closed ─> [issue.closed] ─> dashboard
 route-issue-close-failed ─> [issue.close-failed] ─> dashboard
 write-note ─> [note.written] ─> join-notes, dashboard
 [run.completed]
 ├─< from: route-completion-full
-└─> to: release-workspace, dashboard, trace
+└─> to: release-workspace, clear-pr-pending, dashboard, trace
 ```
 
 The remaining ten formerly stranded outcomes share a bounded diagnosis path:

@@ -342,6 +342,19 @@ def stage_files(payload: dict) -> list[str]:
     return list(seen)
 
 
+def run_declared_scope(payload: dict) -> list[str]:
+    """Every path declared by every shard in the carried plan, sorted."""
+    files = {
+        str(path)
+        for stage in payload.get("stages") or []
+        if isinstance(stage, dict)
+        for shard in stage.get("shards") or []
+        if isinstance(shard, dict)
+        for path in shard.get("files") or []
+    }
+    return sorted(files)
+
+
 def merge_stage(payload: dict) -> dict:
     root = str(worktree_for(payload))
     files = stage_files(payload)
@@ -361,6 +374,36 @@ def merge_stage(payload: dict) -> dict:
     if code != 0 or not sha:
         return {**payload, "ok": False, "conflicts": [],
                 "error": err or "could not verify the stage commit"}
+    return {**payload, "ok": True, "sha": sha, "files": files}
+
+
+def commit_fix(payload: dict) -> dict:
+    """Commit an approved post-merge fix, refusing empty or unverifiable work."""
+    root = str(worktree_for(payload))
+    files = [str(path) for path in payload.get("declared") or []]
+    if not files:
+        return {**payload, "ok": False, "error": "CI fix declared no files"}
+
+    code, _, err = _run(["git", "add", "--", *files], cwd=root)
+    if code != 0:
+        return {**payload, "ok": False, "error": err or "could not stage the CI fix"}
+
+    code, _, err = _run(["git", "diff", "--cached", "--quiet"], cwd=root)
+    if code == 0:
+        return {**payload, "ok": False, "error": "CI fix has nothing staged to commit"}
+    if code != 1:
+        return {**payload, "ok": False,
+                "error": err or "could not inspect the staged CI fix"}
+
+    message = f"fix(ci): {payload.get('issue', '')}".strip()
+    code, out, err = _run(["git", "commit", "-S", "-m", message], cwd=root)
+    if code != 0:
+        return {**payload, "ok": False, "error": err or out or "CI fix commit failed"}
+
+    code, sha, err = _run(["git", "rev-parse", "HEAD"], cwd=root)
+    if code != 0 or not sha:
+        return {**payload, "ok": False,
+                "error": err or "could not verify the CI fix commit"}
     return {**payload, "ok": True, "sha": sha, "files": files}
 
 
@@ -608,6 +651,21 @@ def check_details(payload: dict) -> dict:
 
 def map_ci_findings(payload: dict) -> dict:
     """Turn a red build into review findings, so the existing fix loop handles it."""
+    ci_identity = {
+        "shard_id": "ci-fix",
+        "intent": "Fix the failed post-merge CI checks",
+        "round": 1,
+        "ci_origin": "post-merge",
+        "ci_round": int(payload.get("ci_round") or 0) + 1,
+    }
+    declared = run_declared_scope(payload)
+    if not declared:
+        return {
+            **payload,
+            **ci_identity,
+            "ok": False,
+            "reason": "cannot fix CI findings without a declared run scope",
+        }
     identity = {
         key: payload[key]
         for key in ("pr", "sha", "run_id", "repo", "check_runs_url")
@@ -629,8 +687,10 @@ def map_ci_findings(payload: dict) -> dict:
         findings.append(finding)
     return {
         **payload,
+        **ci_identity,
+        "ok": True,
         "verdict": "changes_requested",
-        "round": int(payload.get("round") or 1),
+        "declared": declared,
         "findings": findings,
     }
 
@@ -738,15 +798,15 @@ class PendingMissing(RuntimeError):
 
 
 def rehydrate(kind: str, payload: dict) -> dict:
-    """Restore run identity from the pending marker, and clear it.
+    """Restore run identity from the pending marker and refresh PR waits.
 
     A webhook knows about a commit, not about a run. GitHub can tell us the head
     branch and the conclusion, but not the issue number or the base sha the run
     was pinned to, and the notes stage past pr.merged needs both. They are read
     back from what `pr.opened` recorded rather than guessed.
 
-    Clearing is the same act deliberately: a check suite that concluded is not a
-    silent one, and a separate clearer is a second thing to forget to wire.
+    PR markers survive a suite because the same PR can run another suite after a
+    CI fix. Refreshing its mtime gives that new suite a full silence window.
 
     A missing marker raises rather than returning `ok: false`. Every other act
     treats a false outcome as data, but this is not an outcome — it means a suite
@@ -762,7 +822,10 @@ def rehydrate(kind: str, payload: dict) -> dict:
         raise PendingMissing(
             f"no {kind} marker at {marker}: {exc}"
         ) from exc
-    marker.unlink(missing_ok=True)
+    if kind == "pr":
+        marker.touch()
+    else:
+        marker.unlink(missing_ok=True)
     return rehydrated(stored, payload)
 
 
@@ -908,6 +971,7 @@ def main(command: str, argv: list[str]) -> int:
         "fetch-issue": fetch_issue,
         "run-suite": run_suite,
         "merge-stage": merge_stage,
+        "commit-fix": commit_fix,
         "push-branch": push_branch,
         "open-pr": open_pr,
         "merge-pr": merge_pr,

@@ -9,6 +9,7 @@ minutes later.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -29,6 +30,8 @@ def _shard(**overrides) -> dict:
         "shard_count": 2,
         "stage_count": 3,
         "round": 1,
+        "ci_origin": "post-merge",
+        "ci_round": 2,
         "session_id": "session-123",
         "declared": ["src/a.py"],
     }
@@ -64,8 +67,12 @@ def test_a_pr_webhook_round_trip_uses_the_pr_marker(tmp_path, monkeypatch):
 
     marker = mark_pending("pr", payload)
     assert marker.name == "pr-57.json"
+    old_mtime = marker.stat().st_mtime - 3600
+    os.utime(marker, (old_mtime, old_mtime))
+
     assert rehydrate("pr", payload) == payload
-    assert not marker.exists()
+    assert marker.exists()
+    assert marker.stat().st_mtime > old_mtime
 
 
 def test_approval_marker_carries_the_full_projected_run_identity(
@@ -191,6 +198,44 @@ def test_the_environment_carries_every_key_the_emit_path_reads():
     env = environment(_shard(), {})
     missing = [var for var in _ENV_KEYS.values() if var not in env]
     assert missing == [], f"emit reads variables the dispatcher never sets: {missing}"
+
+
+def test_every_carried_scalar_survives_the_agent_environment_seam():
+    """The two hand-written environment maps must preserve carried identity."""
+    from signalbox.emit import _ENV_KEYS, _NUMERIC_FIELDS
+
+    # These carried values either use the two structured JSON variables or do
+    # not cross a shard agent seam. Every other carried key is scalar identity
+    # and must be named by both hand-written scalar maps.
+    non_scalar_agent_keys = {
+        "attempt",
+        "stages",
+        "declared",
+        "note",
+        "note_count",
+        "pr",
+    }
+    fields = set(CARRIED_KEYS) - non_scalar_agent_keys
+    assert set(_ENV_KEYS) == fields
+
+    payload = {
+        field: 7 if field in _NUMERIC_FIELDS else f"value-{field}"
+        for field in fields
+    }
+
+    identity = identity_from_env(environment(payload, {}))
+
+    assert {field: identity[field] for field in fields} == payload
+
+
+def test_absent_identity_never_becomes_the_string_none():
+    from signalbox.emit import _ENV_KEYS
+
+    base = {variable: "stale" for variable in _ENV_KEYS.values()}
+
+    env = environment({}, base)
+
+    assert "None" not in env.values()
 
 
 def test_present_null_identity_is_absent_from_the_agent_environment():

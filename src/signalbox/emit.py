@@ -37,12 +37,14 @@ _ENV_KEYS = {
     "stage_count": "SIGNALBOX_STAGE_COUNT",
     "stage_index": "SIGNALBOX_STAGE_INDEX",
     "round": "SIGNALBOX_ROUND",
+    "ci_origin": "SIGNALBOX_CI_ORIGIN",
+    "ci_round": "SIGNALBOX_CI_ROUND",
     "intent": "SIGNALBOX_INTENT",
     "session_id": "SIGNALBOX_SESSION_ID",
 }
 
 _NUMERIC_FIELDS = frozenset(
-    {"shard_count", "stage_count", "stage_index", "round", "issue"}
+    {"shard_count", "stage_count", "stage_index", "round", "ci_round", "issue"}
 )
 
 

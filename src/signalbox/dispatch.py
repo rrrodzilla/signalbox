@@ -104,6 +104,8 @@ def environment(payload: dict, base: dict[str, str]) -> dict[str, str]:
         "SIGNALBOX_STAGE_COUNT": ("stage_count", ""),
         "SIGNALBOX_STAGE_INDEX": ("stage_index", ""),
         "SIGNALBOX_ROUND": ("round", 1),
+        "SIGNALBOX_CI_ORIGIN": ("ci_origin", None),
+        "SIGNALBOX_CI_ROUND": ("ci_round", None),
         "SIGNALBOX_TITLE": ("title", ""),
         "SIGNALBOX_INTENT": ("intent", ""),
         "SIGNALBOX_SESSION_ID": ("session_id", ""),

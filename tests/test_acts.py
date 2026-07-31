@@ -10,6 +10,7 @@ import pytest
 from signalbox.acts import (
     approve,
     close_issue,
+    commit_fix,
     clear_pending,
     clear_session,
     issue_state_is_closed,
@@ -23,6 +24,7 @@ from signalbox.acts import (
     read_session,
     reap,
     record_session,
+    run_declared_scope,
     source_repo,
     stage_files,
     suite_command,
@@ -572,10 +574,21 @@ def test_ci_failure_becomes_review_findings():
             {"name": "clippy", "id": 92, "html_url": "https://github.example/checks/92"},
         ],
         "round": 2,
+        "ci_round": 2,
+        "stages": [
+            {"shards": [{"files": ["src/z.py", "src/a.py"]}]},
+            {"shards": [{"files": ["src/b.py", "src/a.py"]}]},
+        ],
     }
     result = map_ci_findings(payload)
+    assert result["ok"] is True
     assert result["verdict"] == "changes_requested"
-    assert result["round"] == 2
+    assert result["round"] == 1
+    assert result["ci_origin"] == "post-merge"
+    assert result["ci_round"] == 3
+    assert result["shard_id"] == "ci-fix"
+    assert result["intent"] == "Fix the failed post-merge CI checks"
+    assert result["declared"] == ["src/a.py", "src/b.py", "src/z.py"]
     assert [f["check"] for f in result["findings"]] == ["build", "clippy"]
     assert all(f["source"] == "ci" for f in result["findings"])
     assert all(f["run_id"] == "sb-101" for f in result["findings"])
@@ -593,6 +606,89 @@ def test_ci_failure_becomes_review_findings():
     carried = scalar_values(result["findings"])
     assert carried - {"ci"} <= observed, "findings may point only to observed facts"
     assert "CI check failed after merge" not in carried
+
+
+def test_run_declared_scope_uses_the_whole_plan_not_the_first_result():
+    payload = {
+        "declared": ["only/first-shard.py"],
+        "results": [{"declared": ["also/not/the/run.py"]}],
+        "stages": [
+            {"shards": [
+                {"files": ["src/b.py"]},
+                {"files": ["src/a.py", "src/shared.py"]},
+            ]},
+            {"shards": [
+                {"files": ["tests/test_b.py", "src/shared.py"]},
+                {"files": ["tests/test_a.py"]},
+            ]},
+        ],
+    }
+
+    assert run_declared_scope(payload) == [
+        "src/a.py", "src/b.py", "src/shared.py",
+        "tests/test_a.py", "tests/test_b.py",
+    ]
+
+
+def test_map_ci_findings_refuses_an_empty_run_scope():
+    result = map_ci_findings({
+        "run_id": "sb-145",
+        "failed": [{"name": "tests"}],
+        "declared": ["first/shard.py"],
+    })
+
+    assert result["ok"] is False
+    assert "declared run scope" in result["reason"]
+    assert result["ci_origin"] == "post-merge"
+    assert result["ci_round"] == 1
+    assert "findings" not in result
+
+
+def test_commit_fix_stages_declared_paths_commits_signed_and_verifies_head(
+    tmp_path, monkeypatch
+):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    calls = []
+    responses = iter([
+        (0, "", ""),
+        (1, "", ""),
+        (0, "", ""),
+        (0, "fixed123", ""),
+    ])
+
+    def fake_run(cmd, cwd=None, timeout=120):
+        calls.append(cmd)
+        return next(responses)
+
+    monkeypatch.setattr(acts, "_run", fake_run)
+    result = commit_fix({
+        "run_id": "sb-145", "issue": 145,
+        "declared": ["src/a.py", "tests/test_a.py"],
+    })
+
+    assert result["ok"] is True
+    assert result["sha"] == "fixed123"
+    assert calls == [
+        ["git", "add", "--", "src/a.py", "tests/test_a.py"],
+        ["git", "diff", "--cached", "--quiet"],
+        ["git", "commit", "-S", "-m", "fix(ci): 145"],
+        ["git", "rev-parse", "HEAD"],
+    ]
+
+
+def test_commit_fix_refuses_when_nothing_is_staged(tmp_path, monkeypatch):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    responses = iter([(0, "", ""), (0, "", "")])
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: next(responses))
+
+    result = commit_fix({"run_id": "sb-145", "declared": ["src/a.py"]})
+
+    assert result["ok"] is False
+    assert "nothing staged" in result["error"]
 
 
 def test_suite_command_is_none_when_the_repo_has_no_suite(tmp_path):

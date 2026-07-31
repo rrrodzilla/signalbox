@@ -6,17 +6,25 @@ The name is from railway signaling. A signal box is where the interlocking lives
 
 ## The shape
 
-One engine. Four sources, sixty-seven handlers, eight sinks, and no script that knows what comes next.
+One engine. Four sources, eighty-six handlers, ten sinks, and no script that knows what comes next.
 
 ```
-run.requested ─> workspace.ready ─> issue.fetched
-                                          │
-                                          ▼
-                                     draft-plan  (opus; surveys the tree and
-                                          │       reads the vault with its own
-                                          │       subagents)
-                                          ▼
-                                  plan.submitted ─> check-plan ─> plan.checked
+run.requested ─> workspace.prepare-attempted
+                              │
+                  ┌───────────┴───────────┐
+           workspace.ready         workspace.failed
+                  │                    (refusal)
+                  ▼
+          issue.fetch-attempted
+                  │
+           ┌──────┴────────┐
+      issue.fetched   issue.fetch-failed
+           │              (refusal)
+           ▼
+      draft-plan  (opus; surveys the tree and
+           │       reads the vault with its own
+           │       subagents)
+           └──────────────────────> plan.submitted ─> check-plan ─> plan.checked
                                        ▲                               │
                                        │                     ┌─────────┴─────────┐
                                        │                (ok == false)      plan.verified
@@ -63,32 +71,68 @@ run.requested ─> workspace.ready ─> issue.fetched
                                        └─> stage.opened     stages.exhausted                                    │
                                                  ┌──────────────────────────────────────────────────────────────┘
                                                  ▼
-                                             run.built ─> branch.rebased ─> suite.ran ─> gate.assessed
-                                                                                               │
-                                   ┌───────────────────────────────────────────────────────────┤
-                             gate.cleared                                            approval.requested
-                                   │                                                           │
-                                   └─────────────────> branch.pushed <────────────── approval.granted
-                                                     │
-                                                 pr.opened
-                                                     │
-                        (GitHub check_suite) ─> checks.observed ─> checks.reported
-                                                     │                   │
-                                          ┌──────────┴──────┐       checks.failed
-                                     pr.merged        notes.planned      │
-                                          │                │      checks.detailed
-                                          │          note.written        │
-                                          │                │   shard.changes-requested
-                                          │          notes.synced        │
-                                          │                │      (fix.opened)
-                                          └──────> completion.closed
-                                                        │
-                                             ┌──────────┴──────────┐
-                                      run.completed           run.halted
-                                        (both arms)            (timed out)
+                                             run.built ─> branch.rebase-attempted
+                                                               │
+                                              ┌────────────────┴────────────────┐
+                                       branch.rebased              branch.rebase-conflicted
+                                              │                              (halt)
+                                       suite.run-attempted
+                                              │
+                                      ┌───────┴────────┐
+                                  suite.ran       suite.errored ───────────────> run.halted
+                                      │
+                                gate.assessed
+                                      │
+                         ┌────────────┴────────────┐
+                    gate.cleared             approval.requested
+                         │                         │
+                         │                  approval.granted
+                         └────────────┬────────────┘
+                                      ▼
+                            branch.push-attempted
+                                      │
+                             ┌────────┴─────────┐
+                       branch.pushed     branch.push-failed
+                             │                  (refusal)
+                       pr.open-attempted
+                             │
+                             ├──────────────> pr.open-failed  (refusal)
+                         pr.opened
+                             │
+     (GitHub check_suite) ─> checks.observed ─> checks.reported
+                                                    │
+                                      ┌─────────────┴─────────────┐
+                                 checks.passed               checks.failed
+                                      │                           │
+                             ┌────────┴────────┐          checks.detail-attempted
+                       pr.merge-attempted  notes.planned           │
+                              │                │            ┌──────┴───────────┐
+                       ┌──────┴───────┐   note.written  checks.detailed  checks.detail-failed
+                    pr.merged  pr.merge-failed │                 │             │
+                       │           (refusal) notes.synced        └──────┬──────┘
+                       │                         │                     ▼
+                       │                         │            shard.changes-requested
+                       │                         │                 (fix.opened)
+                       └──────────────┬──────────┘
+                                      ▼
+                              completion.closed
+                                      │
+                           ┌──────────┴──────────┐
+                    run.completed           run.halted
+                      (both arms)            (timed out)
 ```
 
 Four feedback edges close loops nobody sequenced: a rejected plan re-enters the planner, a review that requests changes re-enters implementation, a merge conflict reopens only the shards whose declared files collide, and a red CI run becomes review findings in the vocabulary the fix loop already speaks.
+
+Acts publish one `*.attempted` event, then two exclusive routers select the
+domain outcome from the returned payload. `ok: true` means the act's requested
+domain outcome succeeded; a completed refusal or conflict is `ok: false`, not
+success. The `-e` edge is reserved for the primitive itself crashing or timing
+out, because its error payload carries no run identity for downstream joins.
+`run-suite` is the deliberate exception: its routers select `errored`, not
+`ok`. A failing suite is a verdict that must reach the promotion gate, rather
+than a topology transition; only failure to invoke a detected suite is routed
+to `suite.errored`.
 
 `completion.closed` is the completion rendezvous's neutral result, not a claim
 that the run succeeded. Two exclusive jq routers interpret it: a payload with

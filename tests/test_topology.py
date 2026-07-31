@@ -8,6 +8,7 @@ just a run that quietly does less than it should.
 from __future__ import annotations
 
 import re
+import ast
 import tomllib
 from pathlib import Path
 
@@ -455,8 +456,18 @@ def test_promotion_is_decomposed_into_retryable_acts():
     """One promote handler would make a failed step a stall instead of an event."""
     for act in ("push-branch", "open-pr", "merge-pr"):
         handler = named(HANDLERS, act)
-        assert len(handler["publishes"]) == 2, f"{act} has no failure event"
-        assert any("failed" in topic for topic in handler["publishes"])
+        assert len(handler["publishes"]) == 1, f"{act} must publish one attempt"
+        attempted = handler["publishes"][0]
+        assert attempted.endswith("-attempted")
+        outcomes = [
+            h for h in HANDLERS if h.get("subscribes") == [attempted]
+        ]
+        assert len(outcomes) == 2, f"{act} has no routed failure event"
+        assert any(
+            "failed" in topic
+            for outcome in outcomes
+            for topic in outcome["publishes"]
+        )
 
 
 def test_rebase_precedes_the_suite_without_changing_the_gate_push_edges():
@@ -979,6 +990,150 @@ def route(handler_name: str, payload: dict) -> dict | None:
     assert done.returncode == 0, f"{handler_name} jq failed: {done.stderr}"
     out = done.stdout.strip()
     return json.loads(out) if out else None
+
+
+def acts_that_can_refuse() -> dict[str, str]:
+    """Topology node -> command, derived from acts.py's real dispatch and returns."""
+    source = (ROOT / "src" / "signalbox" / "acts.py").read_text()
+    tree = ast.parse(source)
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    main = functions["main"]
+    dispatch: dict[str, str] = {}
+    for node in ast.walk(main):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if (
+                isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+                and isinstance(value, ast.Name)
+                and value.id in functions
+            ):
+                dispatch[key.value] = value.id
+
+    refusing_commands = set()
+    for command, function_name in dispatch.items():
+        for node in ast.walk(functions[function_name]):
+            if not isinstance(node, ast.Dict):
+                continue
+            fields = {
+                key.value: value
+                for key, value in zip(node.keys, node.values)
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+            ok = fields.get("ok")
+            if isinstance(ok, ast.Constant) and ok.value is False:
+                refusing_commands.add(command)
+                break
+
+    nodes: dict[str, str] = {}
+    for handler in HANDLERS:
+        args = handler.get("args", [])
+        for command in refusing_commands:
+            if "signalbox" in args and command in args[args.index("signalbox") + 1 :]:
+                nodes[handler["name"]] = command
+    assert set(nodes.values()) == refusing_commands
+    return nodes
+
+
+def test_every_refusing_act_routes_one_identity_bearing_attempt_by_its_outcome():
+    """A refusal is data, so only an `.ok` router may announce act success.
+
+    The set is deliberately derived from acts.py and the topology: enumerating
+    today's seams would pass while the next act was already wired incorrectly.
+    `rehydrate` is excluded because it raises PendingMissing instead of returning
+    `ok: false`, so rehydrate-pr correctly retains its `-e` edge. `run-suite` is
+    the other deliberate exception: red is `ok: false` but must reach assess and
+    become `block`, so its transition routers select on `.errored`, not `.ok`.
+    """
+    refusing = acts_that_can_refuse()
+    assert "run-suite" in refusing
+
+    rehydrate = named(HANDLERS, "rehydrate-pr")
+    assert rehydrate["args"][rehydrate["args"].index("-e") + 1] == "checks.unknown-pr"
+
+    identity = {"run_id": "sb-66", "stage_id": "s3-verify", "shard_id": "s3-invariants"}
+    for node_name in sorted(set(refusing) - {"run-suite"}):
+        act = named(HANDLERS, node_name)
+        attempts = [
+            topic for topic in act["publishes"]
+            if topic.endswith("-attempted") or topic == "merge.attempted"
+        ]
+        assert len(attempts) == 1, f"{node_name} must publish one attempt"
+        attempted = attempts[0]
+        routers = [h for h in HANDLERS if h.get("subscribes") == [attempted]]
+        assert len(routers) == 2, f"{node_name} must have exactly two outcome routers"
+
+        selected_routers = {}
+        for ok in (True, False):
+            envelope = {**identity, "ok": ok}
+            matches = {
+                router["name"]: route(router["name"], envelope)
+                for router in routers
+            }
+            selected = [
+                name for name, output in matches.items() if output is not None
+            ]
+            assert len(selected) == 1, (
+                f"{node_name} routers are not exclusive and exhaustive for ok={ok}"
+            )
+            selected_routers[ok] = named(HANDLERS, selected[0])
+            assert matches[selected[0]] == envelope
+            assert identity.items() <= matches[selected[0]].items()
+
+        success = selected_routers[True]
+        failure = selected_routers[False]
+        assert success["name"] != failure["name"], (
+            f"{node_name}'s refusal selected its success router"
+        )
+        success_topics = set(success["publishes"])
+        failure_topics = set(failure["publishes"])
+        assert success_topics.isdisjoint(failure_topics)
+        assert any(
+            outcome in topic
+            for topic in failure_topics
+            for outcome in ("failed", "conflicted", "refused")
+        ), f"{node_name}'s false router does not publish a failure topic"
+        assert not success_topics.intersection(act["publishes"])
+        assert all(
+            not success_topics.intersection(handler.get("publishes", []))
+            for handler in HANDLERS
+            if handler["name"] != success["name"]
+        ), f"{node_name}'s success topic bypasses its outcome router"
+
+
+@pytest.mark.parametrize(
+    "payload,matched",
+    [
+        ({"errored": True}, "route-suite-errored"),
+        ({"errored": False}, "route-suite-ran"),
+        ({}, "route-suite-ran"),
+    ],
+)
+def test_suite_outcome_routers_are_exclusive_and_exhaustive(payload, matched):
+    """Suite invocation errors halt; red, green, and no-suite all reach assess."""
+    envelope = {
+        "run_id": "sb-66",
+        "stage_id": "s3-verify",
+        "shard_id": "s3-invariants",
+        **payload,
+    }
+    routers = ("route-suite-ran", "route-suite-errored")
+    outputs = {name: route(name, envelope) for name in routers}
+    assert [name for name, output in outputs.items() if output is not None] == [matched]
+    assert outputs[matched] == envelope
+
+
+def test_suite_routes_reach_a_human_or_the_promotion_gate():
+    errored = named(HANDLERS, "route-suite-error-halted")
+    assert errored["subscribes"] == ["suite.errored"]
+    assert "run.halted" in errored["publishes"]
+    assert "suite.errored" in named(SINKS, "notify")["subscribes"]
+    assert named(HANDLERS, "assess")["subscribes"] == ["suite.ran"]
 
 
 @pytest.mark.parametrize(

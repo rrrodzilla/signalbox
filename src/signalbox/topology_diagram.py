@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+import os
+from pathlib import Path
+import re
+import sys
 import textwrap
+import tomllib
 from typing import Any
 
 GROUPS = ("sources", "handlers", "sinks")
@@ -82,6 +87,10 @@ class StaleProjection(TopologyDiagramError):
 
 class RemediationRouterMissing(TopologyDiagramError):
     """The remediation detail block has no configured fan-in router."""
+
+
+class ReadmeProjectionMissing(TopologyDiagramError):
+    """README no longer contains a unique generated-artifact anchor."""
 
 
 def _primitives(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -269,3 +278,84 @@ def render_counts_sentence(config: dict[str, Any]) -> str:
 
 def render_topology(config: dict[str, Any]) -> tuple[str, str, str]:
     return render_main_block(config), render_remediation_block(config), render_counts_sentence(config)
+
+
+def _repo_root() -> Path:
+    """The editable checkout containing this module, unless explicitly overridden."""
+    override = os.environ.get("SIGNALBOX_ROOT")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _replace_once(
+    text: str,
+    pattern: str,
+    replacement: Any,
+    label: str,
+    *,
+    dotall: bool = False,
+) -> str:
+    flags = re.MULTILINE | (re.DOTALL if dotall else 0)
+    rewritten, count = re.subn(pattern, replacement, text, count=1, flags=flags)
+    if count != 1:
+        raise ReadmeProjectionMissing(f"could not locate {label} in README.md")
+    return rewritten
+
+
+def _rewrite_readme(
+    readme: str, main_block: str, remediation_block: str, counts: str
+) -> str:
+    """Replace all three generated artifacts without partially writing a file."""
+    rewritten = _replace_once(
+        readme,
+        r"^One engine\..*no script that knows what comes next\.$",
+        lambda _match: counts,
+        "primitive-count sentence",
+    )
+    rewritten = _replace_once(
+        rewritten,
+        r"(## The shape\n\n.*?\n\n```)\n.*?\n(```)",
+        lambda match: f"{match.group(1)}\n{main_block}\n{match.group(2)}",
+        "main topology block",
+        dotall=True,
+    )
+    return _replace_once(
+        rewritten,
+        r"([^\n]*outcomes share a bounded diagnosis path:\n\n```)\n.*?\n(```)",
+        lambda match: f"{match.group(1)}\n{remediation_block}\n{match.group(2)}",
+        "remediation topology block",
+        dotall=True,
+    )
+
+
+def main(argv: list[str]) -> int:
+    """Print the live projection, or rewrite its three README artifacts."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="signalbox topology-diagram")
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="rewrite the generated topology artifacts in README.md",
+    )
+    args = parser.parse_args(argv)
+    root = _repo_root()
+
+    try:
+        with (root / "emergent.toml").open("rb") as stream:
+            config = tomllib.load(stream)
+        main_block, remediation_block, counts = render_topology(config)
+        if not args.write:
+            print(f"{main_block}\n\n{remediation_block}\n\n{counts}")
+            return 0
+
+        readme_path = root / "README.md"
+        readme = readme_path.read_text()
+        readme_path.write_text(
+            _rewrite_readme(readme, main_block, remediation_block, counts)
+        )
+    except (OSError, tomllib.TOMLDecodeError, TopologyDiagramError) as exc:
+        print(f"signalbox topology-diagram: {exc}", file=sys.stderr)
+        return 1
+    return 0

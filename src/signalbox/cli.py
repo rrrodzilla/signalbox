@@ -23,6 +23,7 @@ ACT_COMMANDS = frozenset({
 
 COMMANDS = ACT_COMMANDS | {
     "primitive", "check-plan", "agent", "dispatch", "emit", "dashboard", "paths",
+    "topology-diagram",
 }
 
 
@@ -78,6 +79,11 @@ def main(argv: list[str] | None = None) -> int:
         from signalbox import dashboard
 
         return dashboard.main(rest)
+
+    if command == "topology-diagram":
+        from signalbox import topology_diagram
+
+        return topology_diagram.main(rest)
 
     if command == "paths":
         # A diagnostic, because the failure it catches is silent: a non-editable

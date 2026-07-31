@@ -20,7 +20,8 @@ SUBSCRIPTIONS = ["notes.plan-accepted"]
 
 def note_events(payload: dict) -> list[dict]:
     """One payload per note, each stamped with the run identity and the total."""
-    notes = [n for n in payload.get("notes") or [] if n]
+    raw = payload.get("notes")
+    notes = [n for n in raw if n] if isinstance(raw, list) else []
     count = len(notes)
     return [
         {
@@ -38,7 +39,9 @@ def note_events(payload: dict) -> list[dict]:
 
 def synced_event(payload: dict) -> dict | None:
     """A terminal join-shaped payload when the plan contains no notes."""
-    if any(payload.get("notes") or []):
+    raw = payload.get("notes")
+    notes = raw if isinstance(raw, list) else []
+    if any(notes):
         return None
     return {
         "expected": 0,

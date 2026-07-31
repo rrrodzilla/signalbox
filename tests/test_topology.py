@@ -1257,6 +1257,22 @@ def test_notes_plan_routers_execute_as_exclusive_exhaustive_complements():
         {"run_id": "sb-132", "notes": [], "outcome": "blocked"},
         {"run_id": "sb-132", "notes": [], "outcome": "reviewed"},
         {"run_id": "sb-132", "notes": "oops", "outcome": "reviewed"},
+        {
+            "run_id": "sb-138", "notes": "oops", "outcome": "reviewed",
+            "considered": ["operations.md"],
+        },
+        {
+            "run_id": "sb-138", "notes": 7, "outcome": "reviewed",
+            "considered": ["operations.md"],
+        },
+        {
+            "run_id": "sb-138", "notes": {"name": "operations.md"},
+            "outcome": "reviewed", "considered": ["operations.md"],
+        },
+        {
+            "run_id": "sb-138", "outcome": "reviewed",
+            "considered": ["operations.md"],
+        },
     ):
         assert route("route-notes-plan-accepted", invalid) is None
         routed = route("route-notes-plan-invalid", invalid)

@@ -19,6 +19,7 @@ FORWARD_LOG="$LOG_DIR/forward.log"
 FORWARD_PIDFILE="$LOG_DIR/forward.pid"
 FORWARD_CHILD_PIDFILE="$LOG_DIR/forward.child.pid"
 FORWARD_READYFILE="$LOG_DIR/forward.ready"
+FORWARD_SUPERVISED_CHILD=""
 
 CONTROL_PORT=8100
 STREAM_PORT=8101
@@ -245,45 +246,82 @@ forward_supervise() {
   local repo="$1"
   local backoff=1
   local stopping=0
-  local child=""
+  local repaired_stale_hook=0
+  local attempt_log="$LOG_DIR/forward.attempt.log"
+  FORWARD_SUPERVISED_CHILD=""
 
   stop_forward_child() {
     stopping=1
-    if [[ -n "$child" ]]; then
-      kill -TERM "$child" 2>/dev/null || true
-      wait "$child" 2>/dev/null || true
+    if [[ -n "$FORWARD_SUPERVISED_CHILD" ]]; then
+      kill -TERM "$FORWARD_SUPERVISED_CHILD" 2>/dev/null || true
+      wait "$FORWARD_SUPERVISED_CHILD" 2>/dev/null || true
     fi
   }
   trap stop_forward_child TERM INT EXIT
 
   while ((stopping == 0)); do
     rm -f "$FORWARD_READYFILE"
+    : >"$attempt_log"
     printf '[%s] starting webhook forwarder for %s\n' "$(date -Is)" "$repo"
     gh webhook forward \
       --repo="$repo" \
       --events=check_suite \
-      --url="http://127.0.0.1:$GITHUB_PORT/github" &
-    child="$!"
-    printf '%s' "$child" >"$FORWARD_CHILD_PIDFILE"
+      --url="http://127.0.0.1:$GITHUB_PORT/github" \
+      >"$attempt_log" 2>&1 &
+    FORWARD_SUPERVISED_CHILD="$!"
+    printf '%s' "$FORWARD_SUPERVISED_CHILD" >"$FORWARD_CHILD_PIDFILE"
     sleep 1
-    if kill -0 "$child" 2>/dev/null; then
+    if kill -0 "$FORWARD_SUPERVISED_CHILD" 2>/dev/null; then
       : >"$FORWARD_READYFILE"
       printf '[%s] webhook forwarder is running\n' "$(date -Is)"
     fi
-    wait "$child" 2>/dev/null || true
-    child=""
+    wait "$FORWARD_SUPERVISED_CHILD" 2>/dev/null || true
+    FORWARD_SUPERVISED_CHILD=""
+    cat "$attempt_log"
     rm -f "$FORWARD_CHILD_PIDFILE" "$FORWARD_READYFILE"
     ((stopping == 0)) || break
+
+    if grep -Fq 'HTTP 422' "$attempt_log" \
+      && grep -Fq 'Hook already exists on this repository' "$attempt_log"; then
+      if ((repaired_stale_hook == 0)); then
+        repaired_stale_hook=1
+        printf '[%s] stale webhook refused the forwarder; purging it and retrying once\n' "$(date -Is)"
+        forward_purge_hooks
+        continue
+      fi
+      printf '[%s] terminal webhook forwarder failure: stale hook remains after repair\n' "$(date -Is)"
+      rm -f "$attempt_log"
+      return 1
+    fi
+
     printf '[%s] webhook forwarder exited; restarting in %ss\n' "$(date -Is)" "$backoff"
     sleep "$backoff" &
-    child="$!"
-    wait "$child" 2>/dev/null || true
-    child=""
+    FORWARD_SUPERVISED_CHILD="$!"
+    wait "$FORWARD_SUPERVISED_CHILD" 2>/dev/null || true
+    FORWARD_SUPERVISED_CHILD=""
     if ((backoff < 30)); then
       backoff=$((backoff * 2))
       ((backoff > 30)) && backoff=30
     fi
   done
+  rm -f "$attempt_log"
+}
+
+forward_purge_hooks() {
+  local repo=""
+  repo="$(cat "$LOG_DIR/forward.repo" 2>/dev/null || true)"
+  [[ -n "$repo" ]] || return 0
+
+  local hook_id
+  while IFS= read -r hook_id; do
+    [[ -n "$hook_id" ]] || continue
+    gh api --method DELETE "repos/$repo/hooks/$hook_id" >/dev/null 2>&1 || true
+  done < <(
+    gh api --paginate "repos/$repo/hooks" \
+      --jq '.[] | select((.config.url // "") | contains("webhook-forwarder.github.com")) | .id' \
+      2>/dev/null || true
+  )
+  return 0
 }
 
 forward_up() {
@@ -344,6 +382,7 @@ forward_down() {
   if [[ -n "$child" ]] && kill -0 "$child" 2>/dev/null; then
     kill -TERM "$child" 2>/dev/null || true
   fi
+  forward_purge_hooks
   rm -f "$FORWARD_PIDFILE" "$FORWARD_CHILD_PIDFILE" "$FORWARD_READYFILE"
 }
 

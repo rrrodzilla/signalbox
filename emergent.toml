@@ -178,6 +178,11 @@ publishes = ["checks.observed"]
 # `base_sha`, which the notes stage downstream of pr.merged needs, so identity is
 # restored from the marker `pr.opened` wrote rather than reconstructed. Clearing
 # that marker is the same act: a suite that concluded is not a silent one.
+#
+# This -e edge is deliberate. Rehydrate raises PendingMissing when this engine
+# holds no marker for the delivery, a real non-zero exit rather than a refusal;
+# its success path cannot return ok: false and also merges the marker's stored
+# identity into the observed delivery.
 [[handlers]]
 name = "rehydrate-pr"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
@@ -217,20 +222,52 @@ publishes = ["checks.silent"]
 [[handlers]]
 name = "prepare-workspace"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "run.requested", "--publish-as", "workspace.ready",
-        "-e", "workspace.failed", "-t", "60000", "--",
+args = ["-s", "run.requested", "--publish-as", "workspace.prepare-attempted",
+        "-t", "60000", "--",
         "signalbox", "prepare-workspace"]
 subscribes = ["run.requested"]
-publishes = ["workspace.ready", "workspace.failed"]
+publishes = ["workspace.prepare-attempted"]
+
+[[handlers]]
+name = "route-prepare-ready"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "workspace.prepare-attempted", "--publish-as", "workspace.ready", "--",
+        "jq", "-c", "select(.ok == true)"]
+subscribes = ["workspace.prepare-attempted"]
+publishes = ["workspace.ready"]
+
+[[handlers]]
+name = "route-prepare-failed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "workspace.prepare-attempted", "--publish-as", "workspace.failed", "--",
+        "jq", "-c", "select(.ok == false)"]
+subscribes = ["workspace.prepare-attempted"]
+publishes = ["workspace.failed"]
 
 [[handlers]]
 name = "fetch-issue"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "workspace.ready", "--publish-as", "issue.fetched",
-        "-e", "issue.fetch-failed", "-t", "30000", "--",
+args = ["-s", "workspace.ready", "--publish-as", "issue.fetch-attempted",
+        "-t", "30000", "--",
         "signalbox", "fetch-issue"]
 subscribes = ["workspace.ready"]
-publishes = ["issue.fetched", "issue.fetch-failed"]
+publishes = ["issue.fetch-attempted"]
+
+[[handlers]]
+name = "route-fetch-fetched"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "issue.fetch-attempted", "--publish-as", "issue.fetched", "--",
+        "jq", "-c", "select(.ok == true)"]
+subscribes = ["issue.fetch-attempted"]
+publishes = ["issue.fetched"]
+
+[[handlers]]
+name = "route-fetch-failed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "issue.fetch-attempted", "--publish-as", "issue.fetch-failed", "--",
+        "jq", "-c", "select(.ok == false)"]
+subscribes = ["issue.fetch-attempted"]
+publishes = ["issue.fetch-failed"]
 
 # Surveying the codebase and recalling the vault were two topology roles joined
 # on a 620s rendezvous. That machinery bought nothing it could not have had for
@@ -736,13 +773,41 @@ args = ["-s", "branch.rebase-attempted", "--publish-as", "branch.rebase-invalid-
 subscribes = ["branch.rebase-attempted"]
 publishes = ["branch.rebase-invalid-verdict"]
 
+# A red suite is evidence for the promotion gate, not an invocation error:
+# ok: false must still become suite.ran so assess can turn it into block. Only
+# errored says the detected suite could not be invoked and belongs on the
+# terminal human path.
 [[handlers]]
 name = "run-suite"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "branch.rebased", "--publish-as", "suite.ran",
-        "-e", "suite.errored", "-t", "1800000", "--", "signalbox", "run-suite"]
+args = ["-s", "branch.rebased", "--publish-as", "suite.run-attempted",
+        "-t", "1800000", "--", "signalbox", "run-suite"]
 subscribes = ["branch.rebased"]
-publishes = ["suite.ran", "suite.errored"]
+publishes = ["suite.run-attempted"]
+
+[[handlers]]
+name = "route-suite-ran"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "suite.run-attempted", "--publish-as", "suite.ran", "--",
+        "jq", "-c", "select(.errored != true)"]
+subscribes = ["suite.run-attempted"]
+publishes = ["suite.ran"]
+
+[[handlers]]
+name = "route-suite-errored"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "suite.run-attempted", "--publish-as", "suite.errored", "--",
+        "jq", "-c", "select(.errored == true)"]
+subscribes = ["suite.run-attempted"]
+publishes = ["suite.errored"]
+
+[[handlers]]
+name = "route-suite-error-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "suite.errored", "--publish-as", "run.halted", "--",
+        "jq", "-c", '. + {reason: "the detected suite could not be invoked"}']
+subscribes = ["suite.errored"]
+publishes = ["run.halted"]
 
 [[handlers]]
 name = "assess"
@@ -796,18 +861,50 @@ publishes = ["gate.invalid-verdict"]
 name = "push-branch"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "gate.cleared", "-s", "approval.granted",
-        "--publish-as", "branch.pushed", "-e", "branch.push-failed",
+        "--publish-as", "branch.push-attempted",
         "-t", "120000", "--", "signalbox", "push-branch"]
 subscribes = ["gate.cleared", "approval.granted"]
-publishes = ["branch.pushed", "branch.push-failed"]
+publishes = ["branch.push-attempted"]
+
+[[handlers]]
+name = "route-push-pushed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "branch.push-attempted", "--publish-as", "branch.pushed", "--",
+        "jq", "-c", "select(.ok == true)"]
+subscribes = ["branch.push-attempted"]
+publishes = ["branch.pushed"]
+
+[[handlers]]
+name = "route-push-failed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "branch.push-attempted", "--publish-as", "branch.push-failed", "--",
+        "jq", "-c", "select(.ok == false)"]
+subscribes = ["branch.push-attempted"]
+publishes = ["branch.push-failed"]
 
 [[handlers]]
 name = "open-pr"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "branch.pushed", "--publish-as", "pr.opened",
-        "-e", "pr.open-failed", "-t", "60000", "--", "signalbox", "open-pr"]
+args = ["-s", "branch.pushed", "--publish-as", "pr.open-attempted",
+        "-t", "60000", "--", "signalbox", "open-pr"]
 subscribes = ["branch.pushed"]
-publishes = ["pr.opened", "pr.open-failed"]
+publishes = ["pr.open-attempted"]
+
+[[handlers]]
+name = "route-open-opened"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "pr.open-attempted", "--publish-as", "pr.opened", "--",
+        "jq", "-c", "select(.ok == true)"]
+subscribes = ["pr.open-attempted"]
+publishes = ["pr.opened"]
+
+[[handlers]]
+name = "route-open-failed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "pr.open-attempted", "--publish-as", "pr.open-failed", "--",
+        "jq", "-c", "select(.ok == false)"]
+subscribes = ["pr.open-attempted"]
+publishes = ["pr.open-failed"]
 
 [[handlers]]
 name = "route-checks-passed"
@@ -832,11 +929,27 @@ publishes = ["checks.failed"]
 [[handlers]]
 name = "detail-failed-checks"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "checks.failed", "--publish-as", "checks.detailed",
-        "-e", "checks.detail-failed", "-t", "60000", "--",
+args = ["-s", "checks.failed", "--publish-as", "checks.detail-attempted",
+        "-t", "60000", "--",
         "signalbox", "check-details"]
 subscribes = ["checks.failed"]
-publishes = ["checks.detailed", "checks.detail-failed"]
+publishes = ["checks.detail-attempted"]
+
+[[handlers]]
+name = "route-detail-detailed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "checks.detail-attempted", "--publish-as", "checks.detailed", "--",
+        "jq", "-c", "select(.ok == true)"]
+subscribes = ["checks.detail-attempted"]
+publishes = ["checks.detailed"]
+
+[[handlers]]
+name = "route-detail-failed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "checks.detail-attempted", "--publish-as", "checks.detail-failed", "--",
+        "jq", "-c", "select(.ok == false)"]
+subscribes = ["checks.detail-attempted"]
+publishes = ["checks.detail-failed"]
 
 # FEEDBACK EDGE 4. Nobody wrote "handle CI failure". A red build becomes
 # findings entering the review vocabulary, and the fix loop already exists.
@@ -856,10 +969,26 @@ publishes = ["shard.changes-requested"]
 [[handlers]]
 name = "merge-pr"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "checks.passed", "--publish-as", "pr.merged",
-        "-e", "pr.merge-failed", "-t", "120000", "--", "signalbox", "merge-pr"]
+args = ["-s", "checks.passed", "--publish-as", "pr.merge-attempted",
+        "-t", "120000", "--", "signalbox", "merge-pr"]
 subscribes = ["checks.passed"]
-publishes = ["pr.merged", "pr.merge-failed"]
+publishes = ["pr.merge-attempted"]
+
+[[handlers]]
+name = "route-merge-pr-merged"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "pr.merge-attempted", "--publish-as", "pr.merged", "--",
+        "jq", "-c", "select(.ok == true)"]
+subscribes = ["pr.merge-attempted"]
+publishes = ["pr.merged"]
+
+[[handlers]]
+name = "route-merge-pr-failed"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "pr.merge-attempted", "--publish-as", "pr.merge-failed", "--",
+        "jq", "-c", "select(.ok == false)"]
+subscribes = ["pr.merge-attempted"]
+publishes = ["pr.merge-failed"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NOTES — one event per note. No shared document, no lock, nothing serialises.
@@ -1011,18 +1140,19 @@ path = "~/.local/share/emergent/primitives/bin/sse-sink"
 args = ["--port", "8101"]
 subscribes = ["exec.output", "exec.exit",
               "approval.granted", "approval.requested", "assess.failed", "branch.push-failed",
-              "branch.pushed", "branch.rebase-attempted", "branch.rebase-conflicted",
+              "branch.push-attempted", "branch.pushed", "branch.rebase-attempted", "branch.rebase-conflicted",
               "branch.rebase-failed", "branch.rebase-invalid-verdict", "branch.rebased",
-              "checks.detail-failed", "checks.detailed",
+              "checks.detail-attempted", "checks.detail-failed", "checks.detailed",
               "checks.failed", "checks.observed", "checks.passed", "checks.reported",
               "checks.silent", "checks.unknown-pr",
               "completion.closed", "control.unknown-event", "fix.opened", "gate.assessed",
               "gate.blocked", "gate.cleared", "gate.invalid-verdict", "issue.fetch-failed",
-              "issue.fetched", "merge.attempted", "model.invoked", "note.drafted", "note.write-failed",
+              "issue.fetch-attempted", "issue.fetched", "merge.attempted", "model.invoked", "note.drafted", "note.write-failed",
               "note.written", "notes.plan-failed", "notes.planned", "notes.synced",
               "plan.accepted", "plan.audit-failed", "plan.audited", "plan.checked",
               "plan.draft-failed", "plan.invalid-verdict", "plan.rejected",
-              "plan.submitted", "plan.verified", "pr.merge-failed", "pr.merged", "pr.open-failed", "pr.opened",
+              "plan.submitted", "plan.verified", "pr.merge-attempted", "pr.merge-failed", "pr.merged",
+              "pr.open-attempted", "pr.open-failed", "pr.opened",
               "review.failed", "review.invalid-verdict", "review.submitted", "run.built",
               "run.completed", "run.halted", "run.requested", "scope.violated",
               "shard.abandoned", "shard.approved", "shard.built", "shard.changes-requested",
@@ -1030,7 +1160,8 @@ subscribes = ["exec.output", "exec.exit",
               "shard.invalid-verdict", "shard.opened", "shard.silent", "shard.submitted",
               "stage.closed", "stage.conflicted", "stage.mergeable", "stage.merged",
               "stage.opened", "stages.exhausted", "suite.errored", "suite.ran",
-              "workspace.failed", "workspace.ready", "workspace.release-attempted",
+              "suite.run-attempted", "workspace.failed", "workspace.prepare-attempted",
+              "workspace.ready", "workspace.release-attempted",
               "workspace.release-failed", "workspace.released"]
 
 # Lifecycle belongs here rather than on the dashboard: topology-viewer resolves
@@ -1050,10 +1181,11 @@ name = "notify"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "approval.requested", "-s", "shard.escalated", "-s", "run.halted",
         "-s", "scope.violated", "-s", "gate.blocked", "-s", "branch.rebase-conflicted",
-        "-s", "checks.silent",
+        "-s", "checks.silent", "-s", "suite.errored",
         "-t", "30000", "--", "signalbox", "notify"]
 subscribes = ["approval.requested", "shard.escalated", "run.halted",
-              "scope.violated", "gate.blocked", "branch.rebase-conflicted", "checks.silent"]
+              "scope.violated", "gate.blocked", "branch.rebase-conflicted",
+              "checks.silent", "suite.errored"]
 
 [[sinks]]
 name = "trace"

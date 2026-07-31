@@ -329,8 +329,12 @@ const BLOCKS = ["plan", "build", "gate", "promote", "docs"];
    A topic absent from this table is a topology change the page has not been
    taught yet; `sev()` calls that out rather than quietly rendering it grey. */
 const EVENT = {
-  "run.requested":["plan","work"], "workspace.ready":["plan","work"],
-  "workspace.failed":["plan","stop"], "issue.fetched":["plan","work","draft-plan","in"],
+  "run.requested":["plan","work","prepare-workspace","in"],
+  "workspace.prepare-attempted":["plan","judge","prepare-workspace","out"],
+  "workspace.ready":["plan","work","fetch-issue","in"],
+  "workspace.failed":["plan","stop"],
+  "issue.fetch-attempted":["plan","judge","fetch-issue","out"],
+  "issue.fetched":["plan","work","draft-plan","in"],
   "issue.fetch-failed":["plan","stop"],
   "plan.submitted":["plan","judge","draft-plan","out"],
   "plan.checked":["plan","judge"], "plan.verified":["plan","work","audit-plan","in"],
@@ -352,20 +356,28 @@ const EVENT = {
   "stages.exhausted":["build","go"], "run.built":["build","go","rebase-branch","in"],
 
   "branch.rebase-attempted":["gate","judge","rebase-branch","out"],
-  "branch.rebased":["gate","work"], "branch.rebase-conflicted":["gate","stop"],
+  "branch.rebased":["gate","work","run-suite","in"], "branch.rebase-conflicted":["gate","stop"],
   "branch.rebase-failed":["gate","stop"], "branch.rebase-invalid-verdict":["gate","stop"],
-  "suite.ran":["gate","judge","assess","in"], "suite.errored":["gate","stop"],
+  "suite.run-attempted":["gate","judge","run-suite","out"],
+  "suite.ran":["gate","judge","assess","in"],
+  "suite.errored":["gate","stop"],
   "gate.assessed":["gate","judge","assess","out"], "assess.failed":["gate","stop"],
-  "gate.cleared":["gate","go"], "gate.blocked":["gate","stop"],
+  "gate.cleared":["gate","go","push-branch","in"], "gate.blocked":["gate","stop"],
   "gate.invalid-verdict":["gate","stop"], "approval.requested":["gate","hold"],
-  "approval.granted":["gate","go"],
+  "approval.granted":["gate","go","push-branch","in"],
 
-  "branch.pushed":["promote","work"], "branch.push-failed":["promote","stop"],
+  "branch.push-attempted":["promote","judge","push-branch","out"],
+  "branch.pushed":["promote","work","open-pr","in"],
+  "branch.push-failed":["promote","stop"],
+  "pr.open-attempted":["promote","judge","open-pr","out"],
   "pr.opened":["promote","work"], "pr.open-failed":["promote","stop"],
   "checks.observed":["promote","judge"], "checks.reported":["promote","judge"],
+  "checks.detail-attempted":["promote","judge","detail-failed-checks","out"],
   "checks.detailed":["promote","judge"], "checks.detail-failed":["promote","stop"],
-  "checks.passed":["promote","go","plan-notes","in"], "checks.failed":["promote","stop"],
+  "checks.passed":["promote","go","plan-notes","in","merge-pr","in"],
+  "checks.failed":["promote","stop","detail-failed-checks","in"],
   "checks.silent":["promote","stop"], "checks.unknown-pr":["promote","stop"],
+  "pr.merge-attempted":["promote","judge","merge-pr","out"],
   "pr.merged":["promote","go"], "pr.merge-failed":["promote","stop"],
 
   "notes.planned":["docs","work","plan-notes","out"], "notes.plan-failed":["docs","stop"],
@@ -388,8 +400,22 @@ function blockOf(type) { return (EVENT[type] || [])[0] || null; }
 /* An unmapped topic is a real signal: the topology publishes something this
    page does not understand. Say so in the loudest colour rather than hiding it
    among the informational rows, which is where the old default sent it. */
-function sev(type) { return (EVENT[type] || [])[1] || "unmapped"; }
+function sev(type, payload) {
+  if (type === "suite.ran" && payload && !payload.ran) return "hold";
+  return (EVENT[type] || [])[1] || "unmapped";
+}
+function eventSeverity(e) {
+  return e.payload ? sev(e.type, e.payload) : sev(e.type);
+}
 function judgingNode(type) { return (EVENT[type] || []).slice(2); }
+function judgingNodes(type) {
+  const metadata = judgingNode(type);
+  const pairs = [];
+  for (let i = 0; i < metadata.length; i += 2) {
+    pairs.push(metadata.slice(i, i + 2));
+  }
+  return pairs;
+}
 
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g,
   (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
@@ -604,16 +630,20 @@ function apply(msg) {
   }
 
   const block = blockOf(t);
+  // A detected suite reports its verdict through `ok`; absence of a suite is
+  // instead a human checkpoint. Keep that distinction visible immediately,
+  // before the assessor routes the payload to approval.requested.
   const meaning = sev(t);
+  const displayMeaning = p ? sev(t, p) : meaning;
 
   // Unconditional, before any switch. Every event advances the counter, names
   // itself on the tick line, and flashes the rail it belongs to — so an event
   // that changes no state is still visibly an event, which is the whole point.
   run.events++;
-  run.tick = { type: t, sev: meaning, at: run.last };
+  run.tick = { type: t, sev: displayMeaning, at: run.last };
   if (block) {
     run.counts[block] = (run.counts[block] || 0) + 1;
-    run.pulse = { block, sev: meaning, at: Date.now() };
+    run.pulse = { block, sev: displayMeaning, at: Date.now() };
   }
 
   /* Inputs and outputs are annotations on EVENT, not a second topic table.
@@ -630,6 +660,13 @@ function apply(msg) {
   if (node && direction === "in") {
     const scope = scopeFor(node);
     run.inFlight.set(node + "|" + scope, { node, scope, at: run.last });
+  }
+  for (const [extraNode, extraDirection] of judgingNodes(t).slice(1)) {
+    if (extraNode && extraDirection === "in") {
+      const scope = scopeFor(extraNode);
+      run.inFlight.set(extraNode + "|" + scope,
+        { node: extraNode, scope, at: run.last });
+    }
   }
 
   // A block that speaks is working, whether it was idle or had been waiting.
@@ -721,7 +758,7 @@ function apply(msg) {
       run.verdict = { label: "REBASE BLOCKED", cls: "v-red",
         detail: (p.conflicts || []).join(", ") || p.error || t }; break;
     case "suite.ran": run.suite = p.ran
-      ? (p.ok ? "suite passed" : "suite FAILED") : "no suite ran"; break;
+      ? (p.ok ? "suite passed" : "suite FAILED") : "no suite — awaiting human"; break;
     case "gate.cleared": set("gate", "done"); before("promote"); milestone("GATE CLEARED"); break;
     case "approval.requested": set("gate", "parked"); run.state = "parked";
       run.verdict = { label: "AWAITING APPROVAL", cls: "v-violet",
@@ -814,8 +851,8 @@ function renderRun(run, now) {
   const hot = run.pulse && now - run.pulse.at < 1200 ? run.pulse : null;
   const judging = (b) => [...run.inFlight.values()]
     .filter((f) => blockOf(Object.keys(EVENT).find((t) => {
-      const meta = judgingNode(t);
-      return meta[0] === f.node && meta[1] === "in";
+      return judgingNodes(t).some(([node, direction]) =>
+        node === f.node && direction === "in");
     })) === b)
     .map((f) => '<span class="judge-node" title="' +
       esc(f.node + " in flight · " + elapsed(now - f.at)) + '"></span>').join("");
@@ -934,7 +971,8 @@ function pruneFeed() {
 function renderFeed() {
   pruneFeed();
   const el = document.getElementById("feed");
-  const shown = feed.filter((e) => !filter || sev(e.type) === filter).slice(0, 250);
+  const shown = feed.filter((e) =>
+    !filter || eventSeverity(e) === filter).slice(0, 250);
   if (!shown.length) { el.innerHTML = '<div class="empty">No events match.</div>'; return; }
   el.innerHTML = shown.map((e) => {
     const invocation = invocationFor(e);
@@ -942,7 +980,7 @@ function renderFeed() {
       ? '<span class="badge">' + esc(invocation.runner) +
         (invocation.model == null ? "" : " · " + esc(invocation.model)) + "</span>"
       : "";
-    return '<div class="ev sev-' + esc(sev(e.type)) + '">' +
+    return '<div class="ev sev-' + esc(eventSeverity(e)) + '">' +
       '<div class="hd"><span>' + new Date(e.timestamp).toLocaleTimeString([], { hour12:false }) +
       '</span><span class="ty">' + esc(e.type) + "</span><span>" + esc(e.source || "") +
       "</span>" + badge + "</div>" +
@@ -978,7 +1016,7 @@ const SEV_LABEL = { go:"finished", work:"working", judge:"judging",
 
 function renderBadges() {
   pruneFeed();
-  const present = new Set(feed.map((e) => sev(e.type)));
+  const present = new Set(feed.map(eventSeverity));
   const kinds = SEVERITIES.concat(present.has("unmapped") ? ["unmapped"] : []);
   document.getElementById("badges").innerHTML =
     '<button class="badge' + (filter ? "" : " on") + '" data-filter="">all</button>' +
@@ -1084,7 +1122,8 @@ function handleMessage(msg, url, replay) {
   if (isAttributed(msg)) apply(msg);
   else unattributed++;
   feed.unshift({ type: msg.type, source: msg.source, timestamp: msg.timestamp,
-                 summary: summarise(msg.payload), ...identity(msg.payload) });
+                 payload: msg.payload, summary: summarise(msg.payload),
+                 ...identity(msg.payload) });
   pruneFeed();
   document.getElementById("feed-empty")?.remove();
   schedule();

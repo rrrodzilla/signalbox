@@ -12,6 +12,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${SIGNALBOX_CONFIG:-$ROOT/emergent.toml}"
 LOG_DIR="${SIGNALBOX_LOG_DIR:-$ROOT/.harness}"
+EVENT_STORE="${SIGNALBOX_EVENT_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/emergent/signalbox/events.db}"
 ENGINE_LOG="$LOG_DIR/engine.log"
 DASHBOARD_LOG="$LOG_DIR/dashboard.log"
 DASHBOARD_PIDFILE="$LOG_DIR/dashboard.pid"
@@ -105,6 +106,104 @@ install() {
 
 engine_pids() { pgrep -x emergent 2>/dev/null || true; }
 
+# Snapshot the whole primitive tree while the engine is still its root. Once
+# SIGTERM makes the engine exit, its direct children are reparented and neither
+# their old parent nor deeper model runners can be reconstructed safely. Match
+# numeric parent pids only: command-line patterns can match the shell issuing
+# the kill and take down the harness itself.
+engine_descendant_pids() {
+  local engines="$1"
+  ps -eo pid=,ppid= | awk -v roots="$engines" -v self="$$" '
+    BEGIN {
+      count = split(roots, root, /[[:space:]]+/)
+      for (i = 1; i <= count; i++) if (root[i] != "") found[root[i]] = 1
+    }
+    { pid[NR] = $1; ppid[NR] = $2; parent[$1] = $2 }
+    END {
+      value = self
+      while (value != "" && !protected[value]) {
+        protected[value] = 1
+        value = parent[value]
+      }
+      do {
+        changed = 0
+        for (i = 1; i <= NR; i++)
+          if (found[ppid[i]] && !found[pid[i]]) {
+            found[pid[i]] = 1
+            descendant[pid[i]] = 1
+            changed = 1
+          }
+      } while (changed)
+      for (value in descendant) if (!protected[value]) print value
+    }
+  ' || true
+}
+
+live_pids() {
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
+  done <<<"$1"
+  return 0
+}
+
+# A retained worktree is evidence, not liveness: halted runs deliberately keep
+# theirs. A run is live only when its newest launch has no later terminal.
+in_flight_run() {
+  [[ -f "$EVENT_STORE" ]] || return 0
+  python3 - "$EVENT_STORE" <<'PY' 2>/dev/null || true
+import sqlite3
+import sys
+from pathlib import Path
+
+path = sys.argv[1]
+uri = Path(path).resolve().as_uri() + "?mode=ro"
+with sqlite3.connect(uri, uri=True) as connection:
+    row = connection.execute(
+        """
+        WITH requested AS (
+          SELECT json_extract(payload_json, '$.run_id') AS run_id, MAX(timestamp_ms) AS requested_at
+          FROM events
+          WHERE message_type = 'run.requested'
+          GROUP BY json_extract(payload_json, '$.run_id')
+        )
+        SELECT requested.run_id
+        FROM requested
+        WHERE requested.run_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM events terminal
+            WHERE terminal.message_type IN ('run.completed', 'run.halted')
+              AND json_extract(terminal.payload_json, '$.run_id') = requested.run_id
+              AND terminal.timestamp_ms >= requested.requested_at
+          )
+        ORDER BY requested.requested_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+if row:
+    print(row[0])
+PY
+}
+
+guard_down() {
+  local command="$1"
+  shift
+  local force=0
+  while (($#)); do
+    case "$1" in
+      --force) force=1 ;;
+      *) fail "usage: $0 $command [--force]" ;;
+    esac
+    shift
+  done
+  ((force)) && return 0
+  [[ -n "$(engine_pids)" ]] || return 0
+  local run_id=""
+  run_id="$(in_flight_run)"
+  [[ -z "$run_id" ]] \
+    || fail "run $run_id is in flight; stop it anyway with: $0 $command --force"
+}
+
 # The viewer is a separate process from the engine, so `down` has to name it or
 # it survives every restart. One that outlived the reinstall was still running
 # the uv *tool* snapshot of the package rather than this working tree.
@@ -173,11 +272,12 @@ dashboard_down() {
 }
 
 down() {
-  local pids
+  local pids descendants=""
   pids="$(engine_pids)"
   if [[ -z "$pids" ]]; then
     say "no engine running"
   else
+    descendants="$(engine_descendant_pids "$pids")"
     say "stopping engine: $pids"
     # SIGTERM so the event store flushes; a killed engine loses the tail of the
     # trail, which is the only record a run has.
@@ -191,6 +291,21 @@ down() {
       fi
       sleep 1
     done
+    local survivors=""
+    survivors="$(live_pids "$descendants")"
+    if [[ -n "$survivors" ]]; then
+      say "stopping orphaned engine processes: $survivors"
+      xargs -r kill -TERM <<<"$survivors" || true
+      deadline=$((SECONDS + 20))
+      while [[ -n "$(live_pids "$descendants")" ]]; do
+        if ((SECONDS >= deadline)); then
+          say "  orphaned processes did not drain in 20s, forcing"
+          xargs -r kill -9 <<<"$(live_pids "$descendants")" || true
+          break
+        fi
+        sleep 1
+      done
+    fi
   fi
   # The viewer holds no subscription and flushes nothing, but leaving it up means
   # `restart` silently keeps serving the package it started with.
@@ -636,8 +751,8 @@ case "${1:-}" in
   preflight) shift; preflight "$@" ;;
   install)   shift; install "$@" ;;
   up)        shift; up "$@" ;;
-  down)      shift; forward_down; down "$@" ;;
-  restart)   shift; preflight; forward_down; down; start_engine ;;
+  down)      shift; guard_down down "$@"; forward_down; down ;;
+  restart)   shift; guard_down restart "$@"; preflight; forward_down; down; start_engine ;;
   status)    shift; status "$@" ;;
   launch)    shift; launch "$@" ;;
   dogfood)   shift; dogfood "$@" ;;
@@ -651,8 +766,10 @@ usage: $0 <command>
   preflight  check tools, primitives, connection ceiling, gh auth, and signing key
   install    install the CLI editable from this checkout, then run the suite
   up         start the engine and the dashboard viewer
-  down       SIGTERM the engine so the event store flushes, and stop the viewer
-  restart    down, then up
+  down [--force]
+             refuse an in-flight run by default; otherwise stop engine and viewer
+  restart [--force]
+             refuse an in-flight run by default; otherwise down, then up
   status     engine, forwarder, listening ports, and live run worktrees
   launch     signalbox launch <issue> [--no-forwarder] [...] against a running engine
   dogfood    launch against this checkout as run sb-<issue>

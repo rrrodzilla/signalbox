@@ -464,6 +464,30 @@ async def test_the_synthetic_payload_matches_the_join_summary_shape_with_project
     }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("notes", ["architecture.md", 7, {"note": "testing.md"}])
+async def test_non_list_notes_publish_only_a_synthetic_terminal(notes):
+    payload = {"run_id": "r1", "title": "Malformed note plan", "notes": notes}
+    terminal = {
+        "expected": 0,
+        "received": 0,
+        "timed_out": False,
+        "results": [],
+        "run_id": "r1",
+        "title": "Malformed note plan",
+    }
+
+    assert note_events(payload) == []
+    assert synced_event(payload) == terminal
+
+    drafted = Recorder()
+    synced = Recorder()
+    await publish_events(payload, "planned-message", drafted, synced)
+
+    assert drafted.published == []
+    assert synced.published == [terminal]
+
+
 def test_a_stage_item_keeps_the_identity_a_stage_actually_has():
     """The record `run.built` carried was a lie, and the assessor believed it.
 

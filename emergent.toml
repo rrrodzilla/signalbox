@@ -1193,7 +1193,7 @@ publishes = ["run.halted"]
 name = "route-notes-plan-accepted"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "notes.planned", "--publish-as", "notes.plan-accepted", "--",
-        "jq", "-c", 'select(((.notes | type) == "array" and (.notes | length) > 0) or (.outcome == "reviewed" and (.considered | type) == "array" and (.considered | length) > 0))']
+        "jq", "-c", 'select(((.notes | type) == "array" and (.notes | length) > 0) or ((.notes | type) == "array" and .outcome == "reviewed" and (.considered | type) == "array" and (.considered | length) > 0))']
 subscribes = ["notes.planned"]
 publishes = ["notes.plan-accepted"]
 
@@ -1201,7 +1201,7 @@ publishes = ["notes.plan-accepted"]
 name = "route-notes-plan-invalid"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "notes.planned", "--publish-as", "notes.invalid-verdict", "--",
-        "jq", "-c", 'select((((.notes | type) == "array" and (.notes | length) > 0) or (.outcome == "reviewed" and (.considered | type) == "array" and (.considered | length) > 0)) | not) | . + {stranded_topic: "notes.invalid-verdict"}']
+        "jq", "-c", 'select((((.notes | type) == "array" and (.notes | length) > 0) or ((.notes | type) == "array" and .outcome == "reviewed" and (.considered | type) == "array" and (.considered | length) > 0)) | not) | . + {stranded_topic: "notes.invalid-verdict"}']
 subscribes = ["notes.planned"]
 publishes = ["notes.invalid-verdict"]
 

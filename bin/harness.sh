@@ -207,38 +207,45 @@ live_pids() {
 
 # A retained worktree is evidence, not liveness: halted runs deliberately keep
 # theirs. A run is live only when its newest launch has no later terminal.
-in_flight_run() {
+in_flight_runs() {
   [[ -f "$EVENT_STORE" ]] || return 0
-  python3 - "$EVENT_STORE" <<'PY' 2>/dev/null || true
+  python3 - "$EVENT_STORE" "${SIGNALBOX_IN_FLIGHT_WINDOW:-2400}" <<'PY' 2>/dev/null || true
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 path = sys.argv[1]
+cutoff_ms = time.time() * 1000 - float(sys.argv[2]) * 1000
 uri = Path(path).resolve().as_uri() + "?mode=ro"
 with sqlite3.connect(uri, uri=True) as connection:
-    row = connection.execute(
+    rows = connection.execute(
         """
         WITH requested AS (
           SELECT json_extract(payload_json, '$.run_id') AS run_id, MAX(timestamp_ms) AS requested_at
           FROM events
           WHERE message_type = 'run.requested'
           GROUP BY json_extract(payload_json, '$.run_id')
+        ), newest AS (
+          SELECT json_extract(payload_json, '$.run_id') AS run_id, MAX(timestamp_ms) AS newest_at
+          FROM events
+          GROUP BY json_extract(payload_json, '$.run_id')
         )
         SELECT requested.run_id
         FROM requested
+        JOIN newest ON newest.run_id = requested.run_id
         WHERE requested.run_id IS NOT NULL
+          AND newest.newest_at >= ?
           AND NOT EXISTS (
             SELECT 1 FROM events terminal
             WHERE terminal.message_type IN ('run.completed', 'run.halted')
               AND json_extract(terminal.payload_json, '$.run_id') = requested.run_id
               AND terminal.timestamp_ms >= requested.requested_at
           )
-        ORDER BY requested.requested_at DESC
-        LIMIT 1
-        """
-    ).fetchone()
-if row:
+        """,
+        (cutoff_ms,),
+    ).fetchall()
+for row in rows:
     print(row[0])
 PY
 }
@@ -256,10 +263,17 @@ guard_down() {
   done
   ((force)) && return 0
   [[ -n "$(engine_pids)" ]] || return 0
-  local run_id=""
-  run_id="$(in_flight_run)"
-  [[ -z "$run_id" ]] \
-    || fail "run $run_id is in flight; stop it anyway with: $0 $command --force"
+  local run_id="" run_ids="" separator=""
+  while IFS= read -r run_id; do
+    [[ -n "$run_id" ]] || continue
+    run_ids+="$separator$run_id"
+    separator=", "
+  done < <(in_flight_runs)
+  [[ -z "$run_ids" ]] && return 0
+  if [[ "$run_ids" == *,* ]]; then
+    fail "runs $run_ids are in flight; stop them anyway with: $0 $command --force"
+  fi
+  fail "run $run_ids is in flight; stop it anyway with: $0 $command --force"
 }
 
 # The viewer is a separate process from the engine, so `down` has to name it or

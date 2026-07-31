@@ -578,7 +578,14 @@ def _lifecycle_with_events(
     failing_ps: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     store = tmp_path / "events.db"
-    _store(store, events)
+    now_ms = int(time.time() * 1000)
+    _store(
+        store,
+        [
+            (event_id, message_type, source, now_ms + timestamp_ms, payload)
+            for event_id, message_type, source, timestamp_ms, payload in events
+        ],
+    )
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     engine = subprocess.Popen(["sleep", "30"])
@@ -638,6 +645,48 @@ def test_lifecycle_refuses_an_in_flight_run_before_teardown(
     assert result.stderr == (
         f"harness: run sb-live is in flight; stop it anyway with: "
         f"{ROOT / 'bin/harness.sh'} {command} --force\n"
+    )
+
+
+@pytest.mark.parametrize("command", ["down", "restart"])
+def test_lifecycle_allows_an_old_unterminated_run(
+    tmp_path: Path, command: str
+):
+    result = _lifecycle_with_events(
+        tmp_path,
+        command,
+        [
+            (
+                "request",
+                "run.requested",
+                "launch",
+                -(2401 * 1000),
+                {"run_id": "sb-stale"},
+            )
+        ],
+    )
+
+    assert "is in flight" not in result.stderr
+    if command == "down":
+        assert result.returncode == 0, result.stderr
+        assert "engine stopped" in result.stdout
+
+
+def test_down_names_every_concurrently_in_flight_run(tmp_path: Path):
+    result = _lifecycle_with_events(
+        tmp_path,
+        "down",
+        [
+            ("first", "run.requested", "launch", 10, {"run_id": "sb-one"}),
+            ("second", "run.requested", "launch", 20, {"run_id": "sb-two"}),
+        ],
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        "harness: runs sb-one, sb-two are in flight; stop them anyway with: "
+        f"{ROOT / 'bin/harness.sh'} down --force\n"
     )
 
 

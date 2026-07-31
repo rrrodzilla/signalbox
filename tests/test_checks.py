@@ -57,6 +57,7 @@ def test_check_details_names_the_failed_runs(monkeypatch):
     ]}
     monkeypatch.setattr(acts, "_run", lambda *a, **k: (0, json.dumps(body), ""))
     out = acts.check_details({"pr": 57, "check_runs_url": "https://api/x"})
+    assert out["ok"] is True
     assert out["failed"] == ["tests"]
     assert out["detail_ok"] is True
     assert out["pr"] == 57, "identity must survive the fetch"
@@ -81,10 +82,25 @@ def test_a_detail_fetch_that_fails_is_data_not_an_exception(
     """
     monkeypatch.setattr(acts, "_run", lambda *a, **k: run_result)
     out = acts.check_details(payload)
+    assert out["ok"] is False
     assert out["detail_ok"] is False
     assert out["failed"] == []
     assert reason_fragment in out["reason"]
     assert out["pr"] == 57
+
+
+def test_check_details_rejects_a_listing_without_check_runs(monkeypatch):
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: (0, '{"other":[]}', ""))
+
+    out = acts.check_details({
+        "run_id": "sb-66", "pr": 57, "check_runs_url": "https://api/x",
+    })
+
+    assert out["ok"] is False
+    assert out["detail_ok"] is False
+    assert out["failed"] == []
+    assert out["run_id"] == "sb-66"
+    assert "no records" in out["reason"]
 
 
 # ── identity a webhook cannot carry ──────────────────────────────────────────
@@ -186,17 +202,27 @@ def test_open_pr_refuses_rather_than_letting_gh_choose_a_base(monkeypatch):
     """
     called = []
     monkeypatch.setattr(acts, "_run", lambda *a, **k: called.append(a) or (0, "url", ""))
-    out = acts.open_pr({"run_id": "sb-56", "issue": 56})
+    out = acts.open_pr({"run_id": "sb-56", "issue": 56, "stage_id": "s3"})
     assert out["ok"] is False
+    assert out["run_id"] == "sb-56"
+    assert out["stage_id"] == "s3"
     assert "base_branch" in out["error"]
     assert not called, "gh must not be invoked without a base"
 
 
 def test_open_pr_targets_the_pinned_base(monkeypatch, tmp_path):
-    seen = {}
+    seen = []
 
     def fake_run(cmd, *a, **k):
-        seen["cmd"] = cmd
+        seen.append(cmd)
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps({
+                "number": 99,
+                "url": "https://github.com/o/r/pull/99",
+                "baseRefName": "redesign/event-first",
+                "headRefName": "signalbox/run-sb-56",
+                "state": "OPEN",
+            }), ""
         return 0, "https://github.com/o/r/pull/99", ""
 
     monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
@@ -205,8 +231,115 @@ def test_open_pr_targets_the_pinned_base(monkeypatch, tmp_path):
         {"run_id": "sb-56", "issue": 56, "base_branch": "redesign/event-first"}
     )
     assert out["ok"] is True and out["pr"] == "99"
-    assert "--base" in seen["cmd"]
-    assert seen["cmd"][seen["cmd"].index("--base") + 1] == "redesign/event-first"
+    create = seen[0]
+    assert "--base" in create
+    assert create[create.index("--base") + 1] == "redesign/event-first"
+
+
+def test_open_pr_does_not_claim_success_without_verifying_the_requested_base(
+    monkeypatch, tmp_path
+):
+    responses = iter([
+        (0, "https://github.com/o/r/pull/99", ""),
+        (0, json.dumps({
+            "number": 99,
+            "url": "https://github.com/o/r/pull/99",
+            "baseRefName": "main",
+            "headRefName": "signalbox/run-sb-56",
+            "state": "OPEN",
+        }), ""),
+    ])
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: next(responses))
+
+    out = acts.open_pr({
+        "run_id": "sb-56", "issue": 56, "base_branch": "redesign/event-first",
+    })
+
+    assert out["ok"] is False
+    assert out["run_id"] == "sb-56"
+
+
+def test_open_pr_reuses_a_verified_open_pr_for_the_head(monkeypatch, tmp_path):
+    """The CI fix loop returns to open-pr while its original PR still exists."""
+    seen = []
+
+    def fake_run(cmd, *args, **kwargs):
+        seen.append(cmd)
+        if cmd[:3] == ["gh", "pr", "create"]:
+            return (
+                1,
+                "",
+                "a pull request for branch signalbox/run-sb-56 already exists",
+            )
+        return 0, json.dumps({
+            "number": 99,
+            "url": "https://github.com/o/r/pull/99",
+            "baseRefName": "redesign/event-first",
+            "headRefName": "signalbox/run-sb-56",
+            "state": "OPEN",
+        }), ""
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    monkeypatch.setattr(acts, "_run", fake_run)
+
+    out = acts.open_pr({
+        "run_id": "sb-56", "issue": 56, "pr": 99,
+        "base_branch": "redesign/event-first",
+    })
+
+    assert out["ok"] is True
+    assert out["pr"] == "99"
+    assert out["run_id"] == "sb-56"
+    assert seen[1][:4] == ["gh", "pr", "view", "signalbox/run-sb-56"]
+
+
+def test_open_pr_rejects_an_existing_head_pr_against_the_wrong_base(
+    monkeypatch, tmp_path
+):
+    responses = iter([
+        (1, "", "a pull request already exists"),
+        (0, json.dumps({
+            "number": 99,
+            "url": "https://github.com/o/r/pull/99",
+            "baseRefName": "main",
+            "headRefName": "signalbox/run-sb-56",
+            "state": "OPEN",
+        }), ""),
+    ])
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: next(responses))
+
+    out = acts.open_pr({
+        "run_id": "sb-56", "issue": 56, "base_branch": "redesign/event-first",
+    })
+
+    assert out["ok"] is False
+    assert out["run_id"] == "sb-56"
+
+
+def test_fetch_issue_failure_and_success_preserve_identity(monkeypatch):
+    payload = {"run_id": "sb-66", "issue": 66, "stage_count": 3}
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: (1, "", "not found"))
+    refused = acts.fetch_issue(payload)
+    assert refused["ok"] is False
+    assert refused["run_id"] == "sb-66"
+    assert refused["stage_count"] == 3
+
+    monkeypatch.setattr(
+        acts, "_run",
+        lambda *a, **k: (0, json.dumps({
+            "number": 66, "title": "Outcome routing", "body": "body", "labels": [],
+        }), ""),
+    )
+    fetched = acts.fetch_issue(payload)
+    assert fetched["ok"] is True
+    assert fetched["run_id"] == "sb-66"
+
+
+def test_fetch_issue_does_not_claim_success_for_an_unusable_response(monkeypatch):
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: (0, "{}", ""))
+    assert acts.fetch_issue({"run_id": "sb-66", "issue": 66})["ok"] is False
 
 
 def test_the_base_branch_survives_every_seam_that_dropped_stage_count():
@@ -352,6 +485,32 @@ def test_merge_stage_preserves_the_plan_cursor(monkeypatch, tmp_path):
 
     assert merged["stage_index"] == 0
     assert merged["stages"] == stages
+
+
+def test_merge_stage_refuses_when_the_commit_cannot_be_verified_with_identity(
+    monkeypatch, tmp_path
+):
+    payload = {
+        "run_id": "sb-66",
+        "issue": 66,
+        "stage_id": "s1-outcomes",
+        "results": [{"declared": ["tests/test_checks.py"]}],
+        "worktree": str(tmp_path),
+    }
+    commands = iter([
+        (0, "", ""),
+        (0, "", ""),
+        (1, "", "cannot read HEAD"),
+    ])
+    monkeypatch.setattr(acts, "_run", lambda *args, **kwargs: next(commands))
+
+    merged = acts.merge_stage(payload)
+
+    assert merged["ok"] is False
+    assert merged["run_id"] == "sb-66"
+    assert merged["issue"] == 66
+    assert merged["stage_id"] == "s1-outcomes"
+    assert "cannot read HEAD" in merged["error"]
 
 
 def test_product_keys_are_a_narrow_exemption_from_carried_identity(monkeypatch):

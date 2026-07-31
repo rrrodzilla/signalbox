@@ -113,11 +113,12 @@ def _prepare_workspace(tmp_path, monkeypatch, *, existing=False):
     from signalbox import acts
 
     monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
-    monkeypatch.setattr(
-        acts,
-        "_run",
-        lambda cmd, cwd=None, timeout=120: (0, "991a9d06e9d099d897556db56d30632743f536c9", ""),
-    )
+    def fake_run(cmd, cwd=None, timeout=120):
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"] and existing:
+            return (0, "signalbox/run-sb-70", "")
+        return (0, "991a9d06e9d099d897556db56d30632743f536c9", "")
+
+    monkeypatch.setattr(acts, "_run", fake_run)
     monkeypatch.setattr(acts, "install_skills", lambda root: [])
     if existing:
         (tmp_path / "worktrees" / "sb-70").mkdir(parents=True)
@@ -160,6 +161,82 @@ def test_prepare_workspace_resumes_an_existing_run_without_a_vault(tmp_path, mon
     assert result["ok"] is True
 
 
+def test_prepare_workspace_reentry_recovers_the_original_base_after_branch_moves(
+    tmp_path, monkeypatch
+):
+    """A moving base branch cannot invalidate the workspace a run already uses."""
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    (tmp_path / "worktrees" / "sb-70").mkdir(parents=True)
+    calls = []
+
+    def fake_run(cmd, cwd=None, timeout=120):
+        calls.append(cmd)
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return (0, "signalbox/run-sb-70", "")
+        if cmd == ["git", "merge-base", "HEAD", "main"]:
+            return (0, "launch-pinned", "")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(acts, "_run", fake_run)
+    monkeypatch.setattr(acts, "install_skills", lambda root: [])
+    result = prepare_workspace({
+        "run_id": "sb-70", "issue": 70, "base_branch": "main",
+    })
+
+    assert result["ok"] is True
+    assert result["base_sha"] == "launch-pinned"
+    assert calls == [
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        ["git", "merge-base", "HEAD", "main"],
+    ]
+
+
+def test_prepare_workspace_refuses_an_existing_tree_on_the_wrong_branch_with_identity(
+    tmp_path, monkeypatch
+):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    (tmp_path / "worktrees" / "sb-70").mkdir(parents=True)
+    monkeypatch.setattr(
+        acts, "_run", lambda *a, **k: (0, "some-other-branch", "")
+    )
+
+    result = prepare_workspace({
+        "run_id": "sb-70", "issue": 70, "stage_id": "s1",
+        "base_branch": "main", "base_sha": "launch-pinned",
+    })
+
+    assert result["ok"] is False
+    assert result["run_id"] == "sb-70"
+    assert result["issue"] == 70
+    assert result["stage_id"] == "s1"
+
+
+def test_prepare_workspace_refuses_an_unverified_created_tree_with_identity(
+    tmp_path, monkeypatch
+):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    monkeypatch.delenv("SIGNALBOX_VAULT", raising=False)
+    responses = iter([(0, "", ""), (0, "wrong-head", "")])
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: next(responses))
+
+    result = prepare_workspace({
+        "run_id": "sb-70", "issue": 70, "stage_id": "s1",
+        "base_branch": "main", "base_sha": "launch-pinned",
+        "repo_path": str(tmp_path),
+    })
+
+    assert result["ok"] is False
+    assert result["run_id"] == "sb-70"
+    assert result["issue"] == 70
+    assert result["stage_id"] == "s1"
+
+
 def test_stage_files_is_the_union_of_declared_scopes():
     payload = {
         "results": [
@@ -198,14 +275,18 @@ def test_push_branch_runs_the_leased_command(tmp_path, monkeypatch):
 
     def fake_run(cmd, cwd=None, timeout=120):
         calls.append((cmd, cwd, timeout))
-        return (0, "abc123", "")
+        if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+            return (0, "abc123", "")
+        if cmd[:3] == ["git", "ls-remote", "--heads"]:
+            return (0, "abc123\trefs/heads/signalbox/run-sb-113", "")
+        return (0, "", "")
 
     monkeypatch.setattr(acts, "_run", fake_run)
 
     result = push_branch({"run_id": "sb-113"})
 
     assert result["ok"] is True
-    assert calls[0] == (
+    assert calls[1] == (
         push_branch_command("signalbox/run-sb-113"),
         str(tmp_path / "worktrees" / "sb-113"),
         120,
@@ -216,16 +297,53 @@ def test_push_branch_reports_push_failure_as_data(tmp_path, monkeypatch):
     from signalbox import acts
 
     monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
-    monkeypatch.setattr(
-        acts,
-        "_run",
-        lambda cmd, cwd=None, timeout=120: (1, "", "lease rejected"),
-    )
+    responses = iter([
+        (0, "abc123", ""),
+        (1, "", "lease rejected"),
+        (0, "", ""),
+    ])
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: next(responses))
 
-    result = push_branch({"run_id": "sb-113"})
+    result = push_branch({"run_id": "sb-113", "issue": 113})
 
     assert result["ok"] is False
     assert result["error"] == "lease rejected"
+    assert result["run_id"] == "sb-113"
+    assert result["issue"] == 113
+
+
+def test_push_branch_trusts_verified_remote_state_after_command_error(tmp_path, monkeypatch):
+    """A command error cannot negate a push that the remote confirms landed."""
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    responses = iter([
+        (0, "abc123", ""),
+        (1, "", "local tracking setup failed"),
+        (0, "abc123\trefs/heads/signalbox/run-sb-113", ""),
+    ])
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: next(responses))
+
+    result = push_branch({"run_id": "sb-113"})
+
+    assert result["ok"] is True
+    assert result["sha"] == "abc123"
+
+
+def test_push_branch_does_not_claim_success_without_remote_verification(
+    tmp_path, monkeypatch
+):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    responses = iter([
+        (0, "abc123", ""),
+        (0, "", ""),
+        (0, "different\trefs/heads/signalbox/run-sb-113", ""),
+    ])
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: next(responses))
+
+    assert push_branch({"run_id": "sb-113"})["ok"] is False
 
 
 def _merge_result(tmp_path, monkeypatch, responses):
@@ -476,7 +594,67 @@ def test_run_suite_distinguishes_no_worktree_from_no_suite(tmp_path, monkeypatch
     result = run_suite({"run_id": "nope"})
     assert result["ran"] is False
     assert result["ok"] is False
+    assert result["errored"] is False
+    assert result["passed"] == result["failed"] == 0
     assert "no worktree" in result["reason"]
+
+
+def test_run_suite_contract_for_pass_and_failure(tmp_path, monkeypatch):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    root = tmp_path / "worktrees" / "sb-suite"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(acts, "suite_command", lambda root: ["runner", "test"])
+
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: (
+        0, "================ 267 passed in 1.2s ================", "",
+    ))
+    passed = acts.run_suite({"run_id": "sb-suite", "issue": 66})
+    assert {key: passed[key] for key in ("ran", "ok", "passed", "failed", "errored")} == {
+        "ran": True, "ok": True, "passed": 267, "failed": 0, "errored": False,
+    }
+    assert passed["issue"] == 66
+
+    monkeypatch.setattr(acts, "_run", lambda *a, **k: (
+        1, "", "=============== 3 failed, 264 passed in 1.2s ===============",
+    ))
+    failed = acts.run_suite({"run_id": "sb-suite", "issue": 66})
+    assert {key: failed[key] for key in ("ran", "ok", "passed", "failed", "errored")} == {
+        "ran": True, "ok": False, "passed": 264, "failed": 3, "errored": False,
+    }
+    assert failed["run_id"] == "sb-suite"
+
+
+def test_suite_counts_accumulate_cargo_test_binaries():
+    from signalbox.acts import suite_counts
+
+    output = "\n".join([
+        "test result: ok. 12 passed; 0 failed; 1 ignored",
+        "test result: FAILED. 8 passed; 2 failed; 0 ignored",
+    ])
+    assert suite_counts(output) == (20, 2)
+
+
+def test_run_suite_contract_for_absent_and_uninvokable_suite(tmp_path, monkeypatch):
+    from signalbox import acts
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    root = tmp_path / "worktrees" / "sb-suite"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(acts, "suite_command", lambda root: None)
+
+    absent = acts.run_suite({"run_id": "sb-suite"})
+    assert {key: absent[key] for key in ("ran", "ok", "passed", "failed", "errored")} == {
+        "ran": False, "ok": False, "passed": 0, "failed": 0, "errored": False,
+    }
+
+    (root / "Cargo.toml").write_text("")
+    unavailable = acts.run_suite({"run_id": "sb-suite"})
+    assert unavailable["ran"] is False
+    assert unavailable["ok"] is False
+    assert unavailable["errored"] is True
+    assert unavailable["passed"] == unavailable["failed"] == 0
 
 
 def test_a_uv_managed_project_is_reached_through_its_manager(tmp_path):

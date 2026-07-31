@@ -91,6 +91,27 @@ def test_judging_skill_states_the_exact_vocabulary_its_routers_match(skill, voca
         assert f"`{term}`" in body or f'"{term}"' in body, f"{skill} never states {term}"
 
 
+def test_assess_skill_matches_the_suite_outcome_contract():
+    """The assessor must gate red/no-suite cases without claiming suite errors."""
+    body = (SKILLS / "signalbox-assess" / "SKILL.md").read_text()
+
+    for state in (
+        "`ran: true`, `ok: true`, `failed: 0`",
+        "`ran: true`, `ok: false`",
+        "`ran: false`",
+        "`errored: true`",
+    ):
+        assert state in body, f"assessor omits suite state {state}"
+
+    assert "Decide on `ran` before `ok`" in body
+    assert "`suite.errored`" in body
+    assert "never reaches the assessor" in body
+    for verdict in ("clear", "needs_human", "block"):
+        assert f"`{verdict}`" in body
+    for evidence_field in ("`command`", "`exit_code`", "`passed`", "`failed`"):
+        assert evidence_field in body
+
+
 def test_acting_skills_document_only_emittable_events():
     """An acting skill must not teach an agent to announce something it cannot."""
     for skill in ("signalbox-implement", "signalbox-fix"):

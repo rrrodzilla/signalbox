@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -78,15 +79,31 @@ def prepare_workspace(payload: dict) -> dict:
             return {**payload, "ok": False,
                     "error": err or "cannot name the base branch (detached HEAD?)"}
 
-    code, base_sha, err = _run(["git", "rev-parse", str(base_branch)], cwd=source)
-    if code != 0:
-        return {**payload, "ok": False, "error": err or "cannot resolve base"}
-
-    resolved = {"base_branch": base_branch, "base_sha": base_sha}
-
     if root.exists():
+        code, current_branch, err = _run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(root)
+        )
+        if code != 0 or current_branch != branch:
+            return {**payload, "ok": False,
+                    "error": err or "existing worktree is not on the run branch"}
+        base_sha = payload.get("base_sha")
+        if not base_sha:
+            code, base_sha, err = _run(
+                ["git", "merge-base", "HEAD", str(base_branch)], cwd=str(root)
+            )
+            if code != 0 or not base_sha:
+                return {**payload, "ok": False,
+                        "error": err or "cannot recover the existing worktree base"}
+        resolved = {"base_branch": base_branch, "base_sha": base_sha}
         install_skills(root)
         return {**payload, **resolved, "ok": True, "worktree": str(root), "branch": branch}
+
+    base_sha = payload.get("base_sha")
+    if not base_sha:
+        code, base_sha, err = _run(["git", "rev-parse", str(base_branch)], cwd=source)
+        if code != 0:
+            return {**payload, "ok": False, "error": err or "cannot resolve base"}
+    resolved = {"base_branch": base_branch, "base_sha": base_sha}
 
     # Preflight and the engine may have different environments. When startup
     # forwarded a vault, re-resolve it here so #70 cannot launch a run against
@@ -100,6 +117,10 @@ def prepare_workspace(payload: dict) -> dict:
     )
     if code != 0:
         return {**payload, "ok": False, "error": err}
+    code, head, err = _run(["git", "rev-parse", "HEAD"], cwd=str(root))
+    if code != 0 or head != base_sha:
+        return {**payload, **resolved, "ok": False, "worktree": str(root),
+                "error": err or "created worktree is not at the pinned base"}
     skills = install_skills(root)
     return {**payload, **resolved, "ok": True, "worktree": str(root), "branch": branch,
             "skills": skills}
@@ -192,7 +213,12 @@ def fetch_issue(payload: dict) -> dict:
     code, out, err = _run(cmd, timeout=30)
     if code != 0:
         return {**payload, "ok": False, "error": err or f"gh exited {code}"}
-    data = json.loads(out)
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as exc:
+        return {**payload, "ok": False, "error": f"unreadable issue response: {exc}"}
+    if not isinstance(data, dict) or data.get("title") is None:
+        return {**payload, "ok": False, "error": "issue response carried no title"}
     return {
         **payload,
         "ok": True,
@@ -220,10 +246,11 @@ def suite_command(root: Path) -> list[str] | None:
 
     "Is the binary on PATH" is not the same question as "can this repo's suite
     run". signalbox's own 102 tests live behind `uv run pytest`; bare `pytest` is
-    not installed anywhere, so detection reported "no suite detected" against its
-    own checkout. Nothing errors when that happens — `run_suite` publishes
-    `ran: false`, and the assessor then refuses to clear the gate, correctly, for
-    a run whose suite never ran. A whole repository silently becomes ungateable.
+    not installed anywhere, so detection once reported "no suite detected"
+    against its own checkout. `run_suite` now distinguishes that condition from
+    a repository with no suite: a marker with no reachable runner publishes
+    `errored: true` for the topology's human-facing error route, while no marker
+    publishes `ran: false, errored: false` for the assessor's human checkpoint.
     """
     for marker, candidates in SUITE_COMMANDS:
         if not (root / marker).exists():
@@ -234,24 +261,72 @@ def suite_command(root: Path) -> list[str] | None:
     return None
 
 
+def suite_counts(output: str) -> tuple[int, int]:
+    """Extract passed and failed test counts from supported runners' summaries."""
+    cargo_summaries = re.findall(
+        r"test result: [^.]+\.\s*(\d+) passed;\s*(\d+) failed",
+        output,
+        flags=re.IGNORECASE,
+    )
+    if cargo_summaries:
+        return (
+            sum(int(passed) for passed, _ in cargo_summaries),
+            sum(int(failed) for _, failed in cargo_summaries),
+        )
+
+    for line in reversed(output.splitlines()):
+        passed = re.search(r"\b(\d+)\s+passed\b", line, flags=re.IGNORECASE)
+        failed = re.search(r"\b(\d+)\s+failed\b", line, flags=re.IGNORECASE)
+        if passed or failed:
+            return (
+                int(passed.group(1)) if passed else 0,
+                int(failed.group(1)) if failed else 0,
+            )
+    return 0, 0
+
+
 def run_suite(payload: dict) -> dict:
     try:
         root = require_worktree(payload)
     except WorktreeMissing as exc:
         # Distinct from "this repo has no suite": we could not even look.
-        return {**payload, "ran": False, "ok": False, "reason": str(exc)}
+        return {
+            **payload, "ran": False, "ok": False, "passed": 0, "failed": 0,
+            "errored": False, "reason": str(exc),
+        }
     cmd = suite_command(root)
     if cmd is None:
+        detected = [marker for marker, _ in SUITE_COMMANDS if (root / marker).exists()]
+        if detected:
+            return {
+                **payload, "ran": False, "ok": False, "passed": 0, "failed": 0,
+                "errored": True,
+                "reason": f"suite detected but no runner available ({detected[0]})",
+            }
         # Absence is a fact worth publishing, not a pass.
-        return {**payload, "ran": False, "passed": 0, "failed": 0, "reason": "no suite detected"}
-    code, out, err = _run(cmd, cwd=str(root), timeout=1800)
+        return {
+            **payload, "ran": False, "ok": False, "passed": 0, "failed": 0,
+            "errored": False, "reason": "no suite detected",
+        }
+    try:
+        code, out, err = _run(cmd, cwd=str(root), timeout=1800)
+    except OSError as exc:
+        return {
+            **payload, "ran": False, "ok": False, "passed": 0, "failed": 0,
+            "errored": True, "reason": f"suite runner could not be invoked: {exc}",
+        }
+    output = (out + "\n" + err).strip()
+    passed, failed = suite_counts(output)
     return {
         **payload,
         "ran": True,
         "ok": code == 0,
+        "passed": passed,
+        "failed": failed,
+        "errored": False,
         "exit_code": code,
         "command": " ".join(cmd),
-        "output": (out + "\n" + err).strip()[-8000:],
+        "output": output[-8000:],
     }
 
 
@@ -282,7 +357,10 @@ def merge_stage(payload: dict) -> dict:
     if code != 0 and "nothing to commit" not in (out + err).lower():
         return {**payload, "ok": False, "conflicts": [], "error": err or out}
 
-    code, sha, _ = _run(["git", "rev-parse", "HEAD"], cwd=root)
+    code, sha, err = _run(["git", "rev-parse", "HEAD"], cwd=root)
+    if code != 0 or not sha:
+        return {**payload, "ok": False, "conflicts": [],
+                "error": err or "could not verify the stage commit"}
     return {**payload, "ok": True, "sha": sha, "files": files}
 
 
@@ -297,14 +375,23 @@ def push_branch_command(branch: str) -> list[str]:
 def push_branch(payload: dict) -> dict:
     root = str(worktree_for(payload))
     branch = branch_for(payload)
+    sha_code, sha, sha_err = _run(["git", "rev-parse", "HEAD"], cwd=root)
+    if sha_code != 0 or not sha:
+        return {**payload, "ok": False, "error": sha_err or "cannot identify branch tip"}
     # The lease is a fix-loop and approval re-entry safety net, not the primary
     # rebase path. Force-pushing an existing PR makes its old suite stale or
     # cancelled, and the check router deliberately drops those conclusions, so
     # the rebase belongs before the first push and this only protects a repeat.
-    code, _, err = _run(push_branch_command(branch), cwd=root, timeout=120)
-    if code != 0:
-        return {**payload, "ok": False, "error": err}
-    _, sha, _ = _run(["git", "rev-parse", "HEAD"], cwd=root)
+    code, out, err = _run(push_branch_command(branch), cwd=root, timeout=120)
+    verify_code, remote, verify_err = _run(
+        ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch}"],
+        cwd=root,
+        timeout=45,
+    )
+    remote_sha = remote.split(maxsplit=1)[0] if remote else ""
+    if verify_code != 0 or remote_sha != sha:
+        reason = err or out or verify_err or "remote branch does not match local tip"
+        return {**payload, "ok": False, "error": reason}
     return {**payload, "ok": True, "branch": branch, "sha": sha}
 
 
@@ -330,9 +417,39 @@ def open_pr(payload: dict) -> dict:
         "--body", f"Closes #{payload.get('issue')}\n\nOpened by signalbox run `{payload.get('run_id')}`.",
     ]
     code, out, err = _run(cmd, cwd=root, timeout=60)
-    if code != 0:
-        return {**payload, "ok": False, "error": err}
-    return {**payload, "ok": True, "url": out, "pr": out.rstrip("/").rsplit("/", 1)[-1]}
+    candidate = out.rstrip("/").rsplit("/", 1)[-1] if out else ""
+    expected_head = branch_for(payload)
+    # `gh pr create` refuses on the designed CI fix-loop re-entry because the
+    # head already has an open PR. View by branch in that case: the observed
+    # remote state, not create's exit status, says whether the outcome holds.
+    view_target = candidate or expected_head
+    view_code, view_out, view_err = _run(
+        ["gh", "pr", "view", view_target,
+         "--json", "number,url,baseRefName,headRefName,state"],
+        cwd=root,
+        timeout=45,
+    )
+    try:
+        observed = json.loads(view_out)
+    except json.JSONDecodeError:
+        observed = {}
+    observed_number = str(observed.get("number") or "")
+    verified = (
+        view_code == 0
+        and isinstance(observed, dict)
+        and bool(observed_number)
+        and (not candidate or observed_number == candidate)
+        and observed.get("baseRefName") == str(base_branch)
+        and observed.get("headRefName") == expected_head
+        and str(observed.get("state") or "").upper() == "OPEN"
+    )
+    if not verified:
+        return {**payload, "ok": False,
+                "error": err or view_err or "could not verify the requested PR was opened"}
+    return {
+        **payload, "ok": True, "url": observed.get("url") or out,
+        "pr": observed_number,
+    }
 
 
 def pr_state_is_merged(raw: str) -> bool:
@@ -418,19 +535,25 @@ def check_details(payload: dict) -> dict:
     """
     url = payload.get("check_runs_url")
     if not url:
-        return {**payload, "failed": [], "detail_ok": False,
+        return {**payload, "ok": False, "failed": [], "detail_ok": False,
                 "reason": "the suite carried no check_runs_url"}
     code, out, err = _run(["gh", "api", str(url)], timeout=45)
     if code != 0 or not out:
-        return {**payload, "failed": [], "detail_ok": False,
+        return {**payload, "ok": False, "failed": [], "detail_ok": False,
                 "reason": err or "gh api returned nothing"}
     try:
         body = json.loads(out)
     except json.JSONDecodeError as exc:
-        return {**payload, "failed": [], "detail_ok": False,
+        return {**payload, "ok": False, "failed": [], "detail_ok": False,
                 "reason": f"unreadable check-runs listing: {exc}"}
     records = body.get("check_runs") if isinstance(body, dict) else body
-    return {**payload, "failed": failed_check_names(records or []), "detail_ok": True}
+    if not isinstance(records, list):
+        return {**payload, "ok": False, "failed": [], "detail_ok": False,
+                "reason": "check-runs listing carried no records"}
+    return {
+        **payload, "ok": True, "failed": failed_check_names(records),
+        "detail_ok": True,
+    }
 
 
 def map_ci_findings(payload: dict) -> dict:

@@ -10,7 +10,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG="$ROOT/emergent.toml"
+CONFIG="${SIGNALBOX_CONFIG:-$ROOT/emergent.toml}"
 LOG_DIR="${SIGNALBOX_LOG_DIR:-$ROOT/.harness}"
 ENGINE_LOG="$LOG_DIR/engine.log"
 DASHBOARD_LOG="$LOG_DIR/dashboard.log"
@@ -63,6 +63,20 @@ preflight() {
   install them with: emergent marketplace install ${absent[*]}"
   fi
 
+  local ceiling_message ipc_config ipc_dir ipc_quoted
+  if ! ceiling_message="$(python3 "$ROOT/src/signalbox/ceiling.py" "$CONFIG" 2>&1)"; then
+    if [[ "$ceiling_message" != "declared primitive connections ("* ]]; then
+      fail "connection ceiling check failed: $ceiling_message"
+    fi
+    # refusal_message ends with the absolute, resolved path selected by the
+    # module. Reuse it so the diagnosis and its repair cannot diverge.
+    ipc_config="${ceiling_message##* in }"
+    ipc_dir="$(dirname "$ipc_config")"
+    printf -v ipc_quoted '%q' "$ipc_config"
+    fail "$ceiling_message
+  repair with: mkdir -p \"$ipc_dir\" && touch $ipc_quoted && awk 'BEGIN { in_limits=0; found_limits=0; set_value=0 } /^\\[limits\\][[:space:]]*$/ { if (in_limits && !set_value) print \"max_connections = 1024\"; in_limits=1; found_limits=1; print; next } /^\\[/ { if (in_limits && !set_value) { print \"max_connections = 1024\"; set_value=1 } in_limits=0 } in_limits && /^[[:space:]]*max_connections[[:space:]]*=/ { print \"max_connections = 1024\"; set_value=1; next } { print } END { if (!found_limits) { if (NR) print \"\"; print \"[limits]\"; print \"max_connections = 1024\" } else if (in_limits && !set_value) print \"max_connections = 1024\" }' $ipc_quoted > $ipc_quoted.tmp && mv $ipc_quoted.tmp $ipc_quoted"
+  fi
+
   gh auth status >/dev/null 2>&1 || say "  warning: gh is not authenticated; a run against a remote repo will stall at fetch-issue"
   git -C "$ROOT" config --get user.signingkey >/dev/null 2>&1 \
     || say "  warning: no git signing key configured; merge-stage commits with -S and will fail"
@@ -107,8 +121,7 @@ dashboard_pid() {
 
 port_held() { fuser -n tcp "$1" >/dev/null 2>&1; }
 
-up() {
-  preflight
+start_engine() {
   if [[ -n "$(engine_pids)" ]]; then
     fail "an emergent engine is already running (pid $(engine_pids | tr '\n' ' '))
   stop it with: $0 down"
@@ -137,6 +150,11 @@ up() {
   done
 
   status
+}
+
+up() {
+  preflight
+  start_engine
 }
 
 dashboard_down() {
@@ -248,7 +266,30 @@ status() {
     fi
   fi
   if [[ -n "$pids" ]]; then
-    say "engine:    up (pid $(tr '\n' ' ' <<<"$pids"))"
+    local declared live engine_pid
+    if declared="$(python3 - "$CONFIG" 2>/dev/null <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as config_file:
+    config = tomllib.load(config_file)
+print(sum(len(config.get(section, ())) for section in ("sources", "handlers", "sinks")))
+PY
+)"; then
+      :
+    else
+      declared=""
+    fi
+    engine_pid="$(head -n 1 <<<"$pids")"
+    live="$({ pgrep -P "$engine_pid" 2>/dev/null || true; } | wc -l)"
+    live="${live//[[:space:]]/}"
+    if [[ -z "$declared" ]]; then
+      say "engine:    DEGRADED (pid $(tr '\n' ' ' <<<"$pids"); declared primitive count unavailable from $CONFIG)"
+    elif [[ "$live" == "$declared" ]]; then
+      say "engine:    up (pid $(tr '\n' ' ' <<<"$pids"); primitives $live/$declared)"
+    else
+      say "engine:    DEGRADED (pid $(tr '\n' ' ' <<<"$pids"); primitives $live/$declared live)"
+    fi
   else
     say "engine:    down"
   fi
@@ -596,7 +637,7 @@ case "${1:-}" in
   install)   shift; install "$@" ;;
   up)        shift; up "$@" ;;
   down)      shift; forward_down; down "$@" ;;
-  restart)   shift; forward_down; down; up ;;
+  restart)   shift; preflight; forward_down; down; start_engine ;;
   status)    shift; status "$@" ;;
   launch)    shift; launch "$@" ;;
   dogfood)   shift; dogfood "$@" ;;
@@ -607,7 +648,7 @@ case "${1:-}" in
     cat >&2 <<USAGE
 usage: $0 <command>
 
-  preflight  check tools, primitives, gh auth, and the signing key
+  preflight  check tools, primitives, connection ceiling, gh auth, and signing key
   install    install the CLI editable from this checkout, then run the suite
   up         start the engine and the dashboard viewer
   down       SIGTERM the engine so the event store flushes, and stop the viewer

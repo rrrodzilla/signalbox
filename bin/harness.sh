@@ -106,6 +106,47 @@ install() {
 
 engine_pids() { pgrep -x emergent 2>/dev/null || true; }
 
+# Snapshot the whole primitive tree while the engine is still its root. Once
+# SIGTERM makes the engine exit, its direct children are reparented and neither
+# their old parent nor deeper model runners can be reconstructed safely. Match
+# numeric parent pids only: command-line patterns can match the shell issuing
+# the kill and take down the harness itself.
+engine_descendant_pids() {
+  local engines="$1"
+  ps -eo pid=,ppid= | awk -v roots="$engines" -v self="$$" '
+    BEGIN {
+      count = split(roots, root, /[[:space:]]+/)
+      for (i = 1; i <= count; i++) if (root[i] != "") found[root[i]] = 1
+    }
+    { pid[NR] = $1; ppid[NR] = $2; parent[$1] = $2 }
+    END {
+      value = self
+      while (value != "" && !protected[value]) {
+        protected[value] = 1
+        value = parent[value]
+      }
+      do {
+        changed = 0
+        for (i = 1; i <= NR; i++)
+          if (found[ppid[i]] && !found[pid[i]]) {
+            found[pid[i]] = 1
+            descendant[pid[i]] = 1
+            changed = 1
+          }
+      } while (changed)
+      for (value in descendant) if (!protected[value]) print value
+    }
+  ' || true
+}
+
+live_pids() {
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
+  done <<<"$1"
+  return 0
+}
+
 # A retained worktree is evidence, not liveness: halted runs deliberately keep
 # theirs. A run is live only when its newest launch has no later terminal.
 in_flight_run() {
@@ -231,11 +272,12 @@ dashboard_down() {
 }
 
 down() {
-  local pids
+  local pids descendants=""
   pids="$(engine_pids)"
   if [[ -z "$pids" ]]; then
     say "no engine running"
   else
+    descendants="$(engine_descendant_pids "$pids")"
     say "stopping engine: $pids"
     # SIGTERM so the event store flushes; a killed engine loses the tail of the
     # trail, which is the only record a run has.
@@ -249,6 +291,21 @@ down() {
       fi
       sleep 1
     done
+    local survivors=""
+    survivors="$(live_pids "$descendants")"
+    if [[ -n "$survivors" ]]; then
+      say "stopping orphaned engine processes: $survivors"
+      xargs -r kill -TERM <<<"$survivors" || true
+      deadline=$((SECONDS + 20))
+      while [[ -n "$(live_pids "$descendants")" ]]; do
+        if ((SECONDS >= deadline)); then
+          say "  orphaned processes did not drain in 20s, forcing"
+          xargs -r kill -9 <<<"$(live_pids "$descendants")" || true
+          break
+        fi
+        sleep 1
+      done
+    fi
   fi
   # The viewer holds no subscription and flushes nothing, but leaving it up means
   # `restart` silently keeps serving the package it started with.

@@ -272,6 +272,38 @@ def test_the_viewer_is_not_found_by_matching_its_command_line():
     assert "DASHBOARD_PIDFILE" in code
 
 
+def test_the_orphan_sweep_excludes_its_live_caller_ancestry(tmp_path: Path):
+    harness = (ROOT / "bin" / "harness.sh").read_text()
+    function = "engine_descendant_pids() {" + harness.split(
+        "engine_descendant_pids() {", 1
+    )[1].split("\n}\n\nlive_pids()", 1)[0] + "\n}\n"
+    probe = tmp_path / "probe.sh"
+    probe.write_text(
+        "#!/usr/bin/env bash\n"
+        + function
+        + 'printf "self=%s\\n" "$$"\n'
+        + 'engine_descendant_pids "$1"\n'
+    )
+    probe.chmod(0o755)
+    sibling = subprocess.Popen(["sleep", "30"])
+    try:
+        result = subprocess.run(
+            [probe, str(os.getpid())],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        lines = result.stdout.splitlines()
+        probe_pid = int(lines[0].split("=", 1)[1])
+        captured = {int(pid) for pid in lines[1:]}
+
+        assert sibling.pid in captured
+        assert probe_pid not in captured
+    finally:
+        sibling.terminate()
+        sibling.wait(timeout=5)
+
+
 def test_preflight_requires_the_operator_vault():
     """#70: fail in the operator shell before starting an unusable engine."""
     harness = (ROOT / "bin" / "harness.sh").read_text()
@@ -543,6 +575,7 @@ def _lifecycle_with_events(
     command: str,
     events: list[tuple[str, str, str, int, dict]],
     *extra_args: str,
+    failing_ps: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     store = tmp_path / "events.db"
     _store(store, events)
@@ -557,6 +590,10 @@ def _lifecycle_with_events(
         "printf '424242\\n'\n"
     )
     pgrep.chmod(0o755)
+    if failing_ps:
+        ps = fake_bin / "ps"
+        ps.write_text("#!/usr/bin/env bash\nexit 1\n")
+        ps.chmod(0o755)
     kill = fake_bin / "kill"
     kill.write_text(
         "#!/usr/bin/env bash\n"
@@ -624,6 +661,122 @@ def test_force_allows_stopping_an_in_flight_run(tmp_path: Path):
 
     assert result.returncode == 0, result.stderr
     assert "engine stopped" in result.stdout
+
+
+def test_down_still_stops_the_engine_when_the_process_snapshot_fails(tmp_path: Path):
+    result = _lifecycle_with_events(
+        tmp_path,
+        "down",
+        [("terminal", "run.completed", "engine", 10, {"run_id": "sb-done"})],
+        failing_ps=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "engine stopped" in result.stdout
+
+
+def test_down_reaps_the_captured_engine_tree_without_matching_process_names(
+    tmp_path: Path,
+):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    primitive_pidfile = tmp_path / "primitive.pid"
+    runner_pidfile = tmp_path / "runner.pid"
+    unrelated_runner_pidfile = tmp_path / "unrelated-runner.pid"
+
+    exec_handler = fake_bin / "exec-handler"
+    exec_handler.write_text(
+        "#!/usr/bin/env python3\n"
+        "import signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGCHLD, signal.SIG_IGN)\n"
+        "child = subprocess.Popen(['sleep', '30'])\n"
+        "open(sys.argv[1], 'w').write(str(child.pid))\n"
+        "while True: time.sleep(1)\n"
+    )
+    exec_handler.chmod(0o755)
+    engine_script = tmp_path / "engine.py"
+    engine_script.write_text(
+        "import signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGCHLD, signal.SIG_IGN)\n"
+        "child = subprocess.Popen([sys.argv[1], sys.argv[2]])\n"
+        "open(sys.argv[3], 'w').write(str(child.pid))\n"
+        "while True: time.sleep(1)\n"
+    )
+    engine = subprocess.Popen(
+        [os.environ.get("PYTHON", "python3"), engine_script, exec_handler,
+         runner_pidfile, primitive_pidfile]
+    )
+    unrelated = subprocess.Popen([exec_handler, unrelated_runner_pidfile])
+    unrelated_runner_pid: int | None = None
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and (
+            not primitive_pidfile.exists()
+            or not runner_pidfile.exists()
+            or not unrelated_runner_pidfile.exists()
+        ):
+            time.sleep(0.05)
+        primitive_pid = int(primitive_pidfile.read_text())
+        runner_pid = int(runner_pidfile.read_text())
+        unrelated_runner_pid = int(unrelated_runner_pidfile.read_text())
+
+        pgrep = fake_bin / "pgrep"
+        pgrep.write_text(
+            "#!/usr/bin/env bash\n"
+            f"[[ -r /proc/{engine.pid}/stat ]] || exit 1\n"
+            f"[[ $(awk '{{ print $3 }}' /proc/{engine.pid}/stat) != Z ]] || exit 1\n"
+            f"printf '%s\\n' {engine.pid}\n"
+        )
+        pgrep.chmod(0o755)
+        kill = fake_bin / "kill"
+        kill.write_text(
+            "#!/usr/bin/env bash\n"
+            f"for pid in \"$@\"; do if [[ \"$pid\" == {engine.pid} ]]; then\n"
+            "  exec /bin/kill \"$@\"\n"
+            "fi; done\n"
+            "/bin/kill \"$@\"\n"
+            "exit 1\n"
+        )
+        kill.chmod(0o755)
+
+        result = subprocess.run(
+            [ROOT / "bin/harness.sh", "down", "--force"],
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "SIGNALBOX_LOG_DIR": str(tmp_path / "logs"),
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "engine stopped" in result.stdout
+        assert engine.wait(timeout=5) == -15
+        with pytest.raises(ProcessLookupError):
+            os.kill(primitive_pid, 0)
+        with pytest.raises(ProcessLookupError):
+            os.kill(runner_pid, 0)
+        assert unrelated.poll() is None
+    finally:
+        if unrelated_runner_pid is not None:
+            try:
+                os.kill(unrelated_runner_pid, 15)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(unrelated_runner_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+        for process in (engine, unrelated):
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
 
 
 def test_down_allows_a_halted_run_with_a_retained_worktree(tmp_path: Path):

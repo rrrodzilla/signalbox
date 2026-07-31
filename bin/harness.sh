@@ -497,21 +497,36 @@ forward_down() {
 # the control endpoint. The engine decides everything after that.
 
 launch() {
-  (($# >= 1)) || fail "usage: $0 launch <issue> [--repo owner/name] [--repo-path DIR] [--run-id ID] ..."
+  (($# >= 1)) || fail "usage: $0 launch <issue> [--repo owner/name] [--repo-path DIR] [--no-forwarder] [--run-id ID] ..."
   [[ -n "$(engine_pids)" ]] || fail "no engine running; start one with: $0 up"
   port_held "$CONTROL_PORT" || fail "control endpoint is not listening on $CONTROL_PORT"
   local promote_capable=0
+  local no_forwarder=0
+  local repo=""
   local repo_path="$PWD"
   local previous=""
   local arg
+  local -a launch_args=()
   for arg in "$@"; do
+    # #105: this harness-only escape hatch must not reach signalbox argparse.
+    if [[ "$arg" == "--no-forwarder" ]]; then
+      no_forwarder=1
+      continue
+    fi
+    launch_args+=("$arg")
+    if [[ "$previous" == "--repo" ]]; then
+      repo="$arg"
+      previous=""
+      continue
+    fi
     if [[ "$previous" == "--repo-path" ]]; then
       repo_path="$arg"
       previous=""
       continue
     fi
     case "$arg" in
-      --repo|--repo=*) promote_capable=1 ;;
+      --repo=*) repo="${arg#--repo=}" ;;
+      --repo) previous="--repo" ;;
       --repo-path=*) repo_path="${arg#--repo-path=}" ;;
       --repo-path) previous="--repo-path" ;;
     esac
@@ -520,17 +535,37 @@ launch() {
   repo_root="$(git -C "$repo_path" rev-parse --show-toplevel 2>/dev/null || true)"
   local exact_repo_path=""
   exact_repo_path="$(cd "$repo_path" 2>/dev/null && pwd -P || true)"
-  if [[ -n "$repo_root" && "$repo_root" == "$exact_repo_path" ]] \
+  if [[ -n "$repo" ]]; then
+    local workflow_count=""
+    # #105: an explicit remote is the launch target when both target forms are
+    # present. An unavailable API leaves workflow state unknown, which cannot
+    # escalate the missing-forwarder warning into a refusal.
+    workflow_count="$(gh api "repos/$repo/actions/workflows" \
+      --jq '.total_count // 0' 2>/dev/null || true)"
+    if [[ "$workflow_count" =~ ^[1-9][0-9]*$ ]]; then
+      promote_capable=1
+    fi
+  elif [[ -n "$repo_root" && "$repo_root" == "$exact_repo_path" ]] \
     && git -C "$repo_root" remote get-url origin >/dev/null 2>&1; then
-    promote_capable=1
+    # #105: a local remote is resolvable only when the exact checkout also has
+    # a workflow that can create the check suite promote waits for.
+    if find "$repo_root/.github/workflows" -maxdepth 1 -type f \
+      \( -name '*.yml' -o -name '*.yaml' \) -print -quit 2>/dev/null \
+      | grep -q .; then
+      promote_capable=1
+    fi
   fi
   if [[ -z "$(forward_pid || true)" ]]; then
-    if ((promote_capable)); then
+    if ((promote_capable && ! no_forwarder)); then
+      # #105: expose the classifier result before refusal.
+      say "forwarder decision: refuse (resolvable promote path; no forwarder)"
       fail "webhook forwarder is down; restore it with: $0 forward <owner/name>"
     fi
+    # #105: no promote path or the explicit override takes the warning branch.
+    say "forwarder decision: warn (promote path unresolved or --no-forwarder)"
     say "  warning: webhook forwarder is down; continuing because this run has no resolvable promote path"
   fi
-  signalbox launch "$@"
+  signalbox launch "${launch_args[@]}"
 }
 
 # Dogfood: run signalbox against its own checkout. Split out so the repo path
@@ -578,7 +613,7 @@ usage: $0 <command>
   down       SIGTERM the engine so the event store flushes, and stop the viewer
   restart    down, then up
   status     engine, forwarder, listening ports, and live run worktrees
-  launch     signalbox launch <issue> [...] against a running engine
+  launch     signalbox launch <issue> [--no-forwarder] [...] against a running engine
   dogfood    launch against this checkout as run sb-<issue>
   forward    tunnel a repo's check_suite deliveries to the github port
   unforward  stop the tunnel

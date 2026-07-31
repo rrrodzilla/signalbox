@@ -538,6 +538,111 @@ def _status_with_engine_pid(
     )
 
 
+def _lifecycle_with_events(
+    tmp_path: Path,
+    command: str,
+    events: list[tuple[str, str, str, int, dict]],
+    *extra_args: str,
+) -> subprocess.CompletedProcess[str]:
+    store = tmp_path / "events.db"
+    _store(store, events)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    engine_marker = tmp_path / "engine-running"
+    engine_marker.touch()
+    pgrep = fake_bin / "pgrep"
+    pgrep.write_text(
+        "#!/usr/bin/env bash\n"
+        f"[[ -f {engine_marker} ]] || exit 1\n"
+        "printf '424242\\n'\n"
+    )
+    pgrep.chmod(0o755)
+    kill = fake_bin / "kill"
+    kill.write_text(
+        "#!/usr/bin/env bash\n"
+        f"rm -f {engine_marker}\n"
+    )
+    kill.chmod(0o755)
+    state = tmp_path / "state"
+    return subprocess.run(
+        [ROOT / "bin/harness.sh", command, *extra_args],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SIGNALBOX_EVENT_STORE": str(store),
+            "SIGNALBOX_LOG_DIR": str(tmp_path / "logs"),
+            "SIGNALBOX_STATE": str(state),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+
+@pytest.mark.parametrize("command", ["down", "restart"])
+def test_lifecycle_refuses_an_in_flight_run_before_teardown(
+    tmp_path: Path, command: str
+):
+    result = _lifecycle_with_events(
+        tmp_path,
+        command,
+        [("request", "run.requested", "launch", 10, {"run_id": "sb-live"})],
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        f"harness: run sb-live is in flight; stop it anyway with: "
+        f"{ROOT / 'bin/harness.sh'} {command} --force\n"
+    )
+
+
+def test_down_allows_a_completed_latest_launch(tmp_path: Path):
+    result = _lifecycle_with_events(
+        tmp_path,
+        "down",
+        [
+            ("old-terminal", "run.completed", "engine", 5, {"run_id": "sb-done"}),
+            ("request", "run.requested", "launch", 10, {"run_id": "sb-done"}),
+            ("terminal", "run.completed", "engine", 20, {"run_id": "sb-done"}),
+            ("released", "workspace.released", "engine", 30, {"run_id": "sb-done"}),
+        ],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "engine stopped" in result.stdout
+
+
+def test_force_allows_stopping_an_in_flight_run(tmp_path: Path):
+    result = _lifecycle_with_events(
+        tmp_path,
+        "down",
+        [("request", "run.requested", "launch", 10, {"run_id": "sb-live"})],
+        "--force",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "engine stopped" in result.stdout
+
+
+def test_down_allows_a_halted_run_with_a_retained_worktree(tmp_path: Path):
+    retained = tmp_path / "state" / "worktrees" / "sb-halted"
+    retained.mkdir(parents=True)
+    result = _lifecycle_with_events(
+        tmp_path,
+        "down",
+        [
+            ("request", "run.requested", "launch", 10, {"run_id": "sb-halted"}),
+            ("terminal", "run.halted", "engine", 20, {"run_id": "sb-halted"}),
+        ],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert retained.is_dir()
+    assert "engine stopped" in result.stdout
+
+
 def test_status_reports_the_running_engines_valid_captured_vault(tmp_path: Path):
     """#100: status reports the environment that will actually receive notes."""
     engine_vault = tmp_path / "engine-vault"

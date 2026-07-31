@@ -12,6 +12,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${SIGNALBOX_CONFIG:-$ROOT/emergent.toml}"
 LOG_DIR="${SIGNALBOX_LOG_DIR:-$ROOT/.harness}"
+EVENT_STORE="${SIGNALBOX_EVENT_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/emergent/signalbox/events.db}"
 ENGINE_LOG="$LOG_DIR/engine.log"
 DASHBOARD_LOG="$LOG_DIR/dashboard.log"
 DASHBOARD_PIDFILE="$LOG_DIR/dashboard.pid"
@@ -104,6 +105,63 @@ install() {
 # ── lifecycle ────────────────────────────────────────────────────────────────
 
 engine_pids() { pgrep -x emergent 2>/dev/null || true; }
+
+# A retained worktree is evidence, not liveness: halted runs deliberately keep
+# theirs. A run is live only when its newest launch has no later terminal.
+in_flight_run() {
+  [[ -f "$EVENT_STORE" ]] || return 0
+  python3 - "$EVENT_STORE" <<'PY' 2>/dev/null || true
+import sqlite3
+import sys
+from pathlib import Path
+
+path = sys.argv[1]
+uri = Path(path).resolve().as_uri() + "?mode=ro"
+with sqlite3.connect(uri, uri=True) as connection:
+    row = connection.execute(
+        """
+        WITH requested AS (
+          SELECT json_extract(payload_json, '$.run_id') AS run_id, MAX(timestamp_ms) AS requested_at
+          FROM events
+          WHERE message_type = 'run.requested'
+          GROUP BY json_extract(payload_json, '$.run_id')
+        )
+        SELECT requested.run_id
+        FROM requested
+        WHERE requested.run_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM events terminal
+            WHERE terminal.message_type IN ('run.completed', 'run.halted')
+              AND json_extract(terminal.payload_json, '$.run_id') = requested.run_id
+              AND terminal.timestamp_ms >= requested.requested_at
+          )
+        ORDER BY requested.requested_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+if row:
+    print(row[0])
+PY
+}
+
+guard_down() {
+  local command="$1"
+  shift
+  local force=0
+  while (($#)); do
+    case "$1" in
+      --force) force=1 ;;
+      *) fail "usage: $0 $command [--force]" ;;
+    esac
+    shift
+  done
+  ((force)) && return 0
+  [[ -n "$(engine_pids)" ]] || return 0
+  local run_id=""
+  run_id="$(in_flight_run)"
+  [[ -z "$run_id" ]] \
+    || fail "run $run_id is in flight; stop it anyway with: $0 $command --force"
+}
 
 # The viewer is a separate process from the engine, so `down` has to name it or
 # it survives every restart. One that outlived the reinstall was still running
@@ -636,8 +694,8 @@ case "${1:-}" in
   preflight) shift; preflight "$@" ;;
   install)   shift; install "$@" ;;
   up)        shift; up "$@" ;;
-  down)      shift; forward_down; down "$@" ;;
-  restart)   shift; preflight; forward_down; down; start_engine ;;
+  down)      shift; guard_down down "$@"; forward_down; down ;;
+  restart)   shift; guard_down restart "$@"; preflight; forward_down; down; start_engine ;;
   status)    shift; status "$@" ;;
   launch)    shift; launch "$@" ;;
   dogfood)   shift; dogfood "$@" ;;
@@ -651,8 +709,10 @@ usage: $0 <command>
   preflight  check tools, primitives, connection ceiling, gh auth, and signing key
   install    install the CLI editable from this checkout, then run the suite
   up         start the engine and the dashboard viewer
-  down       SIGTERM the engine so the event store flushes, and stop the viewer
-  restart    down, then up
+  down [--force]
+             refuse an in-flight run by default; otherwise stop engine and viewer
+  restart [--force]
+             refuse an in-flight run by default; otherwise down, then up
   status     engine, forwarder, listening ports, and live run worktrees
   launch     signalbox launch <issue> [--no-forwarder] [...] against a running engine
   dogfood    launch against this checkout as run sb-<issue>

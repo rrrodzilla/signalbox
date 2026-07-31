@@ -366,6 +366,13 @@ def run(role: str, payload: dict, model: str | None = None) -> tuple[dict, int]:
         result["identity_overridden"] = merged.envelope_overridden
     if merged.product_overridden:
         result["product_overridden"] = merged.product_overridden
+    if merged.product_omitted:
+        result["product_omitted"] = merged.product_omitted
+        print(
+            f"signalbox agent: {role} omitted product keys: "
+            f"{', '.join(merged.product_omitted)}",
+            file=sys.stderr,
+        )
     return result, 0
 
 

@@ -6,7 +6,7 @@ The name is from railway signaling. A signal box is where the interlocking lives
 
 ## The shape
 
-One engine. Four sources, one hundred four handlers, ten sinks, and no script that knows what comes next.
+One engine. Four sources, one hundred seven handlers, ten sinks, and no script that knows what comes next.
 
 ```
 route-run-requested ─> [run.requested] ─> prepare-workspace, dashboard
@@ -117,13 +117,18 @@ route-open-opened ─> [pr.opened] ─> mark-pr-pending, dashboard
 route-open-failed ─> [pr.open-failed] ─> route-remediation-open, dashboard
 route-detail-detailed ─> [checks.detailed] ─> map-ci-to-findings, dashboard
 route-detail-failed ─> [checks.detail-failed] ─> map-ci-to-findings, dashboard
-route-merge-pr-merged ─> [pr.merged] ─> join-completion, dashboard
+[pr.merged]
+├─< from: route-merge-pr-merged
+└─> to: close-issue, join-completion, dashboard
 [pr.merge-failed]
 ├─< from: route-merge-pr-failed
 └─> to: route-remediation-open, dashboard
 split-notes, join-notes ─> [notes.synced] ─> join-completion, dashboard
 guard-stages-exhaust ─> [stages.exhausted] ─> dashboard
 join-run ─> [run.built] ─> rebase-branch, dashboard
+[issue.close-attempted]
+├─< from: close-issue
+└─> to: route-issue-closed, route-issue-close-failed, dashboard
 write-note ─> [note.written] ─> join-notes, dashboard
 [completion.closed (halt)]
 ├─< from: join-completion
@@ -132,6 +137,8 @@ write-note ─> [note.written] ─> join-notes, dashboard
 ├─< from: rebase-branch
 └─> to: route-rebase-ok, route-rebase-conflict, route-rebase-invalid,
         dashboard
+route-issue-closed ─> [issue.closed] ─> dashboard
+route-issue-close-failed ─> [issue.close-failed] ─> dashboard
 [run.completed]
 ├─< from: route-completion-full
 └─> to: release-workspace, dashboard, trace

@@ -81,6 +81,38 @@ def test_plan_redraft_replaces_rejected_stages_and_keeps_feedback(
     assert result.payload[feedback_key] == feedback
     assert result.envelope_overridden == []
     assert result.product_overridden == ["stages"]
+    assert result.product_omitted == []
+
+
+def test_unparseable_plan_drops_rejected_stages_and_reports_the_omission():
+    rejected = [{"stage_id": "rejected"}]
+    inbound = {"run_id": "r1", "stages": rejected}
+    produced = {"verdict": "unparseable", "output": "not json"}
+
+    result = merge(inbound, produced, "plan")
+
+    assert result.payload == {
+        "run_id": "r1",
+        "verdict": "unparseable",
+        "output": "not json",
+    }
+    assert result.envelope_overridden == []
+    assert result.product_overridden == []
+    assert result.product_omitted == ["stages"]
+
+
+def test_merge_follows_future_role_product_keys(monkeypatch):
+    monkeypatch.setattr(
+        identity,
+        "ROLE_PRODUCT_KEYS",
+        {**identity.ROLE_PRODUCT_KEYS, "sentinel-role": frozenset({"sentinel-key"})},
+    )
+    inbound = {"run_id": "r1", "sentinel-key": "rejected"}
+
+    result = merge(inbound, {"verdict": "unparseable"}, "sentinel-role")
+
+    assert "sentinel-key" not in result.payload
+    assert result.product_omitted == ["sentinel-key"]
 
 
 def test_carry_leaves_non_identity_fields_alone():

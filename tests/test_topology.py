@@ -504,8 +504,8 @@ def test_no_path_from_run_built_reaches_suite_ran_without_the_rebase_node():
 def test_every_model_verdict_has_an_exhaustiveness_router():
     """Model output is untrusted input; an unrecognised verdict must not vanish."""
     for topic in (
-        "shard.submitted", "review.submitted", "branch.rebase-attempted",
-        "gate.assessed", "plan.audited",
+        "plan.submitted", "shard.submitted", "review.submitted",
+        "branch.rebase-attempted", "gate.assessed", "plan.audited",
     ):
         catchers = [
             h for h in HANDLERS

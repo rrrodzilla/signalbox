@@ -286,6 +286,18 @@ subscribes = ["issue.fetched", "plan.rejected"]
 # too, so it must survive every feedback pass rather than only the first plan.
 publishes = ["plan.submitted", "plan.draft-failed", "model.invoked"]
 
+# Exhaustiveness at the planner seam. A synthesised unparseable verdict has no
+# stages, but so does any other planner output that cannot carry a usable plan.
+# This observation is additive: check-plan still receives every submission and
+# remains the sole gate driving the bounded retry loop below.
+[[handlers]]
+name = "route-plan-invalid"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.submitted", "--publish-as", "plan.invalid-verdict", "--",
+        "jq", "-c", 'select((.stages | type) != "array" or (.stages | length) == 0)']
+subscribes = ["plan.submitted"]
+publishes = ["plan.invalid-verdict"]
+
 # The deterministic gate, and it runs FIRST, before any model is asked its
 # opinion. Shard file-disjointness within a stage is what licenses splitting a
 # stage into events that all run at once, so it is not a thing to put to a vote:
@@ -1047,11 +1059,12 @@ subscribes = ["approval.requested", "shard.escalated", "run.halted",
 name = "trace"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "run.completed", "-s", "run.halted", "-s", "control.unknown-event",
-        "-s", "review.invalid-verdict", "-s", "shard.invalid-verdict",
+        "-s", "plan.invalid-verdict", "-s", "review.invalid-verdict",
+        "-s", "shard.invalid-verdict",
         "-s", "gate.invalid-verdict", "-s", "branch.rebase-invalid-verdict",
         "-s", "checks.unknown-pr",
         "-s", "checks.silent", "--", "jq", "-c", "."]
 subscribes = ["run.completed", "run.halted", "control.unknown-event",
-              "review.invalid-verdict", "shard.invalid-verdict",
+              "plan.invalid-verdict", "review.invalid-verdict", "shard.invalid-verdict",
               "gate.invalid-verdict", "branch.rebase-invalid-verdict",
               "checks.unknown-pr", "checks.silent"]

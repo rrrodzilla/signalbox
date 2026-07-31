@@ -401,6 +401,33 @@ def test_plan_verdict_keeps_model_authored_stages_at_agent_seam(monkeypatch):
     assert verdict["product_overridden"] == ["stages"]
 
 
+def test_unparseable_plan_drops_rejected_stages_and_names_the_omission(
+    monkeypatch, capsys
+):
+    rejected_stages = [{"stage_id": "rejected"}]
+    monkeypatch.setattr(agent, "_workdir", lambda payload: "/tmp/wt")
+    monkeypatch.setattr(
+        agent.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="this is not a verdict",
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(agent, "post_provenance", lambda *args, **kwargs: None)
+
+    verdict, code = agent.run(
+        "plan", {"run_id": "r1", "stages": rejected_stages}, model="opus"
+    )
+
+    assert code == 0
+    assert verdict["verdict"] == "unparseable"
+    assert "stages" not in verdict
+    assert verdict["product_omitted"] == ["stages"]
+    assert "plan omitted product keys: stages" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("role", ["implement", "review"])
 def test_non_authoring_verdict_has_stages_restamped_and_reported(monkeypatch, role):
     inbound_stages = [{"stage_id": "planned"}]

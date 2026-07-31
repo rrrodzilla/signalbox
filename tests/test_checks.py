@@ -354,7 +354,7 @@ def test_merge_stage_preserves_the_plan_cursor(monkeypatch, tmp_path):
     assert merged["stages"] == stages
 
 
-def test_product_keys_are_a_narrow_exemption_from_carried_identity():
+def test_product_keys_are_a_narrow_exemption_from_carried_identity(monkeypatch):
     """Only the plan drafter may author a carried key.
 
     Derive this guard from the role map itself rather than enumerating today's
@@ -362,6 +362,7 @@ def test_product_keys_are_a_narrow_exemption_from_carried_identity():
     envelope key, and the non-drafting seams below must remain ordinary carried
     identity seams as the map grows.
     """
+    from signalbox import identity
     from signalbox.identity import CARRIED_KEYS, ROLE_PRODUCT_KEYS
 
     carried = set(CARRIED_KEYS)
@@ -380,6 +381,22 @@ def test_product_keys_are_a_narrow_exemption_from_carried_identity():
         "shard_id",
         "session_id",
     }.isdisjoint(set().union(*claimed.values(), set()))
+
+    future_product_keys = {
+        **ROLE_PRODUCT_KEYS,
+        "sentinel-role": frozenset({"sentinel-key"}),
+    }
+    monkeypatch.setattr(identity, "ROLE_PRODUCT_KEYS", future_product_keys)
+
+    for role, product_keys in future_product_keys.items():
+        inbound = {
+            "run_id": "sb-product-key-guard",
+            **{key: f"rejected-{key}" for key in product_keys},
+        }
+        result = identity.merge(inbound, {"verdict": "unparseable"}, role)
+
+        assert product_keys.isdisjoint(result.payload)
+        assert result.product_omitted == sorted(product_keys)
 
 
 def test_every_carried_key_survives_every_payload_building_seam():

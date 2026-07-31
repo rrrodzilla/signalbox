@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from signalbox.agent import ROLE_PRODUCED_TOPICS
 from signalbox.ceiling import INTENDED_MAX_CONNECTIONS
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,6 +23,20 @@ CONFIG = tomllib.load((ROOT / "emergent.toml").open("rb"))
 SOURCES = CONFIG["sources"]
 HANDLERS = CONFIG["handlers"]
 SINKS = CONFIG["sinks"]
+
+MODEL_NODES_BY_ROLE = {
+    "plan": "draft-plan",
+    "audit": "audit-plan",
+    "review": "review-shard",
+    "rebase": "rebase-branch",
+    "assess": "assess",
+    "remediate": "remediate",
+    "plan-notes": "plan-notes",
+    "write-note": "write-note",
+    "implement": "dispatch-implement",
+    "fix": "dispatch-fix",
+}
+MODEL_NODES = tuple(MODEL_NODES_BY_ROLE.values())
 
 # Raw ingress envelopes. The routers immediately turn these into meaningful
 # topics, and it is those the dashboard shows.
@@ -1042,24 +1057,10 @@ def test_every_non_deterministic_node_publishes_invocation_provenance():
     executable graph. Comparing both here prevents either declaration from
     quietly gaining a model-bearing role the other does not know about.
     """
-    from signalbox.agent import ROLE_PRODUCED_TOPICS
-
-    nodes_by_role = {
-        "plan": "draft-plan",
-        "audit": "audit-plan",
-        "review": "review-shard",
-        "rebase": "rebase-branch",
-        "assess": "assess",
-        "remediate": "remediate",
-        "plan-notes": "plan-notes",
-        "write-note": "write-note",
-        "implement": "dispatch-implement",
-        "fix": "dispatch-fix",
-    }
-    assert set(nodes_by_role) == set(ROLE_PRODUCED_TOPICS)
+    assert set(MODEL_NODES_BY_ROLE) == set(ROLE_PRODUCED_TOPICS)
 
     primitives = HANDLERS + SINKS
-    for role, node_name in nodes_by_role.items():
+    for role, node_name in MODEL_NODES_BY_ROLE.items():
         node = named(primitives, node_name)
         produced = set(node.get("publishes", []))
         assert "model.invoked" in produced, f"{node_name} loses invocation provenance"
@@ -1071,13 +1072,15 @@ def test_every_non_deterministic_node_publishes_invocation_provenance():
             assert ROLE_PRODUCED_TOPICS[role] == "shard.submitted"
 
 
-# The same eight nodes as the provenance test, for the same reason: a model call
-# is the slow, IO-bound thing in this topology, and every one of them is an exec
-# primitive whose `--max-concurrent` defaults to 1.
-MODEL_NODES = (
-    "draft-plan", "audit-plan", "review-shard", "rebase-branch", "assess",
-    "remediate", "plan-notes", "write-note", "dispatch-implement", "dispatch-fix",
-)
+def test_readme_models_table_covers_every_model_node():
+    readme = (ROOT / "README.md").read_text()
+    models_section = readme.split("## Models per node", 1)[1].split("\n## ", 1)[0]
+    table_nodes = {
+        match.group(1)
+        for line in models_section.splitlines()
+        if (match := re.match(r"\| `([^`]+)` \|", line))
+    }
+    assert table_nodes == set(MODEL_NODES)
 
 
 def max_concurrent(primitive: dict) -> int:

@@ -6,135 +6,185 @@ The name is from railway signaling. A signal box is where the interlocking lives
 
 ## The shape
 
-One engine. A topology-derived set of primitives, and no script that knows what comes next.
+One engine. Four sources, one hundred four handlers, ten sinks, and no script that knows what comes next.
 
 ```
-run.requested ─> workspace.prepare-attempted
-                              │
-                  ┌───────────┴───────────┐
-           workspace.ready         workspace.failed ─> route-prepare-failed-halted ─> run.halted
-                  ▼
-          issue.fetch-attempted
-                  │
-           ┌──────┴────────┐
-      issue.fetched   issue.fetch-failed ─> route-fetch-failed-halted ─> run.halted
-           ▼
-      draft-plan  (opus; surveys the tree and
-           │       reads the vault with its own
-           │       subagents)
-           └──────────────────────> plan.submitted ─> check-plan ─> plan.checked
-                                       ▲                               │
-                                       │                     ┌─────────┴─────────┐
-                                       │                (ok == false)      plan.verified
-                                       │                     │                  │
-                                       │              (attempt < 3)             ▼
-                                  plan.rejected ◄───────────┘             audit-plan  (codex;
-                                       ▲                                        │      adversarial)
-                                       │                                        ▼
-                                       │                                  plan.audited
-                                       │                                        │
-                                       │                         ┌──────────────┼──────────────┐
-                                       └── (changes_requested,   │              │              │
-                                            attempt < 3) ────────┘        plan.accepted   plan.invalid-verdict
-                                                                                │
-                                                                                ▼
-                                                                       open-first-stage
-                                                                     │
-                                                                     ▼
-                                  stage.opened ─> split-shards ─> shard.opened
-                                       ▲                              │
-                                       │                       dispatch-implement
-                              stage.conflicted                        │
-                                       │            shard.file-written ─> scope.violated
-                                       │            shard.check-ran        │
-                                       │            shard.submitted        └─> stage.closed
-                                       │                    │
-                                       │              shard.built ─> review.submitted
-                                       │                                  │
-                                       │              ┌───────────────────┴────────────────┐
-                                       │        shard.approved         shard.changes-requested
-                                       │              │                      │      (round < 5)
-                                       │         join-stage                  └─> fix.opened
-                                       │              │
-                                       │       stage.mergeable ─> merge.attempted
-                                       │                                │
-                                       └── stage.conflicted ◄───────────┤
-                                                                        │
-                                                                  stage.merged
-                                       ┌────────────────────────────────┼──────────────────────┐
-                                       ▼                                ▼                      ▼
-                            guard-stages-advance          guard-stages-exhaust       join-run (stage_count)
-                              (event-carried index)                │                      │
-                                       │                           ▼                      └──────────────────────┐
-                                       └─> stage.opened     stages.exhausted                                    │
-                                                 ┌──────────────────────────────────────────────────────────────┘
-                                                 ▼
-                                             run.built ─> branch.rebase-attempted
-                                                               │
-                                              ┌────────────────┴────────────────┐
-                                       branch.rebased              branch.rebase-conflicted
-                                              │                       (remediation below)
-                                       suite.run-attempted
-                                              │
-                                      ┌───────┴────────┐
-                                  suite.ran       suite.errored ───────────────> run.halted
-                                      │
-                                gate.assessed
-                                      │
-                         ┌────────────┴────────────┐
-                    gate.cleared             approval.requested
-                         │                         │
-                         │                  approval.granted
-                         └────────────┬────────────┘
-                                      ▼
-                            branch.push-attempted
-                                      │
-                             ┌────────┴─────────┐
-                       branch.pushed     branch.push-failed
-                             │                  (refusal)
-                       pr.open-attempted
-                             │
-                             ├──────────────> pr.open-failed  (refusal)
-                         pr.opened
-                             │
-     (GitHub check_suite) ─> checks.observed ─> checks.reported
-                                                    ├─> checks.passed
-                                                    │      ├─> pr.merge-attempted
-                                                    │      │      ├─> pr.merged
-                                                    │      │      └─> pr.merge-failed  (refusal)
-                                                    │      └─> notes.planned
-                                                    │             ├─> notes.plan-accepted
-                                                    │             │      ├─> note.drafted ─> note.written ─> notes.synced
-                                                    │             │      └─> (zero notes) ────────────────> notes.synced
-                                                    │             └─> notes.invalid-verdict ─> run.halted
-                                                    └─> checks.failed ─> checks.detail-attempted
-                                                           ├─> checks.detailed ──────┐
-                                                           └─> checks.detail-failed ─┴─> shard.changes-requested
-                                                                                         (fix.opened)
-
-                pr.merged + notes.synced ─> completion.closed
-                                                  ├─> run.completed  (both arms)
-                                                  └─> run.halted     (timed out)
+route-run-requested ─> [run.requested] ─> prepare-workspace, dashboard
+[workspace.prepare-attempted]
+├─< from: prepare-workspace
+└─> to: route-prepare-ready, route-prepare-failed, dashboard
+route-prepare-ready ─> [workspace.ready] ─> fetch-issue, dashboard
+[workspace.failed (halt)]
+├─< from: route-prepare-failed
+└─> to: route-prepare-failed-halted, dashboard
+[run.halted]
+├─< from: route-prepare-failed-halted, route-fetch-failed-halted,
+│         route-plan-draft-failed-halted, route-plan-exhausted,
+│         route-plan-audit-failed-halted, route-audit-exhausted,
+│         route-review-failed-halted, route-stage-dirty,
+│         route-rebase-failed-halted, route-suite-error-halted,
+│         route-assess-failed-halted, route-remediation-closed-halted,
+│         route-remediation-invalid-halted, route-remediation-failed-halted,
+│         route-notes-plan-failed-halted, route-completion-short
+└─> to: dashboard, notify, trace
+[issue.fetch-attempted]
+├─< from: fetch-issue
+└─> to: route-fetch-fetched, route-fetch-failed, dashboard
+[issue.fetched]
+├─< from: route-fetch-fetched
+└─> to: draft-plan (opus; surveys the tree and reads the vault), dashboard
+[issue.fetch-failed (halt)]
+├─< from: route-fetch-failed
+└─> to: route-fetch-failed-halted, dashboard
+[plan.submitted]
+├─< from: draft-plan (opus; surveys the tree and reads the vault)
+└─> to: route-plan-invalid, check-plan, dashboard
+[plan.invalid-verdict]
+├─< from: route-plan-invalid, route-audit-invalid
+└─> to: route-remediation-open, dashboard, trace
+[plan.checked (halt)]
+├─< from: check-plan
+└─> to: route-plan-verified, route-plan-retry, route-plan-exhausted, dashboard
+[plan.verified]
+├─< from: route-plan-verified
+└─> to: audit-plan (codex; adversarial), dashboard
+[plan.rejected (attempt < 3)]
+├─< from: route-plan-retry, route-audit-changes
+└─> to: draft-plan (opus; surveys the tree and reads the vault), dashboard
+[plan.audited (halt)]
+├─< from: audit-plan (codex; adversarial)
+└─> to: route-plan-approved, route-audit-changes, route-audit-exhausted,
+        route-audit-invalid, dashboard
+route-plan-approved ─> [plan.accepted] ─> open-first-stage, dashboard
+[stage.opened]
+├─< from: open-first-stage, guard-stages-advance
+└─> to: split-shards, dashboard
+split-shards ─> [shard.opened] ─> dispatch-implement, dashboard
+route-file-written ─> [shard.file-written] ─> scope-guard, dashboard
+route-check-ran ─> [shard.check-ran] ─> dashboard
+[shard.submitted]
+├─< from: route-shard-submitted
+└─> to: route-shard-done, route-shard-blocked, route-shard-invalid,
+        clear-pending, dashboard
+[approval.granted]
+├─< from: route-approval-granted
+└─> to: push-branch, clear-approval-pending, dashboard
+route-check-suite ─> [checks.observed] ─> rehydrate-pr, dashboard
+[checks.reported]
+├─< from: rehydrate-pr
+└─> to: route-checks-passed, route-checks-failed, dashboard
+[scope.violated]
+├─< from: scope-guard
+└─> to: join-stage, clear-pending, dashboard, notify
+route-shard-done ─> [shard.built] ─> review-shard, dashboard
+[stage.closed (halt)]
+├─< from: join-stage
+└─> to: route-stage-clean, route-stage-dirty, dashboard
+[branch.push-attempted]
+├─< from: push-branch
+└─> to: route-push-pushed, route-push-failed, dashboard
+[review.submitted]
+├─< from: review-shard
+└─> to: route-approved, route-changes, route-review-invalid, dashboard
+route-stage-clean ─> [stage.mergeable] ─> merge-stage, dashboard
+route-push-pushed ─> [branch.pushed] ─> open-pr, dashboard
+route-push-failed ─> [branch.push-failed] ─> route-remediation-open, dashboard
+route-checks-passed ─> [checks.passed] ─> merge-pr, plan-notes, dashboard
+route-checks-failed ─> [checks.failed] ─> detail-failed-checks, dashboard
+route-approved ─> [shard.approved] ─> join-stage, dashboard
+[shard.changes-requested]
+├─< from: route-changes, map-ci-to-findings
+└─> to: guard-rounds-continue, guard-rounds-exhaust, dashboard
+[merge.attempted]
+├─< from: merge-stage
+└─> to: route-merge-ok, route-merge-conflict, dashboard
+[pr.open-attempted]
+├─< from: open-pr
+└─> to: route-open-opened, route-open-failed, dashboard
+[checks.detail-attempted]
+├─< from: detail-failed-checks
+└─> to: route-detail-detailed, route-detail-failed, dashboard
+[pr.merge-attempted]
+├─< from: merge-pr
+└─> to: route-merge-pr-merged, route-merge-pr-failed, dashboard
+plan-notes ─> [notes.planned] ─> split-notes, dashboard
+guard-rounds-continue ─> [fix.opened] ─> dispatch-fix, dashboard
+[stage.merged]
+├─< from: route-merge-ok
+└─> to: guard-stages-advance, guard-stages-exhaust, join-run, dashboard
+route-merge-conflict ─> [stage.conflicted] ─> split-shards, dashboard
+route-open-opened ─> [pr.opened] ─> mark-pr-pending, dashboard
+route-open-failed ─> [pr.open-failed] ─> route-remediation-open, dashboard
+route-detail-detailed ─> [checks.detailed] ─> map-ci-to-findings, dashboard
+route-detail-failed ─> [checks.detail-failed] ─> map-ci-to-findings, dashboard
+route-merge-pr-merged ─> [pr.merged] ─> join-completion, dashboard
+[pr.merge-failed]
+├─< from: route-merge-pr-failed
+└─> to: route-remediation-open, dashboard
+split-notes, join-notes ─> [notes.synced] ─> join-completion, dashboard
+guard-stages-exhaust ─> [stages.exhausted] ─> dashboard
+join-run ─> [run.built] ─> rebase-branch, dashboard
+write-note ─> [note.written] ─> join-notes, dashboard
+[completion.closed (halt)]
+├─< from: join-completion
+└─> to: route-completion-full, route-completion-short, dashboard
+[branch.rebase-attempted]
+├─< from: rebase-branch
+└─> to: route-rebase-ok, route-rebase-conflict, route-rebase-invalid,
+        dashboard
+[run.completed]
+├─< from: route-completion-full
+└─> to: release-workspace, dashboard, trace
+route-rebase-ok ─> [branch.rebased] ─> run-suite, dashboard
+[branch.rebase-conflicted]
+├─< from: route-rebase-conflict
+└─> to: route-remediation-open, dashboard, notify
+[suite.run-attempted]
+├─< from: run-suite
+└─> to: route-suite-ran, route-suite-errored, dashboard
+route-suite-ran ─> [suite.ran] ─> assess, dashboard
+[suite.errored (halt)]
+├─< from: route-suite-errored
+└─> to: route-suite-error-halted, dashboard, notify
+[gate.assessed]
+├─< from: assess
+└─> to: route-gate-auto, route-gate-human, route-gate-blocked,
+        route-gate-invalid, dashboard
+route-gate-auto ─> [gate.cleared] ─> push-branch, dashboard
+[approval.requested]
+├─< from: route-gate-human
+└─> to: mark-approval-pending, dashboard, notify
 ```
 
 The remaining ten formerly stranded outcomes share a bounded diagnosis path:
 
 ```
- branch.push-failed ───────────────┐
- branch.rebase-conflicted ─────────┤
- branch.rebase-invalid-verdict ────┤
- checks.silent ────────────────────┤
- gate.blocked ─────────────────────┤
- gate.invalid-verdict ─────────────┤
- plan.invalid-verdict ─────────────┼─> route-remediation-open ─> remediation.requested
- pr.merge-failed ──────────────────┤                                  │
- pr.open-failed ───────────────────┤                                  ▼
- review.invalid-verdict ───────────┘                              remediate
-                                                                      │
-                                                        remediation.assessed
-                                                        ├─ retry, attempt < 3 ─> remediation.requested ─> remediate
-                                                        ├─ retry, attempt >= 3 ─> remediation.closed ─> run.halted
-                                                        └─ halt ────────────────> remediation.closed ─> run.halted
+[branch.push-failed] ─> route-remediation-open
+[branch.rebase-conflicted] ─> route-remediation-open
+[branch.rebase-invalid-verdict] ─> route-remediation-open
+[checks.silent] ─> route-remediation-open
+[gate.blocked] ─> route-remediation-open
+[gate.invalid-verdict] ─> route-remediation-open
+[plan.invalid-verdict] ─> route-remediation-open
+[pr.merge-failed] ─> route-remediation-open
+[pr.open-failed] ─> route-remediation-open
+[review.invalid-verdict] ─> route-remediation-open
+[remediation.requested]
+├─< from: route-remediation-open, guard-remediation-retry
+└─> to: remediate, dashboard
+[remediation.assessed]
+├─< from: remediate
+└─> to: guard-remediation-retry, guard-remediation-exhaust,
+        route-remediation-halt, route-remediation-invalid, dashboard
+[remediation.failed (halt)]
+├─< from: remediate
+└─> to: route-remediation-failed-halted, dashboard
+[remediation.closed (halt)]
+├─< from: guard-remediation-exhaust, route-remediation-halt
+└─> to: route-remediation-closed-halted, dashboard
+[remediation.invalid-verdict (halt)]
+├─< from: route-remediation-invalid
+└─> to: route-remediation-invalid-halted, dashboard, trace
 ```
 
 An unrecognized verdict becomes `remediation.invalid-verdict` and a failed
@@ -245,18 +295,13 @@ way the phase could lose a run.
 
 ## Quick start
 
-Prerequisites: the Emergent engine and its primitives, `claude`, `codex`, `gh` (authenticated, with the `cli/gh-webhook` extension), `git` with a signing key, `jq`, `python3`, and `uv`. The operator must also export `SIGNALBOX_VAULT` as the absolute path of an existing notes-vault directory. It has no default: notes must live outside disposable run worktrees.
-
-Acton's IPC connection ceiling is machine-global and must be configured separately from `emergent marketplace install`. In `~/.config/acton/ipc.toml`, set `[limits] max_connections` above the primitive count derived from `emergent.toml`; `python3 src/signalbox/ceiling.py` prints that derived count and checks the effective setting. Preflight refuses to start an engine that cannot fit the topology, and its repair message names both the derived primitive count and effective ceiling, plus the absolute config path to edit. `bin/harness.sh preflight` checks these requirements and names what is missing.
+Prerequisites: the Emergent engine and its primitives, `claude`, `codex`, `gh` (authenticated, with the `cli/gh-webhook` extension), `git` with a signing key, `jq`, `python3`, and `uv`. The operator must also export `SIGNALBOX_VAULT` as the absolute path of an existing notes-vault directory. It has no default: notes must live outside disposable run worktrees. `bin/harness.sh preflight` checks all of it and names what is missing.
 
 ```bash
 emergent marketplace install exec-source exec-handler exec-sink \
     http-source sse-sink topology-viewer
 gh extension install cli/gh-webhook
 export SIGNALBOX_VAULT=/absolute/path/to/notes-vault
-mkdir -p ~/.config/acton
-${EDITOR:-vi} ~/.config/acton/ipc.toml  # set [limits] max_connections above the derived count
-python3 src/signalbox/ceiling.py        # derive the count and verify the effective ceiling
 
 ./bin/harness.sh install      # editable CLI install, then the invariant suite
 ./bin/harness.sh up           # engine + dashboard
@@ -307,7 +352,6 @@ A local-only run needs no `gh`: `fetch-issue` passes through when the body is al
 | `src/signalbox/agent.py` | Shape A. One verdict per execution, identity re-stamped. |
 | `src/signalbox/dispatch.py` | Shape B. Runner selection, sandbox, unspoofable identity. |
 | `src/signalbox/emit.py` | An acting agent's entire action space: three events. |
-| `src/signalbox/ceiling.py` | Derives the topology's primitive count and checks Acton's IPC connection ceiling. |
 | `src/signalbox/plan.py` | The pure invariants that license parallel shards. |
 | `src/signalbox/primitives/` | Three SDK primitives: two splitters and a joiner with a real timeout. |
 | `src/signalbox/dashboard.html` | The run board, a static viewer over read-only event history and the SSE stream. |
@@ -318,7 +362,7 @@ A local-only run needs no `gh`: `fetch-issue` passes through when the body is al
 
 ## The invariant tests
 
-`tests/test_topology.py` is the part worth reading first. Together with the focused dispatch and act tests, it asserts things no runtime error would ever report: that the primitive count derived from the live topology fits the repository's intended connection ceiling with headroom to spare, that the dashboard observes every topic the topology publishes, that no SSE subscription relies on a wildcard (they are silently ignored — health said `ok` while delivering zero bytes), that every subscription has a publisher and every published event has a consumer, that both sides of every depth guard are exclusive so a loop cannot run forever *or* terminate early, that every verdict type has an exhaustiveness router, that the field a join terminates on is a carried identity key, that anything writing a pending marker has something that clears it, that resume argv has the runner-specific shape while preserving the current sandbox and scope, that the unspoofable session-key environment seam is symmetric for both runners, that session files are recorded, survive submission, and are cleared on terminal retirement or reaping, that every `signalbox` subcommand the topology calls actually exists, and that no primitive is named `runner`, `pipeline`, or `orchestrator`.
+`tests/test_topology.py` is the part worth reading first. Together with the focused dispatch and act tests, it asserts things no runtime error would ever report: that the dashboard observes every topic the topology publishes, that no SSE subscription relies on a wildcard (they are silently ignored — health said `ok` while delivering zero bytes), that every subscription has a publisher and every published event has a consumer, that both sides of every depth guard are exclusive so a loop cannot run forever *or* terminate early, that every verdict type has an exhaustiveness router, that the field a join terminates on is a carried identity key, that anything writing a pending marker has something that clears it, that resume argv has the runner-specific shape while preserving the current sandbox and scope, that the unspoofable session-key environment seam is symmetric for both runners, that session files are recorded, survive submission, and are cleared on terminal retirement or reaping, that every `signalbox` subcommand the topology calls actually exists, and that no primitive is named `runner`, `pipeline`, or `orchestrator`.
 
 Each of those is a bug that already happened once.
 

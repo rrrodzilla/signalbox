@@ -109,6 +109,10 @@ def test_a_shard_marker_separates_shards_within_a_run_and_across_runs(tmp_path, 
     assert name("sb-76", "s1-tests") == "shard-sb-76-s1-tests.json"
 
 
+def test_a_present_null_pending_key_is_named_unknown():
+    assert pending_path("approval", {"run_id": None}).name == "approval-unknown.json"
+
+
 def test_an_unknown_pending_kind_raises(tmp_path, monkeypatch):
     """The sb-76 stall must not recur through a silently invented marker kind."""
     monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
@@ -187,6 +191,21 @@ def test_the_environment_carries_every_key_the_emit_path_reads():
     env = environment(_shard(), {})
     missing = [var for var in _ENV_KEYS.values() if var not in env]
     assert missing == [], f"emit reads variables the dispatcher never sets: {missing}"
+
+
+def test_present_null_identity_is_absent_from_the_agent_environment():
+    from signalbox.emit import _ENV_KEYS
+
+    payload = {field: None for field in _ENV_KEYS}
+    payload.update({"stages": None, "declared": None})
+    base = {variable: "stale" for variable in _ENV_KEYS.values()}
+
+    env = environment(payload, base)
+
+    assert all(variable not in env for variable in _ENV_KEYS.values())
+    assert json.loads(env["SIGNALBOX_STAGES"]) == []
+    assert json.loads(env["SIGNALBOX_DECLARED"]) == []
+    assert not ({"None", "null", "True", "False"} & set(env.values()))
 
 
 # ── concurrency: a marker must name exactly one thing ────────────────────────

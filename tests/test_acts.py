@@ -75,6 +75,29 @@ def test_approve_replays_projected_identity_to_the_control_url(tmp_path, monkeyp
     ]
 
 
+def test_present_null_repo_never_becomes_none_in_approval_state(
+    tmp_path, monkeypatch
+):
+    from signalbox import emit
+    from signalbox.emit import identity_from_env
+
+    monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
+    payload = {"run_id": "sb-106", "repo": None, "issue": 106}
+    projected = identity_from_env(environment(payload, {}))
+    marker = mark_pending("approval", projected)
+
+    assert "None" not in marker.read_text()
+    assert "repo" not in json.loads(marker.read_text())
+
+    posted = []
+    monkeypatch.setattr(emit, "post", lambda body, url=None: posted.append(body) or 202)
+    result = approve("sb-106")
+
+    assert result["ok"] is True
+    assert "repo" not in posted[0]
+    assert "None" not in json.dumps(posted[0])
+
+
 def test_approve_without_a_marker_is_routed_false_data(tmp_path, monkeypatch):
     monkeypatch.setenv("SIGNALBOX_STATE", str(tmp_path))
 

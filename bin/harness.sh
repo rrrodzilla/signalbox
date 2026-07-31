@@ -501,12 +501,13 @@ dogfood() {
   local origin
   origin="$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)"
   if [[ "$origin" =~ github\.com[:/]([^/]+/[^/.]+) ]]; then
-    forward_up "${BASH_REMATCH[1]}"
+    local repo="${BASH_REMATCH[1]}"
+    forward_up "$repo"
+    launch "$issue" --repo "$repo" --repo-path "$ROOT" --run-id "sb-$issue" "$@"
   else
     say "  no github origin; skipping webhook forwarding"
+    launch "$issue" --repo-path "$ROOT" --run-id "sb-$issue" "$@"
   fi
-
-  launch "$issue" --repo-path "$ROOT" --run-id "sb-$issue" "$@"
 }
 
 case "${1:-}" in

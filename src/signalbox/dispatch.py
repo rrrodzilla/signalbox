@@ -75,7 +75,10 @@ PENDING_KEYS: dict[str, tuple[str, ...]] = {
 
 
 def pending_path(kind: str, payload: dict) -> Path:
-    key = "-".join(str(payload.get(field, "unknown")) for field in PENDING_KEYS[kind])
+    key = "-".join(
+        "unknown" if payload.get(field) is None else str(payload[field])
+        for field in PENDING_KEYS[kind]
+    )
     return state_dir() / "pending" / f"{kind}-{key}.json"
 
 
@@ -87,36 +90,35 @@ def environment(payload: dict, base: dict[str, str]) -> dict[str, str]:
     them wrong or change them.
     """
     env = dict(base)
+    scalar_keys = {
+        "SIGNALBOX_RUN_ID": ("run_id", ""),
+        "SIGNALBOX_REPO": ("repo", ""),
+        "SIGNALBOX_ISSUE": ("issue", ""),
+        "SIGNALBOX_BASE_SHA": ("base_sha", ""),
+        # The promote path opens the PR against this.
+        "SIGNALBOX_BASE_BRANCH": ("base_branch", ""),
+        "SIGNALBOX_STAGE_ID": ("stage_id", ""),
+        "SIGNALBOX_SHARD_ID": ("shard_id", ""),
+        "SIGNALBOX_SHARD_COUNT": ("shard_count", ""),
+        # Both join counts have to survive the agent's emit.
+        "SIGNALBOX_STAGE_COUNT": ("stage_count", ""),
+        "SIGNALBOX_STAGE_INDEX": ("stage_index", ""),
+        "SIGNALBOX_ROUND": ("round", 1),
+        "SIGNALBOX_TITLE": ("title", ""),
+        "SIGNALBOX_INTENT": ("intent", ""),
+        "SIGNALBOX_SESSION_ID": ("session_id", ""),
+    }
+    for variable, (field, default) in scalar_keys.items():
+        value = payload.get(field, default)
+        if value is None:
+            env.pop(variable, None)
+        else:
+            env[variable] = str(value)
+
     env.update(
         {
-            "SIGNALBOX_RUN_ID": str(payload.get("run_id", "")),
-            "SIGNALBOX_REPO": str(payload.get("repo", "")),
-            "SIGNALBOX_ISSUE": str(payload.get("issue", "")),
-            "SIGNALBOX_BASE_SHA": str(payload.get("base_sha", "")),
-            # The promote path opens the PR against this. Dropped here, it is gone
-            # by `shard.submitted` and `open-pr` has nothing to target.
-            "SIGNALBOX_BASE_BRANCH": str(payload.get("base_branch", "")),
-            "SIGNALBOX_STAGE_ID": str(payload.get("stage_id", "")),
-            "SIGNALBOX_SHARD_ID": str(payload.get("shard_id", "")),
-            "SIGNALBOX_SHARD_COUNT": str(payload.get("shard_count", "")),
-            # Both join counts have to survive the agent's emit. Whichever one is
-            # missing, the join it feeds waits forever.
-            "SIGNALBOX_STAGE_COUNT": str(payload.get("stage_count", "")),
-            "SIGNALBOX_STAGE_INDEX": str(payload.get("stage_index", "")),
             "SIGNALBOX_STAGES": json.dumps(payload.get("stages") or []),
-            "SIGNALBOX_ROUND": str(payload.get("round", 1)),
             "SIGNALBOX_DECLARED": json.dumps(payload.get("declared") or []),
-            # Set unconditionally like every other key: `emit._ENV_KEYS` reads
-            # this side back without asking whether it was worth writing, so a
-            # conditional writer here is an asymmetry the invariant test catches.
-            # `or ""` rather than a `get` default because a payload can carry an
-            # explicit null, and `str(None)` would spell the title "None".
-            "SIGNALBOX_TITLE": str(payload.get("title") or ""),
-            # The standard the reviewer judges against. `or ""` for the same
-            # reason as the title: an absent intent must not reach review as
-            # the string "None" and read as a real instruction.
-            "SIGNALBOX_INTENT": str(payload.get("intent") or ""),
-            "SIGNALBOX_SESSION_ID": str(payload.get("session_id") or ""),
         }
     )
     return env

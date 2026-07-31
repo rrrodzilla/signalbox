@@ -767,8 +767,9 @@ args = ["-s", "merge.attempted", "--publish-as", "stage.conflicted", "--",
 subscribes = ["merge.attempted"]
 publishes = ["stage.conflicted"]
 
-# The exhaustion event is identity-bearing, but this join remains the sole
-# publisher of run.built. It carries identity because every stage.merged does.
+# This is the sole first-build publisher: only the stateful stage accumulator
+# can prove every stage merged. Remediation may later republish an already-built
+# run at this topic, carrying the identity this join originally established.
 [[handlers]]
 name = "join-run"
 path = "signalbox"
@@ -914,10 +915,10 @@ publishes = ["gate.invalid-verdict"]
 # ─────────────────────────────────────────────────────────────────────────────
 # REMEDIATION — diagnose stranded failures without crossing the promotion gate.
 #
-# The retry budget reuses carried identity key `attempt`, reset when a failure
-# enters this subgraph. Shape A projects that key across the model seam; a
-# remediation-specific key would be dropped there. The loop never re-enters the
-# pipeline, so this local counter cannot alter an earlier plan or audit budget.
+# The remediation budget has its own carried counter. Entry increments rather
+# than resets it, so a resumed run that strands again cannot regain attempts.
+# The model may choose only a carried `resume_topic`; fixed-topic guards enforce
+# the declared pre-gate allowlist and strip old verdicts before re-entry.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [[handlers]]
@@ -929,7 +930,7 @@ args = ["-s", "branch.push-failed", "-s", "branch.rebase-conflicted",
         "-s", "plan.invalid-verdict", "-s", "pr.merge-failed",
         "-s", "pr.open-failed", "-s", "review.invalid-verdict",
         "--publish-as", "remediation.requested", "--",
-        "jq", "-c", ". + {attempt: 1}"]
+        "jq", "-c", '.remediation_attempt = ((.remediation_attempt // 0) + 1)']
 subscribes = ["branch.push-failed", "branch.rebase-conflicted",
               "branch.rebase-invalid-verdict", "checks.silent", "gate.blocked",
               "gate.invalid-verdict", "plan.invalid-verdict", "pr.merge-failed",
@@ -949,7 +950,7 @@ publishes = ["remediation.assessed", "remediation.failed", "model.invoked"]
 name = "guard-remediation-retry"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "remediation.assessed", "--publish-as", "remediation.requested", "--",
-        "jq", "-c", 'select(.remediation == "retry" and (.attempt | type) == "number" and .attempt < 3) | .attempt += 1']
+        "jq", "-c", 'select(.remediation == "retry" and (.remediation_attempt | type) == "number" and .remediation_attempt < 3) | .remediation_attempt += 1']
 subscribes = ["remediation.assessed"]
 publishes = ["remediation.requested"]
 
@@ -957,7 +958,31 @@ publishes = ["remediation.requested"]
 name = "guard-remediation-exhaust"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "remediation.assessed", "--publish-as", "remediation.closed", "--",
-        "jq", "-c", 'select(.remediation == "retry" and ((.attempt | type) != "number" or .attempt >= 3)) | . + {reason: "remediation retry budget exhausted: \(.reason)"}']
+        "jq", "-c", 'select((.remediation | IN("retry", "resume")) and ((.remediation_attempt | type) != "number" or .remediation_attempt >= 3)) | . + {reason: "remediation budget exhausted at attempt \(.remediation_attempt // "missing")"}']
+subscribes = ["remediation.assessed"]
+publishes = ["remediation.closed"]
+
+[[handlers]]
+name = "guard-remediation-resume-built"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "remediation.assessed", "--publish-as", "run.built", "--",
+        "jq", "-c", 'select(.remediation == "resume" and .resume_topic == "run.built" and (.remediation_attempt | type) == "number" and .remediation_attempt < 3) | del(.remediation, .resume_topic, .decision, .verdict, .reason)']
+subscribes = ["remediation.assessed"]
+publishes = ["run.built"]
+
+[[handlers]]
+name = "guard-remediation-resume-suite"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "remediation.assessed", "--publish-as", "suite.ran", "--",
+        "jq", "-c", 'select(.remediation == "resume" and .resume_topic == "suite.ran" and (.remediation_attempt | type) == "number" and .remediation_attempt < 3) | del(.remediation, .resume_topic, .decision, .verdict, .reason)']
+subscribes = ["remediation.assessed"]
+publishes = ["suite.ran"]
+
+[[handlers]]
+name = "route-remediation-resume-refused"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "remediation.assessed", "--publish-as", "remediation.closed", "--",
+        "jq", "-c", 'select(.remediation == "resume" and (.remediation_attempt | type) == "number" and .remediation_attempt < 3 and ((.resume_topic // "") | IN("run.built", "suite.ran") | not)) | . + {reason: "remediation resume refused topic: \(.resume_topic // "missing")"}']
 subscribes = ["remediation.assessed"]
 publishes = ["remediation.closed"]
 
@@ -973,7 +998,7 @@ publishes = ["remediation.closed"]
 name = "route-remediation-invalid"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "remediation.assessed", "--publish-as", "remediation.invalid-verdict", "--",
-        "jq", "-c", 'select((.remediation // "") | IN("halt", "retry") | not)']
+        "jq", "-c", 'select((.remediation // "") | IN("halt", "retry", "resume") | not)']
 subscribes = ["remediation.assessed"]
 publishes = ["remediation.invalid-verdict"]
 

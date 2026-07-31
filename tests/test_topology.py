@@ -480,7 +480,7 @@ def test_remediation_selectors_execute_as_a_bounded_exhaustive_loop():
     })
     assert stranded is not None
     requested = route("route-remediation-open", stranded)
-    assert requested == {**stranded, "attempt": 1}
+    assert requested == {**stranded, "remediation_attempt": 1}
 
     # Mirror agent.py's Shape A publication seam. Only CARRIED_KEYS from the
     # inbound envelope accompany the verdict, so this proves the live counter
@@ -490,21 +490,21 @@ def test_remediation_selectors_execute_as_a_bounded_exhaustive_loop():
     verdict = {"remediation": "retry", "reason": "may clear"}
     merged = merge(requested, verdict, "remediate")
     retry = {**verdict, **project(merged.payload)}
-    assert retry["attempt"] == 1
+    assert retry["remediation_attempt"] == 1
     assert "stranded_topic" not in retry, "non-carried diagnosis context must not be assumed post-seam"
 
     assert route("guard-remediation-retry", retry) == {
-        **retry, "attempt": 2,
+        **retry, "remediation_attempt": 2,
     }
     assert route("guard-remediation-exhaust", retry) is None
     assert route("route-remediation-halt", retry) is None
     assert route("route-remediation-invalid", retry) is None
 
-    last_retry = {**retry, "attempt": 3}
+    last_retry = {**retry, "remediation_attempt": 3}
     assert route("guard-remediation-retry", last_retry) is None
     closed = route("guard-remediation-exhaust", last_retry)
     assert closed == {
-        **last_retry, "reason": "remediation retry budget exhausted: may clear",
+        **last_retry, "reason": "remediation budget exhausted at attempt 3",
     }
     assert route("route-remediation-closed-halted", closed) == closed
 
@@ -514,7 +514,7 @@ def test_remediation_selectors_execute_as_a_bounded_exhaustive_loop():
     assert route("guard-remediation-retry", counterless) is None
     assert route("guard-remediation-exhaust", counterless) == {
         **counterless,
-        "reason": "remediation retry budget exhausted: may clear",
+        "reason": "remediation budget exhausted at attempt missing",
     }
 
     halt = {**requested, "remediation": "halt", "reason": "restore credentials"}
@@ -523,6 +523,62 @@ def test_remediation_selectors_execute_as_a_bounded_exhaustive_loop():
     assert route("guard-remediation-exhaust", halt) is None
     assert route("route-remediation-invalid", halt) is None
     assert route("route-remediation-closed-halted", halt) == halt
+
+    # A role-authored re-entry choice crosses the real identity seam. Fixed
+    # guards, rather than the model, decide which topic is actually published.
+    resume_verdict = {
+        "remediation": "resume",
+        "resume_topic": "run.built",
+        "reason": "transient credential failure cleared",
+        "decision": "clear",
+        "verdict": "done",
+    }
+    merged_resume = merge(requested, resume_verdict, "remediate")
+    resume = {**resume_verdict, **project(merged_resume.payload)}
+    rebuilt = route("guard-remediation-resume-built", resume)
+    assert rebuilt == {
+        "run_id": "sb-87",
+        "issue": 87,
+        "remediation_attempt": 1,
+    }
+    assert route("guard-remediation-resume-suite", resume) is None
+    assert route("guard-remediation-exhaust", resume) is None
+    assert route("route-remediation-invalid", resume) is None
+
+    suite_resume = {**resume, "resume_topic": "suite.ran"}
+    assert route("guard-remediation-resume-suite", suite_resume) == {
+        "run_id": "sb-87",
+        "issue": 87,
+        "remediation_attempt": 1,
+    }
+    assert route("guard-remediation-resume-built", suite_resume) is None
+
+    refused = {**resume, "resume_topic": "gate.cleared"}
+    assert route("guard-remediation-resume-built", refused) is None
+    assert route("guard-remediation-resume-suite", refused) is None
+    refused_closed = route("route-remediation-resume-refused", refused)
+    assert refused_closed == {
+        **refused,
+        "reason": "remediation resume refused topic: gate.cleared",
+    }
+    assert route("route-remediation-closed-halted", refused_closed) == refused_closed
+
+    exhausted_resume = {**resume, "remediation_attempt": 3}
+    assert route("guard-remediation-resume-built", exhausted_resume) is None
+    assert route("route-remediation-resume-refused", exhausted_resume) is None
+    exhausted_closed = route("guard-remediation-exhaust", exhausted_resume)
+    assert exhausted_closed == {
+        **exhausted_resume,
+        "reason": "remediation budget exhausted at attempt 3",
+    }
+
+    # Re-entry carries the dedicated counter through run.built. If the run
+    # strands again, opening remediation increments instead of resetting it.
+    stranded_again = route("route-gate-blocked", {**rebuilt, "decision": "block"})
+    assert route("route-remediation-open", stranded_again) == {
+        **stranded_again,
+        "remediation_attempt": 2,
+    }
 
     invalid = {**requested, "remediation": "continue"}
     assert route("route-remediation-invalid", invalid) == invalid
@@ -593,21 +649,34 @@ def test_run_completion_is_only_published_by_the_full_completion_router():
     assert route("route-completion-short", summary) is None
 
 
-def test_remediation_subgraph_cannot_publish_past_the_gate():
-    """The remediation block is topological: none of its nodes can promote a run."""
+def test_remediation_subgraph_only_publishes_declared_pre_gate_reentries():
+    """Resolved remediation exits fail closed around the explicit allowlist."""
+    from signalbox.topology_diagram import resolve_topology
+
+    topology = resolve_topology(CONFIG)
     remediation_nodes = [
         handler for handler in HANDLERS
         if "remediation" in handler["name"] or handler["name"] == "remediate"
     ]
     assert remediation_nodes, "the resolved topology contains no remediation subgraph"
+    node_names = {handler["name"] for handler in remediation_nodes}
     published_by_remediation = {
-        topic for handler in remediation_nodes for topic in handler.get("publishes", [])
+        topic
+        for topic, publishers in topology["publishers"].items()
+        if node_names.intersection(publishers)
     }
     post_gate = {
-        "gate.cleared", "approval.granted", "run.completed", "run.built",
-        "suite.ran", "branch.pushed", "pr.opened", "checks.passed",
+        "gate.cleared", "approval.granted", "checks.passed",
+        "branch.pushed", "pr.opened", "run.completed",
     }
     assert published_by_remediation.isdisjoint(post_gate)
+    reentry_allowlist = {"run.built", "suite.ran"}
+    non_remediation_exits = {
+        topic for topic in published_by_remediation
+        if not topic.startswith("remediation.")
+        and topic not in {"model.invoked", "run.halted"}
+    }
+    assert non_remediation_exits == reentry_allowlist
 
 
 def test_a_zero_note_plan_needs_the_merge_arm_to_reach_the_run_terminal():
@@ -674,6 +743,8 @@ def test_stateful_joins_publish_neutral_topics_before_run_terminals():
         ("guard-stages-advance", "guard-stages-exhaust"),
         ("guard-rounds-continue", "guard-rounds-exhaust"),
         ("guard-remediation-retry", "guard-remediation-exhaust"),
+        ("guard-remediation-resume-built", "guard-remediation-exhaust"),
+        ("guard-remediation-resume-suite", "guard-remediation-exhaust"),
     ],
 )
 def test_depth_guards_have_both_sides(continue_handler, exhaust_handler):
@@ -828,18 +899,28 @@ def test_every_act_is_reachable_from_the_acts_dispatch():
 
 
 def test_run_built_carries_identity_rather_than_a_bare_count():
-    """The stage terminal must not replace the identity-bearing run join."""
+    """Only the stateful join may first build; remediation may resume that run."""
     producers = [
         handler["name"]
         for handler in HANDLERS
         if "run.built" in handler.get("publishes", [])
     ]
-    assert producers == ["join-run"]
+    assert producers == ["join-run", "guard-remediation-resume-built"]
     joiner = named(HANDLERS, "join-run")
     assert joiner["publishes"] == ["run.built"]
     assert joiner["subscribes"] == ["stage.merged"]
     args = " ".join(joiner["args"])
     assert "--key run_id" in args and "--count-field stage_count" in args
+    resume = named(HANDLERS, "guard-remediation-resume-built")
+    assert resume["subscribes"] == ["remediation.assessed"]
+    assert 'select(.remediation == "resume"' in " ".join(resume["args"])
+    stateless_count_publishers = [
+        handler["name"] for handler in HANDLERS
+        if "run.built" in handler.get("publishes", [])
+        and handler["name"] != "guard-remediation-resume-built"
+        and "join-terminal" not in handler.get("args", [])
+    ]
+    assert stateless_count_publishers == []
 
 
 def reaped_kinds() -> set[str]:

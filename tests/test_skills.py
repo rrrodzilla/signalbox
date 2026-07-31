@@ -83,6 +83,7 @@ def test_skill_exists_with_frontmatter(skill: str):
         ("signalbox-assess", ("clear", "needs_human", "block")),
         ("signalbox-remediate", ("halt", "retry")),
         ("signalbox-audit-plan", ("approved", "changes_requested")),
+        ("signalbox-plan-notes", ("reviewed", "blocked")),
     ],
 )
 def test_judging_skill_states_the_exact_vocabulary_its_routers_match(skill, vocabulary):
@@ -111,6 +112,21 @@ def test_assess_skill_matches_the_suite_outcome_contract():
         assert f"`{verdict}`" in body
     for evidence_field in ("`command`", "`exit_code`", "`passed`", "`failed`"):
         assert evidence_field in body
+
+
+def test_plan_notes_skill_evidences_an_empty_reviewed_plan():
+    """An empty plan must prove it read the vault, not deny the precondition."""
+    body = (SKILLS / "signalbox-plan-notes" / "SKILL.md").read_text()
+    prose = " ".join(body.split())
+
+    assert '"outcome": "reviewed"' in body
+    assert "non-empty `considered` array" in prose
+    assert "bare note names" in prose
+    assert "A non-empty `notes` list is self-evidencing" in prose
+    assert "`blocked` halts the run" in prose
+    assert "already resolved by the harness as a precondition" in prose
+    assert "SIGNALBOX_VAULT is absent" not in body
+    assert "SIGNALBOX_VAULT` is somehow absent" not in body
 
 
 def test_acting_skills_document_only_emittable_events():

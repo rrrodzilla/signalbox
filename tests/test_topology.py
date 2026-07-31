@@ -597,8 +597,10 @@ def test_remediation_subgraph_cannot_publish_past_the_gate():
 
 def test_a_zero_note_plan_needs_the_merge_arm_to_reach_the_run_terminal():
     """The direct notes terminal is one arm, never a substitute for the merge."""
+    from signalbox.primitives.split_notes import SUBSCRIPTIONS
+
     splitter = named(HANDLERS, "split-notes")
-    assert splitter["subscribes"] == ["notes.planned"]
+    assert splitter["subscribes"] == SUBSCRIPTIONS == ["notes.plan-accepted"]
     assert "notes.synced" in splitter["publishes"]
 
     completion = named(HANDLERS, "join-completion")
@@ -759,6 +761,7 @@ def test_every_model_verdict_has_an_exhaustiveness_router():
     for topic in (
         "plan.submitted", "shard.submitted", "review.submitted",
         "branch.rebase-attempted", "gate.assessed", "plan.audited",
+        "notes.planned",
     ):
         catchers = [
             h for h in HANDLERS
@@ -1233,6 +1236,28 @@ def route(handler_name: str, payload: dict) -> dict | None:
     assert done.returncode == 0, f"{handler_name} jq failed: {done.stderr}"
     out = done.stdout.strip()
     return json.loads(out) if out else None
+
+
+def test_notes_plan_routers_execute_as_exclusive_exhaustive_complements():
+    named_notes = {"run_id": "sb-132", "notes": ["joins.md"]}
+    assert route("route-notes-plan-accepted", named_notes) == named_notes
+    assert route("route-notes-plan-invalid", named_notes) is None
+
+    reviewed_empty = {
+        "run_id": "sb-132", "notes": [], "outcome": "reviewed",
+        "considered": ["joins.md"],
+    }
+    assert route("route-notes-plan-accepted", reviewed_empty) == reviewed_empty
+    assert route("route-notes-plan-invalid", reviewed_empty) is None
+
+    for invalid in (
+        {"run_id": "sb-132", "notes": [], "outcome": "blocked"},
+        {"run_id": "sb-132", "notes": [], "outcome": "reviewed"},
+        {"run_id": "sb-132", "notes": "oops", "outcome": "reviewed"},
+    ):
+        assert route("route-notes-plan-accepted", invalid) is None
+        routed = route("route-notes-plan-invalid", invalid)
+        assert routed == {**invalid, "stranded_topic": "notes.invalid-verdict"}
 
 
 def acts_that_can_refuse() -> dict[str, str]:

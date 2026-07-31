@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from signalbox.identity import project
 
 Publish = Callable[[dict, object], Awaitable[None]]
+SUBSCRIPTIONS = ["notes.plan-accepted"]
 
 
 def note_events(payload: dict) -> list[dict]:
@@ -88,7 +89,7 @@ def main() -> None:
         )
 
     name = os.environ.get("EMERGENT_PRIMITIVE_NAME", "split-notes")
-    asyncio.run(run_handler(name, ["notes.planned"], split))
+    asyncio.run(run_handler(name, SUBSCRIPTIONS, split))
 
 
 if __name__ == "__main__":

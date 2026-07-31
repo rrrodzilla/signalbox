@@ -21,29 +21,37 @@ and its own session.
 }
 ```
 
-An empty list is a valid and common answer:
+An empty list is a valid and common answer when the vault was reviewed and no
+note was made stale. It must include a non-empty `considered` array of bare note
+names that were actually read:
 
 ```json
-{"notes": []}
+{"notes": [], "outcome": "reviewed", "considered": ["shards", "gates"]}
 ```
 
-If the vault is unavailable, report the blocked outcome as JSON:
+A non-empty `notes` list is self-evidencing and does not need `considered`.
+
+If `$SIGNALBOX_VAULT` resolved but its notes could not be read, report the
+blocked outcome as JSON:
 
 ```json
-{"notes": [], "outcome": "blocked", "reason": "SIGNALBOX_VAULT is absent"}
+{"notes": [], "outcome": "blocked", "reason": "vault notes could not be read"}
 ```
+
+`blocked` halts the run; it is not a clean terminal or an escape hatch for an
+empty plan. Use `reviewed` only after enumerating the vault and reading the
+relevant notes.
 
 Nothing but the JSON object on stdout.
 
 ## The vault
 
-One note per subsystem, in the vault directory. `$SIGNALBOX_VAULT` is always
-present as an absolute path stamped into the environment by the harness. Notes
-are markdown, named for the subsystem they describe: `shards.md`,
-`review-loop.md`, `gates.md`.
-
-If `$SIGNALBOX_VAULT` is somehow absent, report `outcome: "blocked"` using the
-output contract and stop. Do not invent a fallback.
+One note per subsystem, in the vault directory. `$SIGNALBOX_VAULT` is an
+absolute path already resolved by the harness as a precondition of this
+invocation. Notes are markdown, named for the subsystem they describe:
+`shards.md`, `review-loop.md`, `gates.md`. If the resolved vault cannot be
+enumerated or its notes cannot be read, use the `blocked` output contract and
+stop. Do not invent a fallback.
 
 Never place notes under `.claude/`. Writes there are silently dropped while the
 writing session reports success, so a note written there is a note that does not
@@ -69,7 +77,8 @@ Not stale:
   subsystem itself is new — then name a new note and say so in `reason`)
 
 Documentation churn is expensive and hides real changes in noise. A change that
-made nothing false should produce `{"notes": []}`, and that is a good outcome.
+made nothing false should produce `{"notes": []}` with `outcome: "reviewed"`
+and non-empty `considered` evidence, and that is a good outcome.
 
 ## How to decide
 

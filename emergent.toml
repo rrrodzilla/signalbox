@@ -1186,6 +1186,36 @@ args = ["-s", "notes.plan-failed", "--publish-as", "run.halted", "--",
 subscribes = ["notes.plan-failed"]
 publishes = ["run.halted"]
 
+# A usable notes plan either names work directly or carries evidence that the
+# planner read the vault and found nothing stale. These two literal complements
+# make malformed, blocked, and unevidenced empty plans impossible to drop.
+[[handlers]]
+name = "route-notes-plan-accepted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "notes.planned", "--publish-as", "notes.plan-accepted", "--",
+        "jq", "-c", 'select(((.notes | type) == "array" and (.notes | length) > 0) or (.outcome == "reviewed" and (.considered | type) == "array" and (.considered | length) > 0))']
+subscribes = ["notes.planned"]
+publishes = ["notes.plan-accepted"]
+
+[[handlers]]
+name = "route-notes-plan-invalid"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "notes.planned", "--publish-as", "notes.invalid-verdict", "--",
+        "jq", "-c", 'select((((.notes | type) == "array" and (.notes | length) > 0) or (.outcome == "reviewed" and (.considered | type) == "array" and (.considered | length) > 0)) | not) | . + {stranded_topic: "notes.invalid-verdict"}']
+subscribes = ["notes.planned"]
+publishes = ["notes.invalid-verdict"]
+
+# This post-merge failure halts immediately, like notes.plan-failed. The notes
+# arm of join-completion remains open until its existing 1800s timeout; the halt
+# is the terminal fact and the later timeout is established topology precedent.
+[[handlers]]
+name = "route-notes-invalid-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "notes.invalid-verdict", "--publish-as", "run.halted", "--",
+        "jq", "-c", '. + {reason: "notes planning produced an invalid or unevidenced verdict"}']
+subscribes = ["notes.invalid-verdict"]
+publishes = ["run.halted"]
+
 # An empty notes plan has nothing for the fan-out or join to count, so the
 # splitter short-circuits their silence by publishing the join's output topic
 # directly and lets the run reach its terminal.
@@ -1193,7 +1223,7 @@ publishes = ["run.halted"]
 name = "split-notes"
 path = "signalbox"
 args = ["primitive", "split-notes"]
-subscribes = ["notes.planned"]
+subscribes = ["notes.plan-accepted"]
 publishes = ["note.drafted", "notes.synced"]
 
 # The section header above says nothing serialises — one event per note, no
@@ -1337,7 +1367,8 @@ subscribes = ["exec.output", "exec.exit",
               "gate.blocked", "gate.cleared", "gate.invalid-verdict", "issue.close-attempted",
               "issue.close-failed", "issue.closed", "issue.fetch-failed",
               "issue.fetch-attempted", "issue.fetched", "merge.attempted", "model.invoked", "note.drafted", "note.write-failed",
-              "note.written", "notes.plan-failed", "notes.planned", "notes.synced",
+              "note.written", "notes.invalid-verdict", "notes.plan-accepted",
+              "notes.plan-failed", "notes.planned", "notes.synced",
               "plan.accepted", "plan.audit-failed", "plan.audited", "plan.checked",
               "plan.draft-failed", "plan.invalid-verdict", "plan.rejected",
               "plan.submitted", "plan.verified", "pr.merge-attempted", "pr.merge-failed", "pr.merged",
@@ -1382,12 +1413,12 @@ subscribes = ["approval.requested", "shard.escalated", "run.halted",
 name = "trace"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "run.completed", "-s", "run.halted", "-s", "control.unknown-event",
-        "-s", "plan.invalid-verdict", "-s", "review.invalid-verdict",
+        "-s", "plan.invalid-verdict", "-s", "notes.invalid-verdict", "-s", "review.invalid-verdict",
         "-s", "shard.invalid-verdict",
         "-s", "gate.invalid-verdict", "-s", "branch.rebase-invalid-verdict",
         "-s", "checks.unknown-pr", "-s", "remediation.invalid-verdict",
         "-s", "checks.silent", "--", "jq", "-c", "."]
 subscribes = ["run.completed", "run.halted", "control.unknown-event",
-              "plan.invalid-verdict", "review.invalid-verdict", "shard.invalid-verdict",
+              "plan.invalid-verdict", "notes.invalid-verdict", "review.invalid-verdict", "shard.invalid-verdict",
               "gate.invalid-verdict", "branch.rebase-invalid-verdict",
               "checks.unknown-pr", "remediation.invalid-verdict", "checks.silent"]

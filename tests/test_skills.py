@@ -178,6 +178,21 @@ def test_fix_session_vocabulary_matches_the_dispatch_contract():
     assert "rather than assume shared model memory" in reviewer
 
 
+def test_fix_skill_investigates_ci_pointer_findings():
+    """A CI finding points at evidence; it does not exhaustively diagnose it."""
+    body = (SKILLS / "signalbox-fix" / "SKILL.md").read_text()
+    prose = " ".join(body.split())
+
+    assert "For a shard review round, treat that list as exhaustive" in prose
+    assert "This does not apply to a CI-originated round" in prose
+    assert "your first job is to read the CI failure itself" in prose
+    assert "gh run view --log-failed" in prose
+    assert "`details_url` or `html_url`" in prose
+    assert "`run_id` is the signalbox run identity" in prose
+    assert "gh run view <run_id>" not in body
+    assert "Treat the list as exhaustive" not in body
+
+
 def test_vault_dir_returns_configured_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("SIGNALBOX_VAULT", str(tmp_path))
 

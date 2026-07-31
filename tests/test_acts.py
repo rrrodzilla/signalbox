@@ -438,11 +438,40 @@ def test_pr_state_is_merged_judges_raw_json_without_a_network():
 
 def test_ci_failure_becomes_review_findings():
     """The fix loop already exists; a red build just has to speak its vocabulary."""
-    result = map_ci_findings({"pr": 12, "failed": ["build", "clippy"], "round": 2})
+    payload = {
+        "pr": 12, "sha": "abc123", "run_id": "sb-101", "repo": "acme/widget",
+        "check_runs_url": "https://api.example/check-suites/88/check-runs",
+        "failed": [
+            {
+                "name": "build", "id": 91,
+                "output": {"title": "Build failed", "summary": "compiler error"},
+                "details_url": "https://ci.example/build",
+                "html_url": "https://github.example/checks/91",
+            },
+            {"name": "clippy", "id": 92, "html_url": "https://github.example/checks/92"},
+        ],
+        "round": 2,
+    }
+    result = map_ci_findings(payload)
     assert result["verdict"] == "changes_requested"
     assert result["round"] == 2
     assert [f["check"] for f in result["findings"]] == ["build", "clippy"]
     assert all(f["source"] == "ci" for f in result["findings"])
+    assert all(f["run_id"] == "sb-101" for f in result["findings"])
+    assert result["findings"][0]["details_url"] == "https://ci.example/build"
+    assert result["findings"][0]["html_url"] == "https://github.example/checks/91"
+
+    def scalar_values(value):
+        if isinstance(value, dict):
+            return {item for child in value.values() for item in scalar_values(child)}
+        if isinstance(value, list):
+            return {item for child in value for item in scalar_values(child)}
+        return {value}
+
+    observed = scalar_values(payload)
+    carried = scalar_values(result["findings"])
+    assert carried - {"ci"} <= observed, "findings may point only to observed facts"
+    assert "CI check failed after merge" not in carried
 
 
 def test_suite_command_is_none_when_the_repo_has_no_suite(tmp_path):

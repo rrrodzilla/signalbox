@@ -205,40 +205,77 @@ live_pids() {
   return 0
 }
 
+# Model runners inherit their run worktree as cwd. Corroborate event-store
+# liveness only through descendants of the engine whose ownership we proved;
+# process names and command lines are neither unique nor safe ownership signals.
+live_model_run_ids() {
+  local engine_pid="" descendants="" worktrees="" pid="" cwd="" relative=""
+  engine_pid="$(engine_owned_pid || true)"
+  [[ -n "$engine_pid" ]] || return 0
+  descendants="$(engine_descendant_pids "$engine_pid")"
+  [[ -n "$descendants" ]] || return 0
+  worktrees="${SIGNALBOX_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/signalbox}/worktrees"
+  worktrees="$(cd "$worktrees" 2>/dev/null && pwd -P)" || return 0
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" || continue
+    case "$cwd" in
+      "$worktrees"/*)
+        relative="${cwd#"$worktrees"/}"
+        [[ -n "$relative" ]] && printf '%s\n' "${relative%%/*}"
+        ;;
+    esac
+  done <<<"$descendants" | sort -u
+  return 0
+}
+
 # A retained worktree is evidence, not liveness: halted runs deliberately keep
-# theirs. A run is live only when its newest launch has no later terminal.
-in_flight_run() {
+# theirs. A run is live when its newest launch has no later terminal and either
+# its event trail is recent or an owned engine descendant is in its worktree.
+in_flight_runs() {
   [[ -f "$EVENT_STORE" ]] || return 0
-  python3 - "$EVENT_STORE" <<'PY' 2>/dev/null || true
+  local live_run_ids=""
+  live_run_ids="$(live_model_run_ids)"
+  python3 - "$EVENT_STORE" "${SIGNALBOX_IN_FLIGHT_WINDOW:-2400}" "$live_run_ids" <<'PY' 2>/dev/null || true
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 path = sys.argv[1]
+cutoff_ms = time.time() * 1000 - float(sys.argv[2]) * 1000
+live_run_ids = set(sys.argv[3].splitlines())
 uri = Path(path).resolve().as_uri() + "?mode=ro"
 with sqlite3.connect(uri, uri=True) as connection:
-    row = connection.execute(
+    rows = connection.execute(
         """
         WITH requested AS (
           SELECT json_extract(payload_json, '$.run_id') AS run_id, MAX(timestamp_ms) AS requested_at
           FROM events
           WHERE message_type = 'run.requested'
           GROUP BY json_extract(payload_json, '$.run_id')
+        ), newest AS (
+          SELECT json_extract(payload_json, '$.run_id') AS run_id, MAX(timestamp_ms) AS newest_at
+          FROM events
+          GROUP BY json_extract(payload_json, '$.run_id')
         )
         SELECT requested.run_id
         FROM requested
+        JOIN newest ON newest.run_id = requested.run_id
         WHERE requested.run_id IS NOT NULL
+          AND (newest.newest_at >= ? OR requested.run_id IN (
+            SELECT value FROM json_each(?)
+          ))
           AND NOT EXISTS (
             SELECT 1 FROM events terminal
             WHERE terminal.message_type IN ('run.completed', 'run.halted')
               AND json_extract(terminal.payload_json, '$.run_id') = requested.run_id
               AND terminal.timestamp_ms >= requested.requested_at
           )
-        ORDER BY requested.requested_at DESC
-        LIMIT 1
-        """
-    ).fetchone()
-if row:
+        """,
+        (cutoff_ms, __import__("json").dumps(sorted(live_run_ids))),
+    ).fetchall()
+for row in rows:
     print(row[0])
 PY
 }
@@ -256,10 +293,17 @@ guard_down() {
   done
   ((force)) && return 0
   [[ -n "$(engine_pids)" ]] || return 0
-  local run_id=""
-  run_id="$(in_flight_run)"
-  [[ -z "$run_id" ]] \
-    || fail "run $run_id is in flight; stop it anyway with: $0 $command --force"
+  local run_id="" run_ids="" separator=""
+  while IFS= read -r run_id; do
+    [[ -n "$run_id" ]] || continue
+    run_ids+="$separator$run_id"
+    separator=", "
+  done < <(in_flight_runs)
+  [[ -z "$run_ids" ]] && return 0
+  if [[ "$run_ids" == *,* ]]; then
+    fail "runs $run_ids are in flight; stop them anyway with: $0 $command --force"
+  fi
+  fail "run $run_ids is in flight; stop it anyway with: $0 $command --force"
 }
 
 # The viewer is a separate process from the engine, so `down` has to name it or

@@ -52,12 +52,12 @@ ROLE_SKILLS = {
 ROLE_RUNNERS = {"audit": "codex"}
 DEFAULT_ROLE_RUNNER = "claude"
 
-# Remediation is deliberately diagnosis-only. `merge` preserves its local retry
-# counter across one Shape A judgment, but every act payload builder calls
-# `project`, which drops non-carried keys. The appendix forbids carrying that
-# counter globally, so repair-and-re-entry could not retain a bound and would
-# violate acceptance criterion 5. `_workdir` also requires an existing tree,
-# limiting this role to failures after workspace.ready.
+# Remediation is deliberately read-only: the model announces its judgment and
+# fixed topology handlers decide whether an allowlisted pre-gate re-entry may
+# occur. Those handlers strip inherited verdicts, so no resumed run can reach
+# `pr.merged` without traversing a fresh `gate.assessed`. `_workdir` also
+# requires an existing tree, limiting this role to failures after
+# `workspace.ready`.
 READ_ONLY_ROLES = frozenset(
     {"plan", "audit", "review", "assess", "remediate", "plan-notes"}
 )

@@ -81,7 +81,7 @@ def test_skill_exists_with_frontmatter(skill: str):
         ("signalbox-review", ("approved", "changes_requested")),
         ("signalbox-rebase", ("ok", "rebased_onto_sha", "conflicts")),
         ("signalbox-assess", ("clear", "needs_human", "block")),
-        ("signalbox-remediate", ("halt", "retry")),
+        ("signalbox-remediate", ("halt", "retry", "resume")),
         ("signalbox-audit-plan", ("approved", "changes_requested")),
         ("signalbox-plan-notes", ("reviewed", "blocked")),
     ],

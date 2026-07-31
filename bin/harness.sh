@@ -205,11 +205,38 @@ live_pids() {
   return 0
 }
 
+# Model runners inherit their run worktree as cwd. Corroborate event-store
+# liveness only through descendants of the engine whose ownership we proved;
+# process names and command lines are neither unique nor safe ownership signals.
+live_model_run_ids() {
+  local engine_pid="" descendants="" worktrees="" pid="" cwd="" relative=""
+  engine_pid="$(engine_owned_pid || true)"
+  [[ -n "$engine_pid" ]] || return 0
+  descendants="$(engine_descendant_pids "$engine_pid")"
+  [[ -n "$descendants" ]] || return 0
+  worktrees="${SIGNALBOX_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/signalbox}/worktrees"
+  worktrees="$(cd "$worktrees" 2>/dev/null && pwd -P)" || return 0
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" || continue
+    case "$cwd" in
+      "$worktrees"/*)
+        relative="${cwd#"$worktrees"/}"
+        [[ -n "$relative" ]] && printf '%s\n' "${relative%%/*}"
+        ;;
+    esac
+  done <<<"$descendants" | sort -u
+  return 0
+}
+
 # A retained worktree is evidence, not liveness: halted runs deliberately keep
-# theirs. A run is live only when its newest launch has no later terminal.
+# theirs. A run is live when its newest launch has no later terminal and either
+# its event trail is recent or an owned engine descendant is in its worktree.
 in_flight_runs() {
   [[ -f "$EVENT_STORE" ]] || return 0
-  python3 - "$EVENT_STORE" "${SIGNALBOX_IN_FLIGHT_WINDOW:-2400}" <<'PY' 2>/dev/null || true
+  local live_run_ids=""
+  live_run_ids="$(live_model_run_ids)"
+  python3 - "$EVENT_STORE" "${SIGNALBOX_IN_FLIGHT_WINDOW:-2400}" "$live_run_ids" <<'PY' 2>/dev/null || true
 import sqlite3
 import sys
 import time
@@ -217,6 +244,7 @@ from pathlib import Path
 
 path = sys.argv[1]
 cutoff_ms = time.time() * 1000 - float(sys.argv[2]) * 1000
+live_run_ids = set(sys.argv[3].splitlines())
 uri = Path(path).resolve().as_uri() + "?mode=ro"
 with sqlite3.connect(uri, uri=True) as connection:
     rows = connection.execute(
@@ -235,7 +263,9 @@ with sqlite3.connect(uri, uri=True) as connection:
         FROM requested
         JOIN newest ON newest.run_id = requested.run_id
         WHERE requested.run_id IS NOT NULL
-          AND newest.newest_at >= ?
+          AND (newest.newest_at >= ? OR requested.run_id IN (
+            SELECT value FROM json_each(?)
+          ))
           AND NOT EXISTS (
             SELECT 1 FROM events terminal
             WHERE terminal.message_type IN ('run.completed', 'run.halted')
@@ -243,7 +273,7 @@ with sqlite3.connect(uri, uri=True) as connection:
               AND terminal.timestamp_ms >= requested.requested_at
           )
         """,
-        (cutoff_ms,),
+        (cutoff_ms, __import__("json").dumps(sorted(live_run_ids))),
     ).fetchall()
 for row in rows:
     print(row[0])

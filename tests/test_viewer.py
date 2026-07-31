@@ -576,6 +576,7 @@ def _lifecycle_with_events(
     events: list[tuple[str, str, str, int, dict]],
     *extra_args: str,
     failing_ps: bool = False,
+    live_run_id: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     store = tmp_path / "events.db"
     now_ms = int(time.time() * 1000)
@@ -589,6 +590,12 @@ def _lifecycle_with_events(
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     engine = subprocess.Popen(["sleep", "30"])
+    state = tmp_path / "state"
+    runner: subprocess.Popen[bytes] | None = None
+    if live_run_id is not None:
+        worktree = state / "worktrees" / live_run_id
+        worktree.mkdir(parents=True)
+        runner = subprocess.Popen(["sleep", "30"], cwd=worktree)
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     stat_fields = Path(f"/proc/{engine.pid}/stat").read_text().rsplit(") ", 1)[1]
@@ -608,7 +615,14 @@ def _lifecycle_with_events(
         ps = fake_bin / "ps"
         ps.write_text("#!/usr/bin/env bash\nexit 1\n")
         ps.chmod(0o755)
-    state = tmp_path / "state"
+    elif runner is not None:
+        ps = fake_bin / "ps"
+        ps.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' '{engine.pid} 1' '999998 {engine.pid}' "
+            f"'{runner.pid} 999998'\n"
+        )
+        ps.chmod(0o755)
     try:
         return subprocess.run(
             [ROOT / "bin/harness.sh", command, *extra_args],
@@ -625,6 +639,10 @@ def _lifecycle_with_events(
             timeout=5,
         )
     finally:
+        if runner is not None and runner.poll() is None:
+            runner.terminate()
+        if runner is not None:
+            runner.wait(timeout=5)
         if engine.poll() is None:
             engine.terminate()
         engine.wait(timeout=5)
@@ -670,6 +688,30 @@ def test_lifecycle_allows_an_old_unterminated_run(
     if command == "down":
         assert result.returncode == 0, result.stderr
         assert "engine stopped" in result.stdout
+
+
+def test_down_refuses_a_stale_run_with_an_attributable_live_model(tmp_path: Path):
+    result = _lifecycle_with_events(
+        tmp_path,
+        "down",
+        [
+            (
+                "request",
+                "run.requested",
+                "launch",
+                -(2401 * 1000),
+                {"run_id": "sb-stale-live"},
+            )
+        ],
+        live_run_id="sb-stale-live",
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        "harness: run sb-stale-live is in flight; stop it anyway with: "
+        f"{ROOT / 'bin/harness.sh'} down --force\n"
+    )
 
 
 def test_down_names_every_concurrently_in_flight_run(tmp_path: Path):

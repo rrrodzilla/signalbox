@@ -40,6 +40,7 @@ def test_every_model_role_declares_the_topic_it_produces():
         "review": "review.submitted",
         "rebase": "branch.rebase-attempted",
         "assess": "gate.assessed",
+        "remediate": "remediation.assessed",
         "plan-notes": "notes.planned",
         "write-note": "note.written",
         "implement": "shard.submitted",
@@ -165,6 +166,16 @@ def test_rebase_is_a_tree_writing_claude_role_with_explicit_tools():
     assert "rebase" not in agent.VAULT_ROLES
     tools = agent.tools_for("rebase")
     assert {"Bash", "Write", "Edit"} <= set(tools)
+
+
+def test_remediation_is_a_read_only_opus_judgment():
+    assert agent.runner_for("remediate", {}) == "claude"
+    assert model_for("remediate", {}) == "opus"
+    assert "remediate" in agent.READ_ONLY_ROLES
+    assert "remediate" not in agent.NOTES_ROLES
+    assert "remediate" not in agent.VAULT_ROLES
+    assert "Write" not in agent.tools_for("remediate")
+    assert "Edit" not in agent.tools_for("remediate")
 
 
 def test_the_plan_audit_keeps_its_own_runners_default_model():

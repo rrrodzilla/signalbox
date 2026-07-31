@@ -48,7 +48,7 @@ ALL_SKILLS = sorted(set(ROLE_SKILLS.values()) | dispatch_skills())
 
 
 def test_every_role_and_dispatch_names_a_distinct_skill():
-    assert len(ALL_SKILLS) == 9, ALL_SKILLS
+    assert len(ALL_SKILLS) == 10, ALL_SKILLS
 
 
 def test_the_planners_subagent_skills_exist_though_no_role_names_them():
@@ -81,6 +81,7 @@ def test_skill_exists_with_frontmatter(skill: str):
         ("signalbox-review", ("approved", "changes_requested")),
         ("signalbox-rebase", ("ok", "rebased_onto_sha", "conflicts")),
         ("signalbox-assess", ("clear", "needs_human", "block")),
+        ("signalbox-remediate", ("halt", "retry")),
         ("signalbox-audit-plan", ("approved", "changes_requested")),
     ],
 )

@@ -6,20 +6,18 @@ The name is from railway signaling. A signal box is where the interlocking lives
 
 ## The shape
 
-One engine. Four sources, ninety-three handlers, ten sinks, and no script that knows what comes next.
+One engine. Four sources, one hundred four handlers, ten sinks, and no script that knows what comes next.
 
 ```
 run.requested ─> workspace.prepare-attempted
                               │
                   ┌───────────┴───────────┐
-           workspace.ready         workspace.failed
-                  │                    (refusal)
+           workspace.ready         workspace.failed ─> route-prepare-failed-halted ─> run.halted
                   ▼
           issue.fetch-attempted
                   │
            ┌──────┴────────┐
-      issue.fetched   issue.fetch-failed
-           │              (refusal)
+      issue.fetched   issue.fetch-failed ─> route-fetch-failed-halted ─> run.halted
            ▼
       draft-plan  (opus; surveys the tree and
            │       reads the vault with its own
@@ -75,7 +73,7 @@ run.requested ─> workspace.prepare-attempted
                                                                │
                                               ┌────────────────┴────────────────┐
                                        branch.rebased              branch.rebase-conflicted
-                                              │                              (halt)
+                                              │                       (remediation below)
                                        suite.run-attempted
                                               │
                                       ┌───────┴────────┐
@@ -122,6 +120,30 @@ run.requested ─> workspace.prepare-attempted
                       (both arms)            (timed out)
 ```
 
+The remaining ten formerly stranded outcomes share a bounded diagnosis path:
+
+```
+ branch.push-failed ───────────────┐
+ branch.rebase-conflicted ─────────┤
+ branch.rebase-invalid-verdict ────┤
+ checks.silent ────────────────────┤
+ gate.blocked ─────────────────────┤
+ gate.invalid-verdict ─────────────┤
+ plan.invalid-verdict ─────────────┼─> route-remediation-open ─> remediation.requested
+ pr.merge-failed ──────────────────┤                                  │
+ pr.open-failed ───────────────────┤                                  ▼
+ review.invalid-verdict ───────────┘                              remediate
+                                                                      │
+                                                        remediation.assessed
+                                                        ├─ retry, attempt < 3 ─> remediation.requested ─> remediate
+                                                        ├─ retry, attempt >= 3 ─> remediation.closed ─> run.halted
+                                                        └─ halt ────────────────> remediation.closed ─> run.halted
+```
+
+An unrecognized verdict becomes `remediation.invalid-verdict` and a failed
+invocation becomes `remediation.failed`; each has its own router to
+`run.halted`.
+
 Four feedback edges close loops nobody sequenced: a rejected plan re-enters the planner, a review that requests changes re-enters implementation, a merge conflict reopens only the shards whose declared files collide, and a red CI run becomes review findings in the vocabulary the fix loop already speaks.
 
 Acts publish one `*.attempted` event, then two exclusive routers select the
@@ -155,7 +177,7 @@ The promote path waits on a push, not a poll. GitHub delivers `check_suite.compl
 
 ## Models per node
 
-Eight nodes are non-deterministic. Nothing else in the system is.
+Ten nodes are non-deterministic. Nothing else in the system is.
 
 Two of them judge the same artefact on purpose. `draft-plan` writes the plan on
 opus; `audit-plan` tries to break it on codex. An auditor sharing the drafter's
@@ -167,7 +189,9 @@ is genuinely a second opinion.
 | `draft-plan` | `plan` | claude | opus | `SIGNALBOX_MODEL_PLAN`, then `SIGNALBOX_MODEL` | judges | — |
 | `audit-plan` | `audit` | codex | codex's own | `SIGNALBOX_CODEX_MODEL` | judges | — |
 | `review-shard` | `review` | claude | opus | `SIGNALBOX_MODEL_REVIEW`, then `SIGNALBOX_MODEL` | judges | — |
+| `rebase-branch` | `rebase` | claude | opus | `SIGNALBOX_MODEL_REBASE`, then `SIGNALBOX_MODEL` | acts (rebases the branch) | — |
 | `assess` | `assess` | claude | opus | `SIGNALBOX_MODEL_ASSESS`, then `SIGNALBOX_MODEL` | judges | — |
+| `remediate` | `remediate` | claude | opus | `SIGNALBOX_MODEL_REMEDIATE`, then `SIGNALBOX_MODEL` | judges | — |
 | `plan-notes` | `plan-notes` | claude | sonnet | `SIGNALBOX_MODEL_PLAN_NOTES`, then `SIGNALBOX_MODEL` | judges | — |
 | `write-note` | `write-note` | claude | sonnet | `SIGNALBOX_MODEL_WRITE_NOTE`, then `SIGNALBOX_MODEL` | acts (writes notes) | — |
 | `dispatch-implement` | `implement` | codex | codex configured default | `SIGNALBOX_CODEX_MODEL` | acts (writes code) | records the runner session |
@@ -175,11 +199,19 @@ is genuinely a second opinion.
 
 Cross-vendor by design: codex writes the code, Claude reviews it, so no model approves its own work.
 
+`remediate` is a judging node, not a repair node. It diagnoses a stranded
+post-workspace outcome and returns either `retry` for another bounded look or
+`halt` with a reason for a human. It never repairs the worktree or re-enters the
+pipeline. Its subgraph cannot publish any post-gate event: in particular it
+cannot publish `gate.cleared`, `approval.granted`, or a promote-path event. As
+with the approval gate, that prohibition is topological; allowing remediation
+to clear the gate would restore exactly the bypass the gate exists to remove.
+
 The judging nodes are Shape A — one execution, one verdict event, and the routers own the transition. The acting nodes are Shape B — an `exec-sink` dispatches, and the agent re-enters through the control endpoint with `signalbox emit` as it works. That is why the scope guard can fire mid-implementation instead of at review: a thirty-minute step publishing one event at the end would be a thirty-minute hole where nothing is observable, resumable, or reactive.
 
 Both runners resolve the same `SKILL.md` by name. Claude reads `.claude/skills/`, codex reads `.codex/skills/`, and `prepare-workspace` installs into both, so the procedure is one reviewable file rather than two copies that drift.
 
-Every one of these nine nodes publishes `model.invoked` at the mechanical
+Every one of these ten nodes publishes `model.invoked` at the mechanical
 invocation boundary, whether the invocation succeeds or fails. Its core payload
 is `{event: "model.invoked", role, runner, model}`, followed by the same
 mechanically carried identity as the event it explains (`run_id`, stage/shard
@@ -268,7 +300,7 @@ A local-only run needs no `gh`: `fetch-issue` passes through when the body is al
 | Path | Role |
 |---|---|
 | `emergent.toml` | The topology. The whole architecture is this file. |
-| `skills/` | Eight skills, one per model node. The procedures, versioned and reviewable. |
+| `skills/` | Twelve skill directories: ten roles map to skills, plus the planner's survey and recall subagent skills. The procedures are versioned and reviewable. |
 | `src/signalbox/acts.py` | The irreducible I/O acts: worktree, issue, suite, merge, push, PR. |
 | `src/signalbox/agent.py` | Shape A. One verdict per execution, identity re-stamped. |
 | `src/signalbox/dispatch.py` | Shape B. Runner selection, sandbox, unspoofable identity. |

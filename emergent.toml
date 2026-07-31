@@ -210,7 +210,7 @@ publishes = ["shard.silent"]
 name = "raise-pr-reaped"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "exec.output", "--publish-as", "checks.silent", "--",
-        "jq", "-c", 'select(.command | test("reap --kind pr")) | .stdout | select(length > 0) | fromjson']
+        "jq", "-c", 'select(.command | test("reap --kind pr")) | .stdout | select(length > 0) | fromjson | . + {stranded_topic: "checks.silent"}']
 subscribes = ["exec.output"]
 publishes = ["checks.silent"]
 
@@ -248,6 +248,14 @@ subscribes = ["workspace.prepare-attempted"]
 publishes = ["workspace.failed"]
 
 [[handlers]]
+name = "route-prepare-failed-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "workspace.failed", "--publish-as", "run.halted", "--",
+        "jq", "-c", '. + {reason: "workspace preparation failed before a worktree was available"}']
+subscribes = ["workspace.failed"]
+publishes = ["run.halted"]
+
+[[handlers]]
 name = "fetch-issue"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "workspace.ready", "--publish-as", "issue.fetch-attempted",
@@ -271,6 +279,14 @@ args = ["-s", "issue.fetch-attempted", "--publish-as", "issue.fetch-failed", "--
         "jq", "-c", "select(.ok == false)"]
 subscribes = ["issue.fetch-attempted"]
 publishes = ["issue.fetch-failed"]
+
+[[handlers]]
+name = "route-fetch-failed-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "issue.fetch-failed", "--publish-as", "run.halted", "--",
+        "jq", "-c", '. + {reason: "issue fetch failed before a usable worktree was available"}']
+subscribes = ["issue.fetch-failed"]
+publishes = ["run.halted"]
 
 # Surveying the codebase and recalling the vault were two topology roles joined
 # on a 620s rendezvous. That machinery bought nothing it could not have had for
@@ -342,7 +358,7 @@ publishes = ["run.halted"]
 name = "route-plan-invalid"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "plan.submitted", "--publish-as", "plan.invalid-verdict", "--",
-        "jq", "-c", 'select((.stages | type) != "array" or (.stages | length) == 0)']
+        "jq", "-c", 'select((.stages | type) != "array" or (.stages | length) == 0) | . + {stranded_topic: "plan.invalid-verdict"}']
 subscribes = ["plan.submitted"]
 publishes = ["plan.invalid-verdict"]
 
@@ -448,7 +464,7 @@ publishes = ["run.halted"]
 name = "route-audit-invalid"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "plan.audited", "--publish-as", "plan.invalid-verdict", "--",
-        "jq", "-c", 'select((.verdict // "") | IN("approved", "changes_requested") | not)']
+        "jq", "-c", 'select((.verdict // "") | IN("approved", "changes_requested") | not) | . + {stranded_topic: "plan.invalid-verdict"}']
 subscribes = ["plan.audited"]
 publishes = ["plan.invalid-verdict"]
 
@@ -666,7 +682,7 @@ publishes = ["shard.changes-requested"]
 name = "route-review-invalid"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "review.submitted", "--publish-as", "review.invalid-verdict", "--",
-        "jq", "-c", 'select((.verdict // "") | IN("approved", "changes_requested") | not)']
+        "jq", "-c", 'select((.verdict // "") | IN("approved", "changes_requested") | not) | . + {stranded_topic: "review.invalid-verdict"}']
 subscribes = ["review.submitted"]
 publishes = ["review.invalid-verdict"]
 
@@ -796,7 +812,7 @@ publishes = ["branch.rebased"]
 name = "route-rebase-conflict"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "branch.rebase-attempted", "--publish-as", "branch.rebase-conflicted", "--",
-        "jq", "-c", "select(.ok == false)"]
+        "jq", "-c", 'select(.ok == false) | . + {stranded_topic: "branch.rebase-conflicted"}']
 subscribes = ["branch.rebase-attempted"]
 publishes = ["branch.rebase-conflicted"]
 
@@ -804,7 +820,7 @@ publishes = ["branch.rebase-conflicted"]
 name = "route-rebase-invalid"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "branch.rebase-attempted", "--publish-as", "branch.rebase-invalid-verdict", "--",
-        "jq", "-c", 'select((.ok | type) != "boolean")']
+        "jq", "-c", 'select((.ok | type) != "boolean") | . + {stranded_topic: "branch.rebase-invalid-verdict"}']
 subscribes = ["branch.rebase-attempted"]
 publishes = ["branch.rebase-invalid-verdict"]
 
@@ -883,7 +899,7 @@ publishes = ["approval.requested"]
 name = "route-gate-blocked"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "gate.assessed", "--publish-as", "gate.blocked", "--",
-        "jq", "-c", 'select(.decision == "block")']
+        "jq", "-c", 'select(.decision == "block") | . + {stranded_topic: "gate.blocked"}']
 subscribes = ["gate.assessed"]
 publishes = ["gate.blocked"]
 
@@ -891,9 +907,99 @@ publishes = ["gate.blocked"]
 name = "route-gate-invalid"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "gate.assessed", "--publish-as", "gate.invalid-verdict", "--",
-        "jq", "-c", 'select((.decision // "") | IN("clear","needs_human","block") | not)']
+        "jq", "-c", 'select((.decision // "") | IN("clear","needs_human","block") | not) | . + {stranded_topic: "gate.invalid-verdict"}']
 subscribes = ["gate.assessed"]
 publishes = ["gate.invalid-verdict"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REMEDIATION — diagnose stranded failures without crossing the promotion gate.
+#
+# The retry budget reuses carried identity key `attempt`, reset when a failure
+# enters this subgraph. Shape A projects that key across the model seam; a
+# remediation-specific key would be dropped there. The loop never re-enters the
+# pipeline, so this local counter cannot alter an earlier plan or audit budget.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[handlers]]
+name = "route-remediation-open"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "branch.push-failed", "-s", "branch.rebase-conflicted",
+        "-s", "branch.rebase-invalid-verdict", "-s", "checks.silent",
+        "-s", "gate.blocked", "-s", "gate.invalid-verdict",
+        "-s", "plan.invalid-verdict", "-s", "pr.merge-failed",
+        "-s", "pr.open-failed", "-s", "review.invalid-verdict",
+        "--publish-as", "remediation.requested", "--",
+        "jq", "-c", ". + {attempt: 1}"]
+subscribes = ["branch.push-failed", "branch.rebase-conflicted",
+              "branch.rebase-invalid-verdict", "checks.silent", "gate.blocked",
+              "gate.invalid-verdict", "plan.invalid-verdict", "pr.merge-failed",
+              "pr.open-failed", "review.invalid-verdict"]
+publishes = ["remediation.requested"]
+
+[[handlers]]
+name = "remediate"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "remediation.requested", "--publish-as", "remediation.assessed",
+        "-e", "remediation.failed", "-t", "600000", "--max-concurrent", "8", "--",
+        "signalbox", "agent", "remediate"]
+subscribes = ["remediation.requested"]
+publishes = ["remediation.assessed", "remediation.failed", "model.invoked"]
+
+[[handlers]]
+name = "guard-remediation-retry"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "remediation.assessed", "--publish-as", "remediation.requested", "--",
+        "jq", "-c", 'select(.remediation == "retry" and (.attempt | type) == "number" and .attempt < 3) | .attempt += 1']
+subscribes = ["remediation.assessed"]
+publishes = ["remediation.requested"]
+
+[[handlers]]
+name = "guard-remediation-exhaust"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "remediation.assessed", "--publish-as", "remediation.closed", "--",
+        "jq", "-c", 'select(.remediation == "retry" and ((.attempt | type) != "number" or .attempt >= 3)) | . + {reason: "remediation retry budget exhausted: \(.reason)"}']
+subscribes = ["remediation.assessed"]
+publishes = ["remediation.closed"]
+
+[[handlers]]
+name = "route-remediation-halt"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "remediation.assessed", "--publish-as", "remediation.closed", "--",
+        "jq", "-c", 'select(.remediation == "halt")']
+subscribes = ["remediation.assessed"]
+publishes = ["remediation.closed"]
+
+[[handlers]]
+name = "route-remediation-invalid"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "remediation.assessed", "--publish-as", "remediation.invalid-verdict", "--",
+        "jq", "-c", 'select((.remediation // "") | IN("halt", "retry") | not)']
+subscribes = ["remediation.assessed"]
+publishes = ["remediation.invalid-verdict"]
+
+[[handlers]]
+name = "route-remediation-closed-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "remediation.closed", "--publish-as", "run.halted", "--",
+        "jq", "-c", '. + {reason: (.reason // "remediation requires human intervention")}']
+subscribes = ["remediation.closed"]
+publishes = ["run.halted"]
+
+[[handlers]]
+name = "route-remediation-invalid-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "remediation.invalid-verdict", "--publish-as", "run.halted", "--",
+        "jq", "-c", '. + {reason: "remediation returned an invalid verdict"}']
+subscribes = ["remediation.invalid-verdict"]
+publishes = ["run.halted"]
+
+[[handlers]]
+name = "route-remediation-failed-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "remediation.failed", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(((.error.exit_code | type) | IN("number","null")) and (.error.stderr | type) == "string") | . + {reason: "remediation failed (\(if .error.exit_code == null then "no exit code" else "exit \(.error.exit_code)" end)): \(.error.stderr)"}']
+subscribes = ["remediation.failed"]
+publishes = ["run.halted"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PROMOTE — four irreducible I/O acts, each independently retryable. A failed
@@ -921,7 +1027,7 @@ publishes = ["branch.pushed"]
 name = "route-push-failed"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "branch.push-attempted", "--publish-as", "branch.push-failed", "--",
-        "jq", "-c", "select(.ok == false)"]
+        "jq", "-c", 'select(.ok == false) | . + {stranded_topic: "branch.push-failed"}']
 subscribes = ["branch.push-attempted"]
 publishes = ["branch.push-failed"]
 
@@ -945,7 +1051,7 @@ publishes = ["pr.opened"]
 name = "route-open-failed"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "pr.open-attempted", "--publish-as", "pr.open-failed", "--",
-        "jq", "-c", "select(.ok == false)"]
+        "jq", "-c", 'select(.ok == false) | . + {stranded_topic: "pr.open-failed"}']
 subscribes = ["pr.open-attempted"]
 publishes = ["pr.open-failed"]
 
@@ -1029,7 +1135,7 @@ publishes = ["pr.merged"]
 name = "route-merge-pr-failed"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "pr.merge-attempted", "--publish-as", "pr.merge-failed", "--",
-        "jq", "-c", "select(.ok == false)"]
+        "jq", "-c", 'select(.ok == false) | . + {stranded_topic: "pr.merge-failed"}']
 subscribes = ["pr.merge-attempted"]
 publishes = ["pr.merge-failed"]
 
@@ -1211,6 +1317,8 @@ subscribes = ["exec.output", "exec.exit",
               "plan.draft-failed", "plan.invalid-verdict", "plan.rejected",
               "plan.submitted", "plan.verified", "pr.merge-attempted", "pr.merge-failed", "pr.merged",
               "pr.open-attempted", "pr.open-failed", "pr.opened",
+              "remediation.assessed", "remediation.closed", "remediation.failed",
+              "remediation.invalid-verdict", "remediation.requested",
               "review.failed", "review.invalid-verdict", "review.submitted", "run.built",
               "run.completed", "run.halted", "run.requested", "scope.violated",
               "shard.abandoned", "shard.approved", "shard.built", "shard.changes-requested",
@@ -1232,8 +1340,8 @@ args = ["--port", "8102"]
 subscribes = ["system.started.*", "system.stopped.*", "system.error.*"]
 
 # `checks.silent` is here because a run that reached `pr.opened` and never heard
-# back is finished making progress on its own. It is the terminal event for the
-# stall that used to be nothing at all.
+# back is finished making progress on its own. Remediation now diagnoses that
+# named stall and routes it to a run terminal.
 [[sinks]]
 name = "notify"
 path = "~/.local/share/emergent/primitives/bin/exec-sink"
@@ -1252,9 +1360,9 @@ args = ["-s", "run.completed", "-s", "run.halted", "-s", "control.unknown-event"
         "-s", "plan.invalid-verdict", "-s", "review.invalid-verdict",
         "-s", "shard.invalid-verdict",
         "-s", "gate.invalid-verdict", "-s", "branch.rebase-invalid-verdict",
-        "-s", "checks.unknown-pr",
+        "-s", "checks.unknown-pr", "-s", "remediation.invalid-verdict",
         "-s", "checks.silent", "--", "jq", "-c", "."]
 subscribes = ["run.completed", "run.halted", "control.unknown-event",
               "plan.invalid-verdict", "review.invalid-verdict", "shard.invalid-verdict",
               "gate.invalid-verdict", "branch.rebase-invalid-verdict",
-              "checks.unknown-pr", "checks.silent"]
+              "checks.unknown-pr", "remediation.invalid-verdict", "checks.silent"]

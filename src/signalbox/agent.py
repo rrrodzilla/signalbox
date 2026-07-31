@@ -38,6 +38,7 @@ ROLE_SKILLS = {
     "review": "signalbox-review",
     "rebase": "signalbox-rebase",
     "assess": "signalbox-assess",
+    "remediate": "signalbox-remediate",
     "plan-notes": "signalbox-plan-notes",
     "write-note": "signalbox-write-note",
 }
@@ -51,7 +52,15 @@ ROLE_SKILLS = {
 ROLE_RUNNERS = {"audit": "codex"}
 DEFAULT_ROLE_RUNNER = "claude"
 
-READ_ONLY_ROLES = frozenset({"plan", "audit", "review", "assess", "plan-notes"})
+# Remediation is deliberately diagnosis-only. `merge` preserves its local retry
+# counter across one Shape A judgment, but every act payload builder calls
+# `project`, which drops non-carried keys. The appendix forbids carrying that
+# counter globally, so repair-and-re-entry could not retain a bound and would
+# violate acceptance criterion 5. `_workdir` also requires an existing tree,
+# limiting this role to failures after workspace.ready.
+READ_ONLY_ROLES = frozenset(
+    {"plan", "audit", "review", "assess", "remediate", "plan-notes"}
+)
 NOTES_ROLES = frozenset({"plan-notes", "write-note"})
 # Planning absorbed recall, so planning is what needs the vault now. It reads
 # through `recall_vault_dir`, not `vault_dir`: an operator with no vault gets a
@@ -62,10 +71,14 @@ VAULT_ROLES = NOTES_ROLES | {"plan"}
 # run, because the judgments differ in kind. Planning and assessing get the
 # strongest reasoning: the plan fixes stage boundaries and file-disjointness for
 # everything downstream, and the assessment decides whether a run is fit to
-# promote or belongs in front of a human. Reviewing judges one shard against one
-# intent, so it works at a narrower scope. Note writing is transcription of
-# decisions already made. Rebase uses Opus because resolving conflicts without
-# dropping either side's intent is a tree-changing promotion judgment.
+# promote or belongs in front of a human. Remediation also uses Opus because its
+# verdict becomes the reason a human acts on; the issue's proposed Fable tier is
+# absent from this table, and its quota exhaustion killed four runs on
+# 2026-07-30, prompting plan and assess to move to Opus at 63c6f2c. Reviewing
+# judges one shard against one intent, so it works at a narrower scope. Note
+# writing is transcription of decisions already made. Rebase uses Opus because
+# resolving conflicts without dropping either side's intent is a tree-changing
+# promotion judgment.
 #
 # `audit` is None for the same reason dispatch leaves codex unpinned: a runner
 # that ships its own default model should keep owning it, and a Claude alias in
@@ -76,6 +89,7 @@ ROLE_MODELS: dict[str, str | None] = {
     "review": "opus",
     "rebase": "opus",
     "assess": "opus",
+    "remediate": "opus",
     "plan-notes": "sonnet",
     "write-note": "sonnet",
 }
@@ -90,6 +104,7 @@ ROLE_PRODUCED_TOPICS = {
     "review": "review.submitted",
     "rebase": "branch.rebase-attempted",
     "assess": "gate.assessed",
+    "remediate": "remediation.assessed",
     "plan-notes": "notes.planned",
     "write-note": "note.written",
     "implement": "shard.submitted",

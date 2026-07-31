@@ -380,6 +380,11 @@ const EVENT = {
   "pr.merge-attempted":["promote","judge","merge-pr","out"],
   "pr.merged":["promote","go"], "pr.merge-failed":["promote","stop"],
 
+  "remediation.requested":[null,"work","remediate","in"],
+  "remediation.assessed":[null,"judge","remediate","out"],
+  "remediation.closed":[null,"stop"], "remediation.failed":[null,"stop"],
+  "remediation.invalid-verdict":[null,"stop"],
+
   "notes.planned":["docs","work","plan-notes","out"], "notes.plan-failed":["docs","stop"],
   "note.drafted":["docs","work","write-note","in"], "note.written":["docs","go","write-note","out"],
   "note.write-failed":["docs","stop"], "notes.synced":["docs","go"],

@@ -19,6 +19,7 @@ FORWARD_LOG="$LOG_DIR/forward.log"
 FORWARD_PIDFILE="$LOG_DIR/forward.pid"
 FORWARD_CHILD_PIDFILE="$LOG_DIR/forward.child.pid"
 FORWARD_READYFILE="$LOG_DIR/forward.ready"
+FORWARD_OWNERSHIP_FILE="$LOG_DIR/forward.owner"
 FORWARD_SUPERVISED_CHILD=""
 
 CONTROL_PORT=8100
@@ -302,6 +303,31 @@ forward_pid() {
   [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && printf '%s' "$pid"
 }
 
+process_start_time() {
+  local pid="$1" raw="" rest=""
+  local -a fields=()
+  IFS= read -r raw 2>/dev/null <"/proc/$pid/stat" || true
+  [[ -n "$raw" && "$raw" == *") "* ]] || return 0
+  # /proc comm may contain spaces and close parens, so field counting starts
+  # only after its final `) `. Without readable procfs ownership cannot be
+  # proven; stops then leave an orphan for the existing HTTP 422 repair path.
+  rest="${raw##*) }"
+  read -r -a fields <<<"$rest" 2>/dev/null || true
+  printf '%s' "${fields[19]:-}"
+}
+
+forward_owns_hook() {
+  local pid="$1" rec_pid="" rec_start="" rec_dir=""
+  local current_start="" current_dir=""
+  [[ -n "$pid" ]] || return 1
+  read -r rec_pid rec_start rec_dir 2>/dev/null <"$FORWARD_OWNERSHIP_FILE" || true
+  current_start="$(process_start_time "$pid")"
+  current_dir="$(cd "$LOG_DIR" 2>/dev/null && pwd -P)" || true
+  [[ -n "$rec_pid" && "$rec_pid" == "$pid" \
+    && -n "$rec_start" && "$rec_start" == "$current_start" \
+    && -n "$rec_dir" && "$rec_dir" == "$current_dir" ]]
+}
+
 forward_supervise() {
   local repo="$1"
   local backoff=1
@@ -333,6 +359,13 @@ forward_supervise() {
     sleep 1
     if kill -0 "$FORWARD_SUPERVISED_CHILD" 2>/dev/null; then
       : >"$FORWARD_READYFILE"
+      local supervisor_start="" supervisor_dir=""
+      supervisor_start="$(process_start_time "$$")"
+      supervisor_dir="$(cd "$LOG_DIR" 2>/dev/null && pwd -P)" || true
+      if [[ -n "$supervisor_start" && -n "$supervisor_dir" ]]; then
+        printf '%s %s %s\n' "$$" "$supervisor_start" "$supervisor_dir" \
+          >"$FORWARD_OWNERSHIP_FILE"
+      fi
       printf '[%s] webhook forwarder is running\n' "$(date -Is)"
     fi
     wait "$FORWARD_SUPERVISED_CHILD" 2>/dev/null || true
@@ -399,7 +432,7 @@ forward_up() {
 
   mkdir -p "$LOG_DIR"
   printf '%s' "$repo" >"$LOG_DIR/forward.repo"
-  rm -f "$FORWARD_READYFILE"
+  rm -f "$FORWARD_READYFILE" "$FORWARD_OWNERSHIP_FILE"
   : >"$FORWARD_LOG"
   say "forwarding $repo check suites to http://127.0.0.1:$GITHUB_PORT/github"
   nohup "$0" _forward-supervise "$repo" >"$FORWARD_LOG" 2>&1 &
@@ -424,8 +457,11 @@ forward_up() {
 }
 
 forward_down() {
-  local pid
+  local pid owns_hook=0 repo=""
   pid="$(forward_pid || true)"
+  if forward_owns_hook "$pid"; then
+    owns_hook=1
+  fi
   if [[ -z "$pid" ]]; then
     say "no forwarder running"
   else
@@ -442,8 +478,18 @@ forward_down() {
   if [[ -n "$child" ]] && kill -0 "$child" 2>/dev/null; then
     kill -TERM "$child" 2>/dev/null || true
   fi
-  forward_purge_hooks
-  rm -f "$FORWARD_PIDFILE" "$FORWARD_CHILD_PIDFILE" "$FORWARD_READYFILE"
+  if ((owns_hook)); then
+    # A licensed 422 repair can replace this hook while its supervisor remains
+    # live; that residual race is safer than every unrelated stop purging it.
+    forward_purge_hooks
+  else
+    repo="$(cat "$LOG_DIR/forward.repo" 2>/dev/null || true)"
+    if [[ -n "$repo" ]]; then
+      say "hook ownership not proven for $repo; a forwarder hook may remain; recover with: $0 forward $repo"
+    fi
+  fi
+  rm -f "$FORWARD_PIDFILE" "$FORWARD_CHILD_PIDFILE" "$FORWARD_READYFILE" \
+    "$FORWARD_OWNERSHIP_FILE"
 }
 
 # ── launch ───────────────────────────────────────────────────────────────────

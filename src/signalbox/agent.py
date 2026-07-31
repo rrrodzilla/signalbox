@@ -52,6 +52,10 @@ ROLE_SKILLS = {
 ROLE_RUNNERS = {"audit": "codex"}
 DEFAULT_ROLE_RUNNER = "claude"
 
+UNPARSEABLE_OUTPUT_HEAD_LIMIT = 1500
+UNPARSEABLE_OUTPUT_TAIL_LIMIT = 1500
+UNPARSEABLE_OUTPUT_ELISION_MARKER = "... [{elided} characters elided] ..."
+
 # Remediation is deliberately read-only: the model announces its judgment and
 # fixed topology handlers decide whether an allowlisted pre-gate re-entry may
 # occur. Those handlers strip inherited verdicts, so no resumed run can reach
@@ -227,6 +231,22 @@ def extract_verdict(stdout: str) -> dict | None:
     return None
 
 
+def elide_unparseable_output(stdout: str) -> tuple[str, int]:
+    """Keep both decision-bearing beginnings and malformed endings of stdout."""
+    budget = UNPARSEABLE_OUTPUT_HEAD_LIMIT + UNPARSEABLE_OUTPUT_TAIL_LIMIT
+    if len(stdout) <= budget:
+        return stdout, 0
+
+    elided = len(stdout) - budget
+    marker = UNPARSEABLE_OUTPUT_ELISION_MARKER.format(elided=elided)
+    return (
+        stdout[:UNPARSEABLE_OUTPUT_HEAD_LIMIT]
+        + marker
+        + stdout[-UNPARSEABLE_OUTPUT_TAIL_LIMIT:],
+        elided,
+    )
+
+
 def prompt_for(role: str, payload: dict) -> str:
     skill = ROLE_SKILLS[role]
     return (
@@ -377,7 +397,12 @@ def run(role: str, payload: dict, model: str | None = None) -> tuple[dict, int]:
             verdict = {**recovered, "verdict_repaired": "unclosed-root"}
     if verdict is None:
         # Not an error: an unparseable verdict is data the routers can see.
-        verdict = {"verdict": "unparseable", "output": completed.stdout[-2000:]}
+        # sb-142 / 2026-07-31: keep both ends so truncation cannot discard the
+        # decision-bearing keys while preserving only the malformed terminator.
+        output, elided = elide_unparseable_output(completed.stdout)
+        verdict = {"verdict": "unparseable", "output": output}
+        if elided:
+            verdict["output_elided_chars"] = elided
 
     merged = merge(payload, verdict, role)
     # The model's product remains the payload base. Only carried fields cross

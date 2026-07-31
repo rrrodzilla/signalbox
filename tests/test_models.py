@@ -439,6 +439,60 @@ def test_unparseable_plan_drops_rejected_stages_and_names_the_omission(
     assert "plan omitted product keys: stages" in capsys.readouterr().err
 
 
+def test_oversized_unparseable_verdict_keeps_both_ends_and_elided_count(
+    monkeypatch,
+):
+    stdout = (
+        'decision="block"\n'
+        + "x" * 4000
+        + "\n<malformed verdict terminator>"
+    )
+    monkeypatch.setattr(agent, "_workdir", lambda payload: "/tmp/wt")
+    monkeypatch.setattr(
+        agent.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout=stdout, stderr=""
+        ),
+    )
+    monkeypatch.setattr(agent, "post_provenance", lambda *args, **kwargs: None)
+
+    verdict, code = agent.run("review", {}, model="opus")
+
+    expected_elided = len(stdout) - (
+        agent.UNPARSEABLE_OUTPUT_HEAD_LIMIT + agent.UNPARSEABLE_OUTPUT_TAIL_LIMIT
+    )
+    marker = agent.UNPARSEABLE_OUTPUT_ELISION_MARKER.format(elided=expected_elided)
+    assert code == 0
+    assert verdict["verdict"] == "unparseable"
+    assert verdict["output"].startswith(stdout[: agent.UNPARSEABLE_OUTPUT_HEAD_LIMIT])
+    assert verdict["output"].endswith(stdout[-agent.UNPARSEABLE_OUTPUT_TAIL_LIMIT :])
+    assert marker in verdict["output"]
+    assert verdict["output_elided_chars"] == expected_elided
+
+
+def test_short_unparseable_verdict_is_published_whole_without_elision(
+    monkeypatch,
+):
+    stdout = 'decision="needs_human"\n<malformed terminator>'
+    monkeypatch.setattr(agent, "_workdir", lambda payload: "/tmp/wt")
+    monkeypatch.setattr(
+        agent.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout=stdout, stderr=""
+        ),
+    )
+    monkeypatch.setattr(agent, "post_provenance", lambda *args, **kwargs: None)
+
+    verdict, code = agent.run("review", {}, model="opus")
+
+    assert code == 0
+    assert verdict["output"] == stdout
+    assert "output_elided_chars" not in verdict
+    assert "characters elided" not in verdict["output"]
+
+
 @pytest.mark.parametrize("role", ["implement", "review"])
 def test_non_authoring_verdict_has_stages_restamped_and_reported(monkeypatch, role):
     inbound_stages = [{"stage_id": "planned"}]

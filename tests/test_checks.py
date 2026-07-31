@@ -545,7 +545,7 @@ def test_merge_stage_refuses_when_the_commit_cannot_be_verified_with_identity(
 
 
 def test_product_keys_are_a_narrow_exemption_from_carried_identity(monkeypatch):
-    """Only the plan drafter may author a carried key.
+    """Only explicitly named roles may author their narrow carried products.
 
     Derive this guard from the role map itself rather than enumerating today's
     agent seams: a new role must not silently acquire permission to rewrite an
@@ -563,11 +563,15 @@ def test_product_keys_are_a_narrow_exemption_from_carried_identity(monkeypatch):
     }
 
     assert set().union(*claimed.values(), set()) <= carried
-    assert set(claimed) == {"plan"}
+    assert claimed == {
+        "plan": {"stages"},
+        "remediate": {"resume_topic"},
+    }
     assert {
         "declared",
         "round",
         "run_id",
+        "remediation_attempt",
         "shard_id",
         "session_id",
     }.isdisjoint(set().union(*claimed.values(), set()))
@@ -605,6 +609,7 @@ def test_every_carried_key_survives_every_payload_building_seam():
     carried.update(
         {
             "attempt": 0,
+            "remediation_attempt": 1,
             "stage_id": "stage-1",
             "stage_index": 0,
             "stage_count": 1,

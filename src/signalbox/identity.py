@@ -30,6 +30,12 @@ CARRIED_KEYS: tuple[str, ...] = (
     # two-file gated diff into a 132-file pull request.
     "base_branch",
     "attempt",
+    # Remediation can re-enter the pipeline, so its budget must survive every
+    # join without borrowing or resetting another loop's generic attempt key.
+    "remediation_attempt",
+    # The remediate role chooses a topic, while fixed topology guards decide
+    # whether that declared pre-gate re-entry is permitted.
+    "resume_topic",
     "stage_id",
     "stage_index",
     "stages",
@@ -61,6 +67,7 @@ CARRIED_KEYS: tuple[str, ...] = (
 # weakening the protection around declarations, loop counters, or sessions.
 ROLE_PRODUCT_KEYS: dict[str, frozenset[str]] = {
     "plan": frozenset({"stages"}),
+    "remediate": frozenset({"resume_topic"}),
 }
 
 

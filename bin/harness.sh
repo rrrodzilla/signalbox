@@ -809,7 +809,7 @@ case "${1:-}" in
   install)   shift; install "$@" ;;
   up)        shift; up "$@" ;;
   down)      shift; guard_down down "$@"; forward_down; down ;;
-  restart)   shift; guard_down restart "$@"; preflight; forward_down; down; start_engine ;;
+  restart)   shift; guard_down restart "$@"; require_owned_engine >/dev/null; preflight; forward_down; down; start_engine ;;
   status)    shift; status "$@" ;;
   launch)    shift; launch "$@" ;;
   dogfood)   shift; dogfood "$@" ;;

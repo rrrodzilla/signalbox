@@ -329,6 +329,7 @@ def run(role: str, payload: dict, model: str | None = None) -> tuple[dict, int]:
         **subprocess_kwargs,
     )
     duration_ms = round((time.monotonic() - started) * 1000)
+    diagnostic = invocation_diagnostic(completed, command)
     post_provenance(
         role,
         runner,
@@ -336,11 +337,17 @@ def run(role: str, payload: dict, model: str | None = None) -> tuple[dict, int]:
         ROLE_PRODUCED_TOPICS[role],
         completed.returncode == 0,
         duration_ms,
-        invocation_diagnostic(completed, command),
+        diagnostic,
         env=environment(payload, dict(os.environ)),
     )
     if completed.returncode != 0:
-        print(completed.stderr.strip()[:2000], file=sys.stderr)
+        detail = diagnostic.get("stderr") or "runner produced no stderr"
+        print(
+            f"signalbox agent: {role} invocation failed with exit code "
+            f"{diagnostic.get('exit_code', completed.returncode)}: {detail}; "
+            f"command: {diagnostic.get('command', [])}",
+            file=sys.stderr,
+        )
         return {}, completed.returncode
 
     verdict = extract_verdict(completed.stdout)

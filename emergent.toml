@@ -183,6 +183,9 @@ publishes = ["checks.observed"]
 # holds no marker for the delivery, a real non-zero exit rather than a refusal;
 # its success path cannot return ok: false and also merges the marker's stored
 # identity into the observed delivery.
+# checks.unknown-pr needs no run.halted router: by definition this check_suite
+# delivery has no pending marker, so it names no run to halt. The trace sink
+# already consumes it as unattributed operational evidence.
 [[handlers]]
 name = "rehydrate-pr"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
@@ -323,6 +326,14 @@ subscribes = ["issue.fetched", "plan.rejected"]
 # too, so it must survive every feedback pass rather than only the first plan.
 publishes = ["plan.submitted", "plan.draft-failed", "model.invoked"]
 
+[[handlers]]
+name = "route-plan-draft-failed-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.draft-failed", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(((.error.exit_code | type) | IN("number", "null")) and (.error.stderr | type) == "string") | . + {reason: "plan drafting failed (\(if .error.exit_code == null then "no exit code" else "exit \(.error.exit_code)" end)): \(.error.stderr)"}']
+subscribes = ["plan.draft-failed"]
+publishes = ["run.halted"]
+
 # Exhaustiveness at the planner seam. A synthesised unparseable verdict has no
 # stages, but so does any other planner output that cannot carry a usable plan.
 # This observation is additive: check-plan still receives every submission and
@@ -394,6 +405,14 @@ args = ["-s", "plan.verified", "--publish-as", "plan.audited",
         "signalbox", "agent", "audit"]
 subscribes = ["plan.verified"]
 publishes = ["plan.audited", "plan.audit-failed", "model.invoked"]
+
+[[handlers]]
+name = "route-plan-audit-failed-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "plan.audit-failed", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(((.error.exit_code | type) | IN("number", "null")) and (.error.stderr | type) == "string") | . + {reason: "plan audit failed (\(if .error.exit_code == null then "no exit code" else "exit \(.error.exit_code)" end)): \(.error.stderr)"}']
+subscribes = ["plan.audit-failed"]
+publishes = ["run.halted"]
 
 [[handlers]]
 name = "route-plan-approved"
@@ -620,6 +639,14 @@ subscribes = ["shard.built"]
 publishes = ["review.submitted", "review.failed", "model.invoked"]
 
 [[handlers]]
+name = "route-review-failed-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "review.failed", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(((.error.exit_code | type) | IN("number", "null")) and (.error.stderr | type) == "string") | . + {reason: "shard review failed (\(if .error.exit_code == null then "no exit code" else "exit \(.error.exit_code)" end)): \(.error.stderr)"}']
+subscribes = ["review.failed"]
+publishes = ["run.halted"]
+
+[[handlers]]
 name = "route-approved"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "review.submitted", "--publish-as", "shard.approved", "--",
@@ -750,6 +777,14 @@ subscribes = ["run.built"]
 publishes = ["branch.rebase-attempted", "branch.rebase-failed", "model.invoked"]
 
 [[handlers]]
+name = "route-rebase-failed-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "branch.rebase-failed", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(((.error.exit_code | type) | IN("number", "null")) and (.error.stderr | type) == "string") | . + {reason: "branch rebase failed (\(if .error.exit_code == null then "no exit code" else "exit \(.error.exit_code)" end)): \(.error.stderr)"}']
+subscribes = ["branch.rebase-failed"]
+publishes = ["run.halted"]
+
+[[handlers]]
 name = "route-rebase-ok"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "branch.rebase-attempted", "--publish-as", "branch.rebased", "--",
@@ -819,6 +854,14 @@ subscribes = ["suite.ran"]
 # Promotion rests on this judgment, making its invocation provenance part of
 # the gate's load-bearing evidence.
 publishes = ["gate.assessed", "assess.failed", "model.invoked"]
+
+[[handlers]]
+name = "route-assess-failed-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "assess.failed", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(((.error.exit_code | type) | IN("number", "null")) and (.error.stderr | type) == "string") | . + {reason: "promotion assessment failed (\(if .error.exit_code == null then "no exit code" else "exit \(.error.exit_code)" end)): \(.error.stderr)"}']
+subscribes = ["assess.failed"]
+publishes = ["run.halted"]
 
 [[handlers]]
 name = "route-gate-auto"
@@ -1005,6 +1048,14 @@ subscribes = ["checks.passed"]
 # while the independently started merge arm is still in flight.
 publishes = ["notes.planned", "notes.plan-failed", "model.invoked"]
 
+[[handlers]]
+name = "route-notes-plan-failed-halted"
+path = "~/.local/share/emergent/primitives/bin/exec-handler"
+args = ["-s", "notes.plan-failed", "--publish-as", "run.halted", "--",
+        "jq", "-c", 'select(((.error.exit_code | type) | IN("number", "null")) and (.error.stderr | type) == "string") | . + {reason: "notes planning failed (\(if .error.exit_code == null then "no exit code" else "exit \(.error.exit_code)" end)): \(.error.stderr)"}']
+subscribes = ["notes.plan-failed"]
+publishes = ["run.halted"]
+
 # An empty notes plan has nothing for the fan-out or join to count, so the
 # splitter short-circuits their silence by publishing the join's output topic
 # directly and lets the run reach its terminal.
@@ -1028,6 +1079,10 @@ subscribes = ["note.drafted"]
 # A rewritten note is durable output, making the invocation that authored it
 # load-bearing provenance rather than transient telemetry.
 publishes = ["note.written", "note.write-failed", "model.invoked"]
+
+# note.write-failed needs no run.halted router: emergent-primitives v0.11.0
+# merges run_id into the -e payload, so it already lands on join-notes' failure
+# arm below and lets that run reach the notes terminal.
 
 [[handlers]]
 name = "join-notes"
@@ -1084,6 +1139,9 @@ publishes = ["run.halted"]
 #
 # A halted run is deliberately not subscribed. Its worktree is the evidence for
 # why it halted, and disk is cheaper than that.
+# workspace.release-failed needs no run.halted router: release starts only after
+# run.completed, so the run is already terminal. The topic also has the refusal
+# shape published by route-release-refused below, not only an -e shape.
 [[handlers]]
 name = "release-workspace"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"

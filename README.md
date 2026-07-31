@@ -6,7 +6,7 @@ The name is from railway signaling. A signal box is where the interlocking lives
 
 ## The shape
 
-One engine. Four sources, eighty-six handlers, ten sinks, and no script that knows what comes next.
+One engine. Four sources, ninety-three handlers, ten sinks, and no script that knows what comes next.
 
 ```
 run.requested ─> workspace.prepare-attempted
@@ -128,7 +128,7 @@ Acts publish one `*.attempted` event, then two exclusive routers select the
 domain outcome from the returned payload. `ok: true` means the act's requested
 domain outcome succeeded; a completed refusal or conflict is `ok: false`, not
 success. The `-e` edge is reserved for the primitive itself crashing or timing
-out, because its error payload carries no run identity for downstream joins.
+out; its error payload preserves the input event's run identity for downstream routing.
 `run-suite` is the deliberate exception: its routers select `errored`, not
 `ok`. A failing suite is a verdict that must reach the promotion gate, rather
 than a topology transition; only failure to invoke a detected suite is routed

@@ -564,6 +564,39 @@ def test_judging_invocation_always_posts_resolved_model(monkeypatch, returncode)
 
 
 @pytest.mark.parametrize(
+    "runner_stderr,expected_detail",
+    [
+        ("", "runner produced no stderr"),
+        ("quota exceeded", "quota exceeded"),
+    ],
+)
+def test_failed_judging_invocation_explains_nonzero_exit(
+    monkeypatch, capsys, runner_stderr, expected_detail
+):
+    monkeypatch.setattr(
+        agent.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=17,
+            stdout="",
+            stderr=runner_stderr,
+        ),
+    )
+    monkeypatch.setattr(agent, "_workdir", lambda payload: "/tmp/wt")
+    monkeypatch.setattr(agent, "post_provenance", lambda *args, **kwargs: None)
+
+    verdict, code = agent.run("review", {"run_id": "r1"}, model="opus")
+
+    assert verdict == {}
+    assert code == 17
+    stderr = capsys.readouterr().err
+    assert stderr.strip()
+    assert "review invocation failed with exit code 17" in stderr
+    assert expected_detail in stderr
+    assert "<redacted:" in stderr
+
+
+@pytest.mark.parametrize(
     "base_env,expected_model",
     [
         ({}, None),

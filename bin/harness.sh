@@ -180,12 +180,72 @@ down() {
 }
 
 status() {
-  # #70: this is the invoking shell's view. The engine may have been started
-  # from another shell and prepare-workspace is authoritative for each run.
-  say "vault:     ${SIGNALBOX_VAULT:-unset}"
-  say "  caveat: live engine environment was captured at 'up' and may differ; prepare-workspace verifies each run"
   local pids
   pids="$(engine_pids)"
+  if [[ -z "$pids" ]]; then
+    say "vault:     unavailable (engine down; no captured environment)"
+  else
+    local pid environment entry captured first_vault="" readable_count=0
+    local captured_count=0 values_disagree=0
+    local -a vault_pids=() vault_values=()
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] || continue
+      if [[ ! -r "/proc/$pid/environ" ]] \
+        || ! environment="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null)"; then
+        vault_pids+=("$pid")
+        vault_values+=("__SIGNALBOX_UNREADABLE__")
+        continue
+      fi
+      readable_count=$((readable_count + 1))
+      captured=""
+      while IFS= read -r entry; do
+        case "$entry" in
+          SIGNALBOX_VAULT=*) captured="${entry#SIGNALBOX_VAULT=}"; break ;;
+        esac
+      done <<<"$environment"
+      vault_pids+=("$pid")
+      vault_values+=("$captured")
+      if ((captured_count == 0)); then
+        first_vault="$captured"
+      elif [[ "$captured" != "$first_vault" ]]; then
+        values_disagree=1
+      fi
+      captured_count=$((captured_count + 1))
+    done <<<"$pids"
+
+    if ((values_disagree)); then
+      say "vault:     divergent engine environments"
+    fi
+    local index value outcome
+    for index in "${!vault_pids[@]}"; do
+      pid="${vault_pids[$index]}"
+      value="${vault_values[$index]}"
+      if [[ "$value" == "__SIGNALBOX_UNREADABLE__" ]]; then
+        say "vault[$pid]: unavailable (/proc/$pid/environ absent or unreadable)"
+        continue
+      fi
+      if [[ -z "$value" ]]; then
+        outcome="notes fail: SIGNALBOX_VAULT is unset"
+      elif [[ "$value" != /* ]]; then
+        outcome="notes fail: vault is not an absolute path"
+      elif [[ ! -d "$value" ]]; then
+        outcome="notes fail: vault directory does not exist"
+      else
+        outcome="notes enabled"
+      fi
+      if ((${#vault_pids[@]} == 1)); then
+        say "vault:     ${value:-<unset>} (engine pid $pid; $outcome)"
+      else
+        say "vault[$pid]: ${value:-<unset>} ($outcome)"
+      fi
+      if [[ "${SIGNALBOX_VAULT:-}" != "$value" ]]; then
+        say "  invoking shell differs: ${SIGNALBOX_VAULT:-<unset>}"
+      fi
+    done
+    if ((readable_count == 0)); then
+      say "  no engine vault could be read at report time"
+    fi
+  fi
   if [[ -n "$pids" ]]; then
     say "engine:    up (pid $(tr '\n' ' ' <<<"$pids"))"
   else

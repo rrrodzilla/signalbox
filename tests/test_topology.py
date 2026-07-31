@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from signalbox.ceiling import INTENDED_MAX_CONNECTIONS
+
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = tomllib.load((ROOT / "emergent.toml").open("rb"))
 
@@ -46,6 +48,21 @@ def named(group: list[dict], name: str) -> dict:
 
 def test_there_is_exactly_one_engine():
     assert CONFIG["engine"]["name"] == "signalbox"
+
+
+def test_declared_primitives_fit_the_intended_connection_ceiling_with_headroom():
+    """Every declared primitive holds one IPC connection for its lifetime."""
+    primitive_sections = [
+        section for section in CONFIG.values() if isinstance(section, list)
+    ]
+    declared_connections = sum(len(section) for section in primitive_sections)
+    headroom = INTENDED_MAX_CONNECTIONS - declared_connections
+
+    assert headroom > 0, (
+        f"{declared_connections} declared primitive connections do not fit below "
+        f"the intended max_connections={INTENDED_MAX_CONNECTIONS}; "
+        f"headroom is {headroom}"
+    )
 
 
 def test_dashboard_observes_every_topic_the_topology_publishes():

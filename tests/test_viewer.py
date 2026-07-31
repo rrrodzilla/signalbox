@@ -282,6 +282,226 @@ def test_preflight_requires_the_operator_vault():
     assert "before '$0 up'" in body
 
 
+def test_preflight_refuses_a_topology_larger_than_the_connection_ceiling(
+    tmp_path: Path,
+):
+    """#126: exercise the operator command, not a source-code promise."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name in ("emergent", "claude", "codex", "gh", "git", "jq", "uv"):
+        executable = fake_bin / name
+        executable.write_text(
+            "#!/usr/bin/env bash\n"
+            + ("echo 'emergent test'\n" if name == "emergent" else "exit 0\n")
+        )
+        executable.chmod(0o755)
+
+    home = tmp_path / "home"
+    primitives = home / ".local" / "share" / "emergent" / "primitives" / "bin"
+    primitives.mkdir(parents=True)
+    for name in (
+        "exec-source",
+        "exec-handler",
+        "exec-sink",
+        "http-source",
+        "sse-sink",
+        "topology-viewer",
+    ):
+        primitive = primitives / name
+        primitive.write_text("#!/usr/bin/env bash\nexit 0\n")
+        primitive.chmod(0o755)
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    config = tmp_path / "too-large.toml"
+    config.write_text('[[sources]]\nname = "one"\n[[sinks]]\nname = "two"\n')
+    ipc = home / ".config" / "acton" / "ipc.toml"
+    ipc.parent.mkdir(parents=True)
+    ipc.write_text(
+        "[timeouts]\nread_timeout_ms = 0\n\n"
+        "[limits]\nmax_connections = 1\nmax_message_size = 10485760\n"
+    )
+    linked_config = tmp_path / "linked-config"
+    linked_config.symlink_to(home / ".config", target_is_directory=True)
+
+    preflight_env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(linked_config),
+        "SIGNALBOX_CONFIG": str(config),
+        "SIGNALBOX_VAULT": str(vault),
+    }
+    result = subprocess.run(
+        [ROOT / "bin/harness.sh", "preflight"],
+        env=preflight_env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert (
+        "harness: declared primitive connections (2) exceed the effective "
+        "acton max_connections ceiling (1)"
+    ) in result.stderr
+    assert str(ipc.resolve()) in result.stderr
+    assert str(linked_config) not in result.stderr
+    assert "\n  repair with: mkdir -p " in result.stderr
+    assert "max_connections = 1024" in result.stderr
+
+    repair = result.stderr.split("\n  repair with: ", 1)[1].strip()
+    repaired = subprocess.run(
+        ["bash", "-c", repair], env={**os.environ, "HOME": str(home)}, check=False
+    )
+    assert repaired.returncode == 0
+    assert ipc.read_text() == (
+        "[timeouts]\nread_timeout_ms = 0\n\n"
+        "[limits]\nmax_connections = 1024\nmax_message_size = 10485760\n"
+    )
+
+    ipc.unlink()
+    ipc.parent.rmdir()
+    repaired_absent = subprocess.run(
+        ["bash", "-c", repair], env={**os.environ, "HOME": str(home)}, check=False
+    )
+    assert repaired_absent.returncode == 0
+    assert ipc.read_text() == "[limits]\nmax_connections = 1024\n"
+
+    ipc.write_text("[limits]\nmax_connections = 1\n")
+    public_bypass = subprocess.run(
+        [ROOT / "bin/harness.sh", "up", "--preflight-complete"],
+        env=preflight_env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert public_bypass.returncode == 1
+    assert "declared primitive connections (2)" in public_bypass.stderr
+    assert "starting the engine" not in public_bypass.stdout
+
+    config.write_text("not valid toml = [")
+    malformed = subprocess.run(
+        [ROOT / "bin/harness.sh", "preflight"],
+        env=preflight_env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert malformed.returncode == 1
+    assert "connection ceiling check failed:" in malformed.stderr
+    assert "TOMLDecodeError" in malformed.stderr
+    assert "repair with:" not in malformed.stderr
+
+
+def test_status_reports_a_degraded_engine_when_children_are_missing(tmp_path: Path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    pgrep = fake_bin / "pgrep"
+    pgrep.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == -x ]]; then echo \"$$\"; exit 0; fi\n"
+        "if [[ \"$1\" == -P ]]; then exit 1; fi\n"
+        "exit 1\n"
+    )
+    pgrep.chmod(0o755)
+    config = tmp_path / "emergent.toml"
+    config.write_text('[[handlers]]\nname = "expected"\n')
+
+    result = subprocess.run(
+        [ROOT / "bin/harness.sh", "status"],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SIGNALBOX_CONFIG": str(config),
+            "SIGNALBOX_LOG_DIR": str(tmp_path / "logs"),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "engine:    DEGRADED" in result.stdout
+    assert "primitives 0/1 live" in result.stdout
+
+
+def test_status_reports_a_healthy_engine_when_all_declared_children_are_live(
+    tmp_path: Path,
+):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    pgrep = fake_bin / "pgrep"
+    pgrep.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == -x ]]; then echo \"$$\"; exit 0; fi\n"
+        "if [[ \"$1\" == -P ]]; then printf '101\\n102\\n'; exit 0; fi\n"
+        "exit 1\n"
+    )
+    pgrep.chmod(0o755)
+    config = tmp_path / "emergent.toml"
+    config.write_text(
+        '[[sources]]\nname = "one"\n[[handlers]]\nname = "two"\n'
+    )
+
+    result = subprocess.run(
+        [ROOT / "bin/harness.sh", "status"],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SIGNALBOX_CONFIG": str(config),
+            "SIGNALBOX_LOG_DIR": str(tmp_path / "logs"),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "engine:    up" in result.stdout
+    assert "primitives 2/2" in result.stdout
+    assert "engine:    DEGRADED" not in result.stdout
+
+
+def test_status_continues_when_the_topology_cannot_be_counted(tmp_path: Path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    pgrep = fake_bin / "pgrep"
+    pgrep.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == -x ]]; then echo \"$$\"; exit 0; fi\n"
+        "if [[ \"$1\" == -P ]]; then exit 1; fi\n"
+        "exit 1\n"
+    )
+    pgrep.chmod(0o755)
+    fuser = fake_bin / "fuser"
+    fuser.write_text("#!/usr/bin/env bash\nexit 1\n")
+    fuser.chmod(0o755)
+    config = tmp_path / "malformed.toml"
+    config.write_text("not valid toml = [")
+
+    result = subprocess.run(
+        [ROOT / "bin/harness.sh", "status"],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SIGNALBOX_CONFIG": str(config),
+            "SIGNALBOX_LOG_DIR": str(tmp_path / "logs"),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "engine:    DEGRADED" in result.stdout
+    assert "declared primitive count unavailable" in result.stdout
+    assert "viewer:    down" in result.stdout
+    assert "control    (not listening)" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
 def test_dogfood_passes_the_matched_github_repo_only_on_the_origin_branch():
     harness = (ROOT / "bin" / "harness.sh").read_text()
     body = harness.split("\ndogfood() {", 1)[1].split("\n}", 1)[0]

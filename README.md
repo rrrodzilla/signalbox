@@ -6,7 +6,7 @@ The name is from railway signaling. A signal box is where the interlocking lives
 
 ## The shape
 
-One engine. Four sources, one hundred four handlers, ten sinks, and no script that knows what comes next.
+One engine. A topology-derived set of primitives, and no script that knows what comes next.
 
 ```
 run.requested ─> workspace.prepare-attempted
@@ -248,13 +248,18 @@ way the phase could lose a run.
 
 ## Quick start
 
-Prerequisites: the Emergent engine and its primitives, `claude`, `codex`, `gh` (authenticated, with the `cli/gh-webhook` extension), `git` with a signing key, `jq`, `python3`, and `uv`. The operator must also export `SIGNALBOX_VAULT` as the absolute path of an existing notes-vault directory. It has no default: notes must live outside disposable run worktrees. `bin/harness.sh preflight` checks all of it and names what is missing.
+Prerequisites: the Emergent engine and its primitives, `claude`, `codex`, `gh` (authenticated, with the `cli/gh-webhook` extension), `git` with a signing key, `jq`, `python3`, and `uv`. The operator must also export `SIGNALBOX_VAULT` as the absolute path of an existing notes-vault directory. It has no default: notes must live outside disposable run worktrees.
+
+Acton's IPC connection ceiling is machine-global and must be configured separately from `emergent marketplace install`. In `~/.config/acton/ipc.toml`, set `[limits] max_connections` above the primitive count derived from `emergent.toml`; `python3 src/signalbox/ceiling.py` prints that derived count and checks the effective setting. Preflight refuses to start an engine that cannot fit the topology, and its repair message names both the derived primitive count and effective ceiling, plus the absolute config path to edit. `bin/harness.sh preflight` checks these requirements and names what is missing.
 
 ```bash
 emergent marketplace install exec-source exec-handler exec-sink \
     http-source sse-sink topology-viewer
 gh extension install cli/gh-webhook
 export SIGNALBOX_VAULT=/absolute/path/to/notes-vault
+mkdir -p ~/.config/acton
+${EDITOR:-vi} ~/.config/acton/ipc.toml  # set [limits] max_connections above the derived count
+python3 src/signalbox/ceiling.py        # derive the count and verify the effective ceiling
 
 ./bin/harness.sh install      # editable CLI install, then the invariant suite
 ./bin/harness.sh up           # engine + dashboard
@@ -305,6 +310,7 @@ A local-only run needs no `gh`: `fetch-issue` passes through when the body is al
 | `src/signalbox/agent.py` | Shape A. One verdict per execution, identity re-stamped. |
 | `src/signalbox/dispatch.py` | Shape B. Runner selection, sandbox, unspoofable identity. |
 | `src/signalbox/emit.py` | An acting agent's entire action space: three events. |
+| `src/signalbox/ceiling.py` | Derives the topology's primitive count and checks Acton's IPC connection ceiling. |
 | `src/signalbox/plan.py` | The pure invariants that license parallel shards. |
 | `src/signalbox/primitives/` | Three SDK primitives: two splitters and a joiner with a real timeout. |
 | `src/signalbox/dashboard.html` | The run board, a static viewer over read-only event history and the SSE stream. |
@@ -315,7 +321,7 @@ A local-only run needs no `gh`: `fetch-issue` passes through when the body is al
 
 ## The invariant tests
 
-`tests/test_topology.py` is the part worth reading first. Together with the focused dispatch and act tests, it asserts things no runtime error would ever report: that the dashboard observes every topic the topology publishes, that no SSE subscription relies on a wildcard (they are silently ignored — health said `ok` while delivering zero bytes), that every subscription has a publisher and every published event has a consumer, that both sides of every depth guard are exclusive so a loop cannot run forever *or* terminate early, that every verdict type has an exhaustiveness router, that the field a join terminates on is a carried identity key, that anything writing a pending marker has something that clears it, that resume argv has the runner-specific shape while preserving the current sandbox and scope, that the unspoofable session-key environment seam is symmetric for both runners, that session files are recorded, survive submission, and are cleared on terminal retirement or reaping, that every `signalbox` subcommand the topology calls actually exists, and that no primitive is named `runner`, `pipeline`, or `orchestrator`.
+`tests/test_topology.py` is the part worth reading first. Together with the focused dispatch and act tests, it asserts things no runtime error would ever report: that the primitive count derived from the live topology fits the repository's intended connection ceiling with headroom to spare, that the dashboard observes every topic the topology publishes, that no SSE subscription relies on a wildcard (they are silently ignored — health said `ok` while delivering zero bytes), that every subscription has a publisher and every published event has a consumer, that both sides of every depth guard are exclusive so a loop cannot run forever *or* terminate early, that every verdict type has an exhaustiveness router, that the field a join terminates on is a carried identity key, that anything writing a pending marker has something that clears it, that resume argv has the runner-specific shape while preserving the current sandbox and scope, that the unspoofable session-key environment seam is symmetric for both runners, that session files are recorded, survive submission, and are cleared on terminal retirement or reaping, that every `signalbox` subcommand the topology calls actually exists, and that no primitive is named `runner`, `pipeline`, or `orchestrator`.
 
 Each of those is a bug that already happened once.
 

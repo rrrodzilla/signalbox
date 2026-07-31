@@ -321,11 +321,15 @@ export SIGNALBOX_VAULT=/absolute/path/to/notes-vault
 ./bin/harness.sh up           # engine + dashboard
 ./bin/harness.sh forward owner/name   # tunnel that repo's check suites in
 ./bin/harness.sh status       # what is listening, and which runs have worktrees
+./bin/harness.sh down         # stop only the engine this checkout started
+./bin/harness.sh restart      # stop that owned engine, then start it again
 
 ./bin/harness.sh launch 42 --repo owner/name --repo-path ~/code/my-repo
 ```
 
-Watch it at **http://127.0.0.1:8103** (the run board) and **http://127.0.0.1:8102** (the live topology). A run's whole trail is in the event store; the viewer exposes it read-only at `GET /history?stream=8101`, with no caching, and then follows the live SSE stream. The default maps stream 8101 to `~/.local/share/emergent/signalbox/events.db`; additional engines can be mapped with repeated `signalbox dashboard --store PORT=DB-PATH` arguments. Missing stores simply produce an empty history. `bin/harness.sh down` sends SIGTERM so that trail flushes.
+Watch it at **http://127.0.0.1:8103** (the run board) and **http://127.0.0.1:8102** (the live topology). A run's whole trail is in the event store; the viewer exposes it read-only at `GET /history?stream=8101`, with no caching, and then follows the live SSE stream. The default maps stream 8101 to `~/.local/share/emergent/signalbox/events.db`; additional engines can be mapped with repeated `signalbox dashboard --store PORT=DB-PATH` arguments. Missing stores simply produce an empty history. `bin/harness.sh down` sends SIGTERM so that trail flushes, but only to the engine whose ownership this checkout can prove; `restart` applies the same ownership check before starting another engine. If an engine is running but ownership cannot be proven, both commands refuse with `engine ownership not proven; stop it manually, then recover with: rm -f <checkout>/.harness/engine.pid <checkout>/.harness/engine.owner`. `status` remains useful without an ownership record: it falls back to reporting live engines without treating them as safe to stop.
+
+The harness keeps its local process state under `.harness/`: `engine.pid` and `engine.owner` identify the engine this checkout started, alongside `engine.log`, `dashboard.log`, `dashboard.pid`, and the forwarder's `forward.log`, `forward.pid`, `forward.child.pid`, `forward.ready`, `forward.repo`, and `forward.owner` files.
 
 When a run parks at the human gate, `notify` prints the paste-ready command
 `signalbox approve <run-id>`. Run that exact invocation to approve it; there is

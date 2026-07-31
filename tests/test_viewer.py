@@ -581,40 +581,46 @@ def _lifecycle_with_events(
     _store(store, events)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    engine_marker = tmp_path / "engine-running"
-    engine_marker.touch()
+    engine = subprocess.Popen(["sleep", "30"])
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    stat_fields = Path(f"/proc/{engine.pid}/stat").read_text().rsplit(") ", 1)[1]
+    start_time = stat_fields.split()[19]
+    (log_dir / "engine.pid").write_text(str(engine.pid))
+    (log_dir / "engine.owner").write_text(
+        f"{engine.pid} {start_time} {log_dir.resolve()}\n"
+    )
     pgrep = fake_bin / "pgrep"
     pgrep.write_text(
         "#!/usr/bin/env bash\n"
-        f"[[ -f {engine_marker} ]] || exit 1\n"
-        "printf '424242\\n'\n"
+        f"kill -0 {engine.pid} 2>/dev/null || exit 1\n"
+        f"printf '%s\\n' {engine.pid}\n"
     )
     pgrep.chmod(0o755)
     if failing_ps:
         ps = fake_bin / "ps"
         ps.write_text("#!/usr/bin/env bash\nexit 1\n")
         ps.chmod(0o755)
-    kill = fake_bin / "kill"
-    kill.write_text(
-        "#!/usr/bin/env bash\n"
-        f"rm -f {engine_marker}\n"
-    )
-    kill.chmod(0o755)
     state = tmp_path / "state"
-    return subprocess.run(
-        [ROOT / "bin/harness.sh", command, *extra_args],
-        env={
-            **os.environ,
-            "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "SIGNALBOX_EVENT_STORE": str(store),
-            "SIGNALBOX_LOG_DIR": str(tmp_path / "logs"),
-            "SIGNALBOX_STATE": str(state),
-        },
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
+    try:
+        return subprocess.run(
+            [ROOT / "bin/harness.sh", command, *extra_args],
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "SIGNALBOX_EVENT_STORE": str(store),
+                "SIGNALBOX_LOG_DIR": str(log_dir),
+                "SIGNALBOX_STATE": str(state),
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    finally:
+        if engine.poll() is None:
+            engine.terminate()
+        engine.wait(timeout=5)
 
 
 @pytest.mark.parametrize("command", ["down", "restart"])
@@ -687,7 +693,8 @@ def test_down_reaps_the_captured_engine_tree_without_matching_process_names(
     exec_handler = fake_bin / "exec-handler"
     exec_handler.write_text(
         "#!/usr/bin/env python3\n"
-        "import signal, subprocess, sys, time\n"
+        "import ctypes, signal, subprocess, sys, time\n"
+        "ctypes.CDLL(None).prctl(15, b'emergent', 0, 0, 0)\n"
         "signal.signal(signal.SIGCHLD, signal.SIG_IGN)\n"
         "child = subprocess.Popen(['sleep', '30'])\n"
         "open(sys.argv[1], 'w').write(str(child.pid))\n"
@@ -706,7 +713,9 @@ def test_down_reaps_the_captured_engine_tree_without_matching_process_names(
         [os.environ.get("PYTHON", "python3"), engine_script, exec_handler,
          runner_pidfile, primitive_pidfile]
     )
-    unrelated = subprocess.Popen([exec_handler, unrelated_runner_pidfile])
+    unrelated = subprocess.Popen(
+        [exec_handler, unrelated_runner_pidfile, "-c", tmp_path / "other.toml"]
+    )
     unrelated_runner_pid: int | None = None
     try:
         deadline = time.monotonic() + 5
@@ -719,6 +728,15 @@ def test_down_reaps_the_captured_engine_tree_without_matching_process_names(
         primitive_pid = int(primitive_pidfile.read_text())
         runner_pid = int(runner_pidfile.read_text())
         unrelated_runner_pid = int(unrelated_runner_pidfile.read_text())
+
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        stat_fields = Path(f"/proc/{engine.pid}/stat").read_text().rsplit(") ", 1)[1]
+        start_time = stat_fields.split()[19]
+        (log_dir / "engine.pid").write_text(str(engine.pid))
+        (log_dir / "engine.owner").write_text(
+            f"{engine.pid} {start_time} {log_dir.resolve()}\n"
+        )
 
         pgrep = fake_bin / "pgrep"
         pgrep.write_text(
@@ -744,7 +762,7 @@ def test_down_reaps_the_captured_engine_tree_without_matching_process_names(
             env={
                 **os.environ,
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
-                "SIGNALBOX_LOG_DIR": str(tmp_path / "logs"),
+                "SIGNALBOX_LOG_DIR": str(log_dir),
             },
             check=False,
             capture_output=True,
@@ -777,6 +795,49 @@ def test_down_reaps_the_captured_engine_tree_without_matching_process_names(
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("command", ["down", "restart"])
+def test_teardown_refuses_an_unowned_emergent_and_leaves_it_running(
+    tmp_path: Path, command: str
+):
+    """A different checkout's engine may be visible, but is never ours to stop."""
+    decoy = subprocess.Popen(
+        [
+            os.environ.get("PYTHON", "python3"),
+            "-c",
+            (
+                "import ctypes,time; "
+                "ctypes.CDLL(None).prctl(15, b'emergent', 0, 0, 0); "
+                "time.sleep(30)"
+            ),
+            "-c",
+            str(tmp_path / "other-emergent.toml"),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if Path(f"/proc/{decoy.pid}/comm").read_text().strip() == "emergent":
+                break
+            time.sleep(0.01)
+        result = subprocess.run(
+            [ROOT / "bin/harness.sh", command, "--force"],
+            env={**os.environ, "SIGNALBOX_LOG_DIR": str(tmp_path / "logs")},
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        assert result.returncode == 1
+        assert "engine ownership not proven" in result.stderr
+        assert "recover with: rm -f" in result.stderr
+        assert decoy.poll() is None
+    finally:
+        if decoy.poll() is None:
+            decoy.terminate()
+        decoy.wait(timeout=5)
 
 
 def test_down_allows_a_halted_run_with_a_retained_worktree(tmp_path: Path):

@@ -14,6 +14,8 @@ CONFIG="${SIGNALBOX_CONFIG:-$ROOT/emergent.toml}"
 LOG_DIR="${SIGNALBOX_LOG_DIR:-$ROOT/.harness}"
 EVENT_STORE="${SIGNALBOX_EVENT_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/emergent/signalbox/events.db}"
 ENGINE_LOG="$LOG_DIR/engine.log"
+ENGINE_PIDFILE="$LOG_DIR/engine.pid"
+ENGINE_OWNERSHIP_FILE="$LOG_DIR/engine.owner"
 DASHBOARD_LOG="$LOG_DIR/dashboard.log"
 DASHBOARD_PIDFILE="$LOG_DIR/dashboard.pid"
 FORWARD_LOG="$LOG_DIR/forward.log"
@@ -104,7 +106,63 @@ install() {
 
 # ── lifecycle ────────────────────────────────────────────────────────────────
 
-engine_pids() { pgrep -x emergent 2>/dev/null || true; }
+process_start_time() {
+  local pid="$1" raw="" rest=""
+  local -a fields=()
+  IFS= read -r raw 2>/dev/null <"/proc/$pid/stat" || true
+  [[ -n "$raw" && "$raw" == *") "* ]] || return 0
+  # /proc comm may contain spaces and close parens, so field counting starts
+  # only after its final `) `.
+  rest="${raw##*) }"
+  read -r -a fields <<<"$rest" 2>/dev/null || true
+  printf '%s' "${fields[19]:-}"
+}
+
+process_is_live() {
+  local pid="$1" raw="" rest="" state=""
+  IFS= read -r raw 2>/dev/null <"/proc/$pid/stat" || true
+  [[ -n "$raw" && "$raw" == *") "* ]] || return 1
+  rest="${raw##*) }"
+  read -r state _ <<<"$rest" 2>/dev/null || true
+  [[ -n "$state" && "$state" != "Z" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+engine_owned_pid() {
+  [[ -f "$ENGINE_PIDFILE" ]] || return 1
+  local pid="" rec_pid="" rec_start="" rec_dir=""
+  local current_start="" current_dir=""
+  pid="$(cat "$ENGINE_PIDFILE" 2>/dev/null)" || return 1
+  [[ -n "$pid" ]] || return 1
+  read -r rec_pid rec_start rec_dir 2>/dev/null <"$ENGINE_OWNERSHIP_FILE" || true
+  current_start="$(process_start_time "$pid")"
+  current_dir="$(cd "$LOG_DIR" 2>/dev/null && pwd -P)" || true
+  [[ -n "$rec_pid" && "$rec_pid" == "$pid" \
+    && -n "$rec_start" && "$rec_start" == "$current_start" \
+    && -n "$rec_dir" && "$rec_dir" == "$current_dir" ]] || return 1
+  process_is_live "$pid" || return 1
+  printf '%s' "$pid"
+}
+
+# Reporting and launch gating remain useful for an engine started before the
+# ownership record existed. Destructive paths use engine_owned_pid directly.
+engine_pids() {
+  local pid=""
+  pid="$(engine_owned_pid || true)"
+  if [[ -n "$pid" ]]; then
+    printf '%s\n' "$pid"
+  else
+    pgrep -x emergent 2>/dev/null || true
+  fi
+}
+
+require_owned_engine() {
+  local pid=""
+  pid="$(engine_owned_pid || true)"
+  if [[ -z "$pid" && -n "$(engine_pids)" ]]; then
+    fail "engine ownership not proven; stop it manually, then recover with: rm -f $ENGINE_PIDFILE $ENGINE_OWNERSHIP_FILE"
+  fi
+  printf '%s' "$pid"
+}
 
 # Snapshot the whole primitive tree while the engine is still its root. Once
 # SIGTERM makes the engine exit, its direct children are reparented and neither
@@ -229,11 +287,22 @@ start_engine() {
 
   say "starting the engine from $CONFIG"
   nohup emergent -c "$CONFIG" >"$ENGINE_LOG" 2>&1 &
+  local engine_pid="$!"
+  printf '%s' "$engine_pid" >"$ENGINE_PIDFILE"
   local deadline=$((SECONDS + 45))
   until port_held "$CONTROL_PORT"; do
     ((SECONDS < deadline)) || fail "control endpoint never came up; see $ENGINE_LOG"
     sleep 1
   done
+  local engine_start="" engine_dir=""
+  engine_start="$(process_start_time "$engine_pid")"
+  engine_dir="$(cd "$LOG_DIR" 2>/dev/null && pwd -P)" || true
+  if [[ -z "$engine_start" || -z "$engine_dir" ]] \
+    || ! kill -0 "$engine_pid" 2>/dev/null; then
+    fail "engine ownership could not be recorded; stop pid $engine_pid manually, then recover with: rm -f $ENGINE_PIDFILE $ENGINE_OWNERSHIP_FILE"
+  fi
+  printf '%s %s %s\n' "$engine_pid" "$engine_start" "$engine_dir" \
+    >"$ENGINE_OWNERSHIP_FILE"
 
   # Always replace it rather than reusing whatever holds the port. The viewer is
   # disposable by construction — no subscription, no state — so the only thing
@@ -273,7 +342,7 @@ dashboard_down() {
 
 down() {
   local pids descendants=""
-  pids="$(engine_pids)"
+  pids="$(require_owned_engine)"
   if [[ -z "$pids" ]]; then
     say "no engine running"
   else
@@ -283,10 +352,10 @@ down() {
     # trail, which is the only record a run has.
     xargs -r kill -TERM <<<"$pids"
     local deadline=$((SECONDS + 20))
-    while [[ -n "$(engine_pids)" ]]; do
+    while process_is_live "$pids"; do
       if ((SECONDS >= deadline)); then
         say "  did not drain in 20s, forcing"
-        xargs -r kill -9 <<<"$(engine_pids)"
+        kill -9 "$pids" 2>/dev/null || true
         break
       fi
       sleep 1
@@ -310,6 +379,7 @@ down() {
   # The viewer holds no subscription and flushes nothing, but leaving it up means
   # `restart` silently keeps serving the package it started with.
   dashboard_down
+  rm -f "$ENGINE_PIDFILE" "$ENGINE_OWNERSHIP_FILE"
   say "engine stopped"
 }
 
@@ -457,19 +527,6 @@ forward_pid() {
   local pid
   pid="$(cat "$FORWARD_PIDFILE" 2>/dev/null)" || return 1
   [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && printf '%s' "$pid"
-}
-
-process_start_time() {
-  local pid="$1" raw="" rest=""
-  local -a fields=()
-  IFS= read -r raw 2>/dev/null <"/proc/$pid/stat" || true
-  [[ -n "$raw" && "$raw" == *") "* ]] || return 0
-  # /proc comm may contain spaces and close parens, so field counting starts
-  # only after its final `) `. Without readable procfs ownership cannot be
-  # proven; stops then leave an orphan for the existing HTTP 422 repair path.
-  rest="${raw##*) }"
-  read -r -a fields <<<"$rest" 2>/dev/null || true
-  printf '%s' "${fields[19]:-}"
 }
 
 forward_owns_hook() {
@@ -752,7 +809,7 @@ case "${1:-}" in
   install)   shift; install "$@" ;;
   up)        shift; up "$@" ;;
   down)      shift; guard_down down "$@"; forward_down; down ;;
-  restart)   shift; guard_down restart "$@"; preflight; forward_down; down; start_engine ;;
+  restart)   shift; guard_down restart "$@"; require_owned_engine >/dev/null; preflight; forward_down; down; start_engine ;;
   status)    shift; status "$@" ;;
   launch)    shift; launch "$@" ;;
   dogfood)   shift; dogfood "$@" ;;

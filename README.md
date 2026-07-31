@@ -98,26 +98,23 @@ run.requested ─> workspace.prepare-attempted
                          pr.opened
                              │
      (GitHub check_suite) ─> checks.observed ─> checks.reported
-                                                    │
-                                      ┌─────────────┴─────────────┐
-                                 checks.passed               checks.failed
-                                      │                           │
-                             ┌────────┴────────┐          checks.detail-attempted
-                       pr.merge-attempted  notes.planned           │
-                              │                │            ┌──────┴───────────┐
-                       ┌──────┴───────┐   note.written  checks.detailed  checks.detail-failed
-                    pr.merged  pr.merge-failed │                 │             │
-                       │           (refusal) notes.synced        └──────┬──────┘
-                       │                         │                     ▼
-                       │                         │            shard.changes-requested
-                       │                         │                 (fix.opened)
-                       └──────────────┬──────────┘
-                                      ▼
-                              completion.closed
-                                      │
-                           ┌──────────┴──────────┐
-                    run.completed           run.halted
-                      (both arms)            (timed out)
+                                                    ├─> checks.passed
+                                                    │      ├─> pr.merge-attempted
+                                                    │      │      ├─> pr.merged
+                                                    │      │      └─> pr.merge-failed  (refusal)
+                                                    │      └─> notes.planned
+                                                    │             ├─> notes.plan-accepted
+                                                    │             │      ├─> note.drafted ─> note.written ─> notes.synced
+                                                    │             │      └─> (zero notes) ────────────────> notes.synced
+                                                    │             └─> notes.invalid-verdict ─> run.halted
+                                                    └─> checks.failed ─> checks.detail-attempted
+                                                           ├─> checks.detailed ──────┐
+                                                           └─> checks.detail-failed ─┴─> shard.changes-requested
+                                                                                         (fix.opened)
+
+                pr.merged + notes.synced ─> completion.closed
+                                                  ├─> run.completed  (both arms)
+                                                  └─> run.halted     (timed out)
 ```
 
 The remaining ten formerly stranded outcomes share a bounded diagnosis path:

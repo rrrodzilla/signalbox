@@ -34,7 +34,9 @@ CARRIED_KEYS: tuple[str, ...] = (
     # join without borrowing or resetting another loop's generic attempt key.
     "remediation_attempt",
     # The remediate role chooses a topic, while fixed topology guards decide
-    # whether that declared pre-gate re-entry is permitted.
+    # whether that declared pre-gate re-entry is permitted. Suite observations
+    # must never be carried here: only route-suite-ran can honestly assert them,
+    # or a model could tell the gate that the suite passed across this seam.
     "resume_topic",
     "stage_id",
     "stage_index",

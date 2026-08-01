@@ -976,8 +976,8 @@ publishes = ["gate.invalid-verdict"]
 #
 # The remediation budget has its own carried counter. Entry increments rather
 # than resets it, so a resumed run that strands again cannot regain attempts.
-# The model may choose only a carried `resume_topic`; fixed-topic guards enforce
-# the declared pre-gate allowlist and strip old verdicts before re-entry.
+# The model may choose only the carried `run.built` resume topic; its fixed-topic
+# guard strips old verdicts before re-entry.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [[handlers]]
@@ -1030,18 +1030,10 @@ subscribes = ["remediation.assessed"]
 publishes = ["run.built"]
 
 [[handlers]]
-name = "guard-remediation-resume-suite"
-path = "~/.local/share/emergent/primitives/bin/exec-handler"
-args = ["-s", "remediation.assessed", "--publish-as", "suite.ran", "--",
-        "jq", "-c", 'select(.remediation == "resume" and .resume_topic == "suite.ran" and (.remediation_attempt | type) == "number" and .remediation_attempt < 3) | del(.remediation, .resume_topic, .decision, .verdict, .reason)']
-subscribes = ["remediation.assessed"]
-publishes = ["suite.ran"]
-
-[[handlers]]
 name = "route-remediation-resume-refused"
 path = "~/.local/share/emergent/primitives/bin/exec-handler"
 args = ["-s", "remediation.assessed", "--publish-as", "remediation.closed", "--",
-        "jq", "-c", 'select(.remediation == "resume" and (.remediation_attempt | type) == "number" and .remediation_attempt < 3 and ((.resume_topic // "") | IN("run.built", "suite.ran") | not)) | . + {reason: "remediation resume refused topic: \(.resume_topic // "missing")"}']
+        "jq", "-c", 'select(.remediation == "resume" and (.remediation_attempt | type) == "number" and .remediation_attempt < 3 and ((.resume_topic // "") | IN("run.built") | not)) | . + {reason: "remediation resume refused topic: \(.resume_topic // "missing")"}']
 subscribes = ["remediation.assessed"]
 publishes = ["remediation.closed"]
 

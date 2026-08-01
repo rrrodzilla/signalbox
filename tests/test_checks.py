@@ -604,6 +604,28 @@ def test_product_keys_are_a_narrow_exemption_from_carried_identity(monkeypatch):
         assert result.product_omitted == sorted(product_keys)
 
 
+def test_suite_observations_are_not_carried_across_model_seams():
+    """Only route-suite-ran can honestly assert a suite result.
+
+    Carrying suite observations across a model seam would let a model tell the
+    gate the suite passed, violating the gate's central safety property.
+    """
+    from signalbox.identity import CARRIED_KEYS
+
+    suite_observations = {
+        "ran",
+        "ok",
+        "passed",
+        "failed",
+        "errored",
+        "exit_code",
+        "command",
+        "output",
+    }
+
+    assert suite_observations.isdisjoint(CARRIED_KEYS)
+
+
 def test_every_carried_key_survives_every_payload_building_seam():
     """CARRIED_KEYS is the contract across payload-building seams.
 

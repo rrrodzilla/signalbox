@@ -23,10 +23,9 @@ judgment: diagnose the worktree but never edit it.
 literal strings the routers match. `reason` must be a non-empty string grounded
 in evidence you read during this invocation.
 
-For `resume`, also include `"resume_topic": "run.built"` or
-`"resume_topic": "suite.ran"`. `resume_topic` is the carried key that records
-the chosen re-entry point. This is the complete declared re-entry allowlist;
-the topology refuses every other topic.
+For `resume`, also include `"resume_topic": "run.built"`. `resume_topic` is the
+carried key that records the chosen re-entry point. This is the complete
+declared re-entry allowlist; the topology refuses every other topic.
 
 ## Read the failure payload
 
@@ -57,7 +56,7 @@ directory.
 | The fault requires a code, configuration, credential, permission, conflict, or operator decision | `halt` |
 | The payload or worktree lacks enough evidence for a safe retry | `halt` |
 | A second observation may succeed without changing the worktree or pipeline state | `retry` |
-| The condition has cleared and the unchanged worktree can safely rerun from an allowlisted pre-gate point | `resume` with `resume_topic` |
+| The condition has cleared and the unchanged worktree can safely rebase and rerun its suite | `resume` with `resume_topic` set to `run.built` |
 | The same condition remains after retry | `halt` |
 
 ## Halt
@@ -77,10 +76,9 @@ condition again," not "repair and rerun the pipeline."
 ## Resume
 
 Choose `resume` only when evidence shows the condition has cleared without any
-filesystem repair and the existing run can safely execute again from one of
-the declared pre-gate re-entry points. Choose `run.built` when the run must
-rebase and rerun its suite; choose `suite.ran` when neither step needs to run
-again. A re-observable condition calls for `retry`; a re-runnable condition
+filesystem repair and the existing run can safely execute again from the
+declared pre-gate re-entry point, `run.built`, which rebases the run and reruns
+its suite. A re-observable condition calls for `retry`; a re-runnable condition
 calls for `resume`.
 
 Name the chosen point in `resume_topic`, but do not publish it or perform the

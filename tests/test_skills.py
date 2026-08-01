@@ -114,6 +114,22 @@ def test_assess_skill_matches_the_suite_outcome_contract():
         assert evidence_field in body
 
 
+def test_remediate_skill_names_only_the_wired_resume_topic():
+    """A documented resume point must have a topology handler that consumes it."""
+    body = (SKILLS / "signalbox-remediate" / "SKILL.md").read_text()
+    prose = " ".join(body.split())
+
+    assert 'include `"resume_topic": "run.built"`' in prose
+    assert "complete declared re-entry allowlist" in prose
+    assert "`resume_topic` set to `run.built`" in prose
+    assert "declared pre-gate re-entry point, `run.built`" in prose
+    assert "`suite.ran`" not in body
+    assert (
+        "Choose `run.built` when the run must rebase and rerun its suite; choose "
+        "`suite.ran` when neither step needs to run again"
+    ) not in prose
+
+
 def test_plan_notes_skill_evidences_an_empty_reviewed_plan():
     """An empty plan must prove it read the vault, not deny the precondition."""
     body = (SKILLS / "signalbox-plan-notes" / "SKILL.md").read_text()

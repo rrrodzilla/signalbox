@@ -545,21 +545,20 @@ def test_remediation_selectors_execute_as_a_bounded_exhaustive_loop():
         "issue": 87,
         "remediation_attempt": 1,
     }
-    assert route("guard-remediation-resume-suite", resume) is None
     assert route("guard-remediation-exhaust", resume) is None
     assert route("route-remediation-invalid", resume) is None
 
     suite_resume = {**resume, "resume_topic": "suite.ran"}
-    assert route("guard-remediation-resume-suite", suite_resume) == {
-        "run_id": "sb-87",
-        "issue": 87,
-        "remediation_attempt": 1,
+    suite_refused = route("route-remediation-resume-refused", suite_resume)
+    assert suite_refused == {
+        **suite_resume,
+        "reason": "remediation resume refused topic: suite.ran",
     }
     assert route("guard-remediation-resume-built", suite_resume) is None
+    assert route("route-remediation-closed-halted", suite_refused) == suite_refused
 
     refused = {**resume, "resume_topic": "gate.cleared"}
     assert route("guard-remediation-resume-built", refused) is None
-    assert route("guard-remediation-resume-suite", refused) is None
     refused_closed = route("route-remediation-resume-refused", refused)
     assert refused_closed == {
         **refused,
@@ -588,6 +587,26 @@ def test_remediation_selectors_execute_as_a_bounded_exhaustive_loop():
     assert route("route-remediation-invalid", invalid) == invalid
     assert route("route-remediation-invalid-halted", invalid) == {
         **invalid, "reason": "remediation returned an invalid verdict",
+    }
+
+
+def test_remediation_run_built_resume_reaches_the_reentry_payload():
+    """The surviving resume arm executes its jq and reaches a clean run payload."""
+    assessed = {
+        "run_id": "sb-150",
+        "issue": 150,
+        "remediation_attempt": 1,
+        "remediation": "resume",
+        "resume_topic": "run.built",
+        "decision": "clear",
+        "verdict": "done",
+        "reason": "transient failure cleared",
+    }
+
+    assert route("guard-remediation-resume-built", assessed) == {
+        "run_id": "sb-150",
+        "issue": 150,
+        "remediation_attempt": 1,
     }
 
 
@@ -674,7 +693,7 @@ def test_remediation_subgraph_only_publishes_declared_pre_gate_reentries():
         "branch.pushed", "pr.opened", "run.completed",
     }
     assert published_by_remediation.isdisjoint(post_gate)
-    reentry_allowlist = {"run.built", "suite.ran"}
+    reentry_allowlist = {"run.built"}
     non_remediation_exits = {
         topic for topic in published_by_remediation
         if not topic.startswith("remediation.")
@@ -750,7 +769,6 @@ def test_stateful_joins_publish_neutral_topics_before_run_terminals():
         ("guard-ci-review-rounds-continue", "guard-ci-review-rounds-exhaust"),
         ("guard-remediation-retry", "guard-remediation-exhaust"),
         ("guard-remediation-resume-built", "guard-remediation-exhaust"),
-        ("guard-remediation-resume-suite", "guard-remediation-exhaust"),
     ],
 )
 def test_depth_guards_have_both_sides(continue_handler, exhaust_handler):

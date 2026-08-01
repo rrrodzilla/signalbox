@@ -6,7 +6,7 @@ The name is from railway signaling. A signal box is where the interlocking lives
 
 ## The shape
 
-One engine. Four sources, one hundred twenty-eight handlers, eleven sinks, and no script that knows what comes next.
+One engine. Four sources, one hundred twenty-seven handlers, eleven sinks, and no script that knows what comes next.
 
 ```
 route-run-requested ─> [run.requested] ─> prepare-workspace, dashboard
@@ -63,9 +63,6 @@ route-plan-approved ─> [plan.accepted] ─> open-first-stage, dashboard
 [run.built]
 ├─< from: join-run, guard-remediation-resume-built
 └─> to: rebase-branch, dashboard
-[suite.ran]
-├─< from: route-suite-ran, guard-remediation-resume-suite
-└─> to: assess, dashboard
 [stage.opened]
 ├─< from: open-first-stage, guard-stages-advance
 └─> to: split-shards, dashboard
@@ -73,19 +70,11 @@ route-plan-approved ─> [plan.accepted] ─> open-first-stage, dashboard
 ├─< from: rebase-branch
 └─> to: route-rebase-ok, route-rebase-conflict, route-rebase-invalid,
         dashboard
-[gate.assessed]
-├─< from: assess
-└─> to: route-gate-auto, route-gate-human, route-gate-blocked,
-        route-gate-invalid, dashboard
 split-shards ─> [shard.opened] ─> dispatch-implement, dashboard
 route-rebase-ok ─> [branch.rebased] ─> run-suite, dashboard
 [branch.rebase-conflicted]
 ├─< from: route-rebase-conflict
 └─> to: route-remediation-open, dashboard, notify
-route-gate-auto ─> [gate.cleared] ─> push-branch, dashboard
-[approval.requested]
-├─< from: route-gate-human
-└─> to: mark-approval-pending, dashboard, notify
 route-file-written ─> [shard.file-written] ─> scope-guard, dashboard
 route-check-ran ─> [shard.check-ran] ─> dashboard
 [shard.submitted]
@@ -99,9 +88,6 @@ route-check-suite ─> [checks.observed] ─> rehydrate-pr, dashboard
 [suite.run-attempted]
 ├─< from: run-suite
 └─> to: route-suite-ran, route-suite-errored, dashboard
-[branch.push-attempted]
-├─< from: push-branch
-└─> to: route-push-pushed, route-push-failed, dashboard
 [checks.reported]
 ├─< from: rehydrate-pr
 └─> to: route-checks-passed, route-checks-failed, dashboard
@@ -113,20 +99,25 @@ route-shard-done ─> [shard.built] ─> review-shard, dashboard
 [stage.closed (halt)]
 ├─< from: join-stage
 └─> to: route-stage-clean, route-stage-dirty, dashboard
+route-suite-ran ─> [suite.ran] ─> assess, dashboard
 [suite.errored (halt)]
 ├─< from: route-suite-errored
 └─> to: route-suite-error-halted, dashboard, notify
-route-push-pushed ─> [branch.pushed] ─> open-pr, dashboard
-route-push-failed ─> [branch.push-failed] ─> route-remediation-open, dashboard
+[branch.push-attempted]
+├─< from: push-branch
+└─> to: route-push-pushed, route-push-failed, dashboard
 [review.submitted (halt)]
 ├─< from: review-shard
 └─> to: route-approved, route-changes, route-review-invalid,
         route-ci-approved, route-ci-changes, route-ci-review-invalid-halted,
         dashboard
 route-stage-clean ─> [stage.mergeable] ─> merge-stage, dashboard
-[pr.open-attempted]
-├─< from: open-pr
-└─> to: route-open-opened, route-open-failed, dashboard
+[gate.assessed]
+├─< from: assess
+└─> to: route-gate-auto, route-gate-human, route-gate-blocked,
+        route-gate-invalid, dashboard
+route-push-pushed ─> [branch.pushed] ─> open-pr, dashboard
+route-push-failed ─> [branch.push-failed] ─> route-remediation-open, dashboard
 route-checks-passed ─> [checks.passed] ─> merge-pr, plan-notes, dashboard
 route-checks-failed ─> [checks.failed] ─> detail-failed-checks, dashboard
 route-approved ─> [shard.approved] ─> join-stage, dashboard
@@ -141,8 +132,13 @@ route-ci-approved ─> [ci.fix-approved] ─> commit-ci-fix, dashboard
 [merge.attempted]
 ├─< from: merge-stage
 └─> to: route-merge-ok, route-merge-conflict, dashboard
-route-open-opened ─> [pr.opened] ─> mark-pr-pending, dashboard
-route-open-failed ─> [pr.open-failed] ─> route-remediation-open, dashboard
+route-gate-auto ─> [gate.cleared] ─> push-branch, dashboard
+[approval.requested]
+├─< from: route-gate-human
+└─> to: mark-approval-pending, dashboard, notify
+[pr.open-attempted]
+├─< from: open-pr
+└─> to: route-open-opened, route-open-failed, dashboard
 [checks.detail-attempted]
 ├─< from: detail-failed-checks
 └─> to: route-detail-detailed, route-detail-failed, dashboard
@@ -160,6 +156,8 @@ route-open-failed ─> [pr.open-failed] ─> route-remediation-open, dashboard
 ├─< from: route-merge-ok
 └─> to: guard-stages-advance, guard-stages-exhaust, join-run, dashboard
 route-merge-conflict ─> [stage.conflicted] ─> split-shards, dashboard
+route-open-opened ─> [pr.opened] ─> mark-pr-pending, dashboard
+route-open-failed ─> [pr.open-failed] ─> route-remediation-open, dashboard
 route-detail-detailed ─> [checks.detailed] ─> map-ci-to-findings, dashboard
 route-detail-failed ─> [checks.detail-failed] ─> map-ci-to-findings, dashboard
 [ci.commit-attempted]
@@ -223,9 +221,8 @@ The remaining ten formerly stranded outcomes share a bounded diagnosis path:
 [remediation.assessed]
 ├─< from: remediate
 └─> to: guard-remediation-retry, guard-remediation-exhaust,
-        guard-remediation-resume-built, guard-remediation-resume-suite,
-        route-remediation-resume-refused, route-remediation-halt,
-        route-remediation-invalid, dashboard
+        guard-remediation-resume-built, route-remediation-resume-refused,
+        route-remediation-halt, route-remediation-invalid, dashboard
 [remediation.failed (halt)]
 ├─< from: remediate
 └─> to: route-remediation-failed-halted, dashboard
@@ -300,9 +297,9 @@ Cross-vendor by design: codex writes the code, Claude reviews it, so no model ap
 `remediate` is a judging node, not a repair node. It diagnoses a stranded
 post-workspace outcome and returns `retry` for another bounded look, `resume`
 at a declared pre-gate re-entry point, or `halt` with a reason for a human. A
-resume at `run.built` re-rebases the branch and re-runs the suite; a resume at
-`suite.ran` does neither. In both cases the run re-enters before `assess` and
-must earn a fresh gate verdict. The remediation subgraph cannot publish any
+resume at `run.built` re-rebases the branch, re-runs the suite, and re-enters
+before `assess`, where it must earn a fresh gate verdict. The remediation
+subgraph cannot publish any
 post-gate-decision event: in particular it cannot publish `gate.cleared`,
 `approval.granted`, or a promote-path event. That prohibition is topological;
 allowing remediation to clear the gate would restore exactly the bypass the

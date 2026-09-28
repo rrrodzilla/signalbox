@@ -1168,17 +1168,37 @@ def test_every_non_deterministic_node_publishes_invocation_provenance():
     """
     assert set(MODEL_NODES_BY_ROLE) == set(ROLE_PRODUCED_TOPICS)
 
-    primitives = HANDLERS + SINKS
+    # Every invoker posts model.invoked to control; this route is the one edge
+    # that turns those posts into the topic.
+    assert "http.request" in named(SOURCES, "control")["publishes"]
+    route = named(HANDLERS, "route-model-invoked")
+    assert route["subscribes"] == ["http.request"]
+    assert route["publishes"] == ["model.invoked"]
+
     for role, node_name in MODEL_NODES_BY_ROLE.items():
-        node = named(primitives, node_name)
+        if role in {"implement", "fix"}:
+            # Acting nodes are sinks, which cannot declare a publish (emergent
+            # 0.14 rejects the key). Prove instead that the sink runs the
+            # dispatcher for this role; test_models proves dispatch posts
+            # provenance for it, success or failure.
+            node = named(SINKS, node_name)
+            assert node["args"][-4:] == [
+                "signalbox", "dispatch", "--skill", f"signalbox-{role}"
+            ], f"{node_name} no longer runs the provenance-posting dispatcher"
+            assert ROLE_PRODUCED_TOPICS[role] == "shard.submitted"
+            continue
+        node = named(HANDLERS, node_name)
         produced = set(node.get("publishes", []))
         assert "model.invoked" in produced, f"{node_name} loses invocation provenance"
-        if role not in {"implement", "fix"}:
-            assert ROLE_PRODUCED_TOPICS[role] in produced, (
-                f"{node_name} disagrees with ROLE_PRODUCED_TOPICS[{role!r}]"
-            )
-        else:
-            assert ROLE_PRODUCED_TOPICS[role] == "shard.submitted"
+        assert ROLE_PRODUCED_TOPICS[role] in produced, (
+            f"{node_name} disagrees with ROLE_PRODUCED_TOPICS[{role!r}]"
+        )
+
+
+def test_no_sink_declares_a_publish():
+    """Sinks cannot publish, and emergent 0.14 refuses to load one that says so."""
+    offenders = [sink["name"] for sink in SINKS if "publishes" in sink]
+    assert not offenders, f"sinks declaring publishes: {offenders}"
 
 
 def test_readme_models_table_covers_every_model_node():

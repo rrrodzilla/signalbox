@@ -543,9 +543,10 @@ path = "~/.local/share/emergent/primitives/bin/exec-sink"
 args = ["-s", "shard.opened", "-t", "2400000", "--max-concurrent", "40", "--",
         "signalbox", "dispatch", "--skill", "signalbox-implement"]
 subscribes = ["shard.opened"]
-# Dispatch provenance is load-bearing because acting agents publish their own
-# verdicts and otherwise leave no topology-visible model edge.
-publishes = ["model.invoked"]
+# No `publishes`: a sink cannot publish, and emergent 0.14 rejects the key on
+# one. Dispatch provenance is still load-bearing, because acting agents publish
+# their own verdicts and otherwise leave no model edge; `signalbox dispatch`
+# posts model.invoked to control, and route-model-invoked republishes it.
 
 [[sinks]]
 name = "dispatch-fix"
@@ -562,7 +563,7 @@ subscribes = ["fix.opened"]
 # inherits its shard's declared file list, so concurrent fixers are disjoint by
 # the same invariant as their implement pass, and the session store is keyed on
 # (run_id, shard_id) so two of them cannot resume each other's thread.
-publishes = ["model.invoked"]
+# Provenance takes the same control path as dispatch-implement's.
 
 # The other half of the reaper's contract. A shard that announced is not silent,
 # so its marker has to go; without this the reaper reported every successful
